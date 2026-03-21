@@ -5,13 +5,12 @@ import time
 import random
 import psutil
 from pathlib import Path
-from typing import List, Tuple
 
 from .config import BenchmarkConfig, DEFAULT_CONFIG
 from .metrics import PerformanceMetrics
 
 try:
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
     RICH_PROGRESS_AVAILABLE = True
 except ImportError:
     RICH_PROGRESS_AVAILABLE = False
@@ -45,7 +44,7 @@ class ServerBenchmark:
         """设置进度回调函数"""
         self.progress_callback = callback
     
-    def _get_resource_usage(self) -> Tuple[float, float, int, int]:
+    def _get_resource_usage(self) -> tuple[float, float, int, int]:
         """获取当前资源使用情况"""
         try:
             process = psutil.Process()
@@ -69,7 +68,7 @@ class ServerBenchmark:
         except:
             return 0.0, 0.0, 0, 0
     
-    async def _warmup(self, file_paths: List[str]):
+    async def _warmup(self, file_paths: list[str]):
         """预热：读取文件到缓存"""
         for path in file_paths:
             try:
@@ -91,7 +90,7 @@ class ServerBenchmark:
             except:
                 pass
     
-    async def test_aiowinfile(self, file_paths: List[str], num_clients: int) -> PerformanceMetrics:
+    async def test_aiowinfile(self, file_paths: list[str], num_clients: int) -> PerformanceMetrics:
         """测试 aiowinfile - 真正的异步"""
         if not self.aiowinfile_available:
             return PerformanceMetrics(name="aiowinfile", completed=False)
@@ -181,7 +180,7 @@ class ServerBenchmark:
         
         return metrics
     
-    async def test_aiofiles(self, file_paths: List[str], num_clients: int) -> PerformanceMetrics:
+    async def test_aiofiles(self, file_paths: list[str], num_clients: int) -> PerformanceMetrics:
         """测试 aiofiles - 相同并发数，带超时"""
         if not self.aiofiles_available:
             return PerformanceMetrics(name="aiofiles", completed=False)
@@ -210,7 +209,7 @@ class ServerBenchmark:
         
         return metrics
     
-    async def _run_aiofiles_test(self, file_paths: List[str], num_clients: int) -> PerformanceMetrics:
+    async def _run_aiofiles_test(self, file_paths: list[str], num_clients: int) -> PerformanceMetrics:
         """实际运行 aiofiles 测试"""
         metrics = PerformanceMetrics()
         metrics.name = "aiofiles (线程池模拟)"
@@ -370,7 +369,7 @@ class ServerBenchmark:
         
         return file_paths
     
-    async def run_fair_comparison(self, file_paths: List[str], client_counts: List[int] = None, console=None):
+    async def run_fair_comparison(self, file_paths: list[str], client_counts: list[int] = None, console=None) -> list[PerformanceMetrics]:
         """运行公平对比测试"""
         if client_counts is None:
             client_counts = self.config.client_counts
@@ -395,18 +394,18 @@ class ServerBenchmark:
 
         for clients in client_counts:
             if progress is not None:
-                progress.update(task, description=f"aiowinfile {clients}并发 测试中")
+                progress.update(task, description=f"aiowinfile {clients}并发 测试中") # type: ignore
             win_metrics = await self.test_aiowinfile(file_paths, clients)
             results.append(win_metrics)
             if progress is not None:
-                progress.update(task, advance=1)
+                progress.update(task, advance=1) # type: ignore
 
             if progress is not None:
-                progress.update(task, description=f"aiofiles {clients}并发 测试中")
+                progress.update(task, description=f"aiofiles {clients}并发 测试中") # type: ignore
             aio_metrics = await self.test_aiofiles(file_paths, clients)
             results.append(aio_metrics)
             if progress is not None:
-                progress.update(task, advance=1)
+                progress.update(task, advance=1) # type: ignore
 
             # 如果 aiofiles 连续失败，停止测试
             if not aio_metrics.completed and clients >= 100:

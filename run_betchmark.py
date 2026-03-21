@@ -5,6 +5,7 @@ import sys
 import platform
 from pathlib import Path
 import traceback
+from datetime import datetime
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -34,7 +35,7 @@ async def main():
     if console:
         console.print(Panel.fit(
             f"[bold cyan]{title}[/bold cyan]\n"
-            f"[dim]相同并发数下对比性能 - 测试时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
+            f"[dim]相同并发数下对比性能 - 测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
             border_style="cyan"
         ))
     else:
@@ -104,7 +105,7 @@ async def main():
         'python_version': platform.python_version(),
         'cpu_count': os.cpu_count(),
         'duration': DEFAULT_CONFIG.duration_seconds,
-        'test_time': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'test_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
     
     for r in results:
