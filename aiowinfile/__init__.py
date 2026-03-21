@@ -1,7 +1,6 @@
 import sys
 import locale
 from pathlib import Path
-from typing import Union
 
 if sys.platform != "win32":
     raise OSError("aiowinfile only supports Windows (IOCP-based async I/O).")
@@ -38,7 +37,7 @@ class AsyncFile:
 
     def __init__(
         self,
-        path: Union[str, Path],
+        path: str | Path,
         mode: str = "rb",
         encoding: str | None = None,
     ) -> None:
@@ -80,7 +79,7 @@ class AsyncFile:
     def __aiter__(self) -> "AsyncFile":
         return self
 
-    async def __anext__(self) -> Union[str, bytes]:
+    async def __anext__(self) -> str | bytes:
         line = await self.readline()
         if not line:
             raise StopAsyncIteration
@@ -88,13 +87,13 @@ class AsyncFile:
 
     # ── read ──────────────────────────────────────────────────────────────────
 
-    async def read(self, size: int = -1) -> Union[str, bytes]:
+    async def read(self, size: int = -1) -> str | bytes:
         data: bytes = await self._impl.read(size)
         if not data:
             return "" if self._is_text else b""
-        return data.decode(self._encoding) if self._is_text else data
+        return data.decode(self._encoding) if self._is_text else data # type: ignore
 
-    async def readline(self) -> Union[str, bytes]:
+    async def readline(self) -> str | bytes:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
         sep = b"\n"
@@ -105,13 +104,13 @@ class AsyncFile:
                     self._line_buffer[: idx + 1],
                     self._line_buffer[idx + 1 :],
                 )
-                return line.decode(self._encoding) if self._is_text else line
+                return line.decode(self._encoding) if self._is_text else line # type: ignore
 
             chunk: bytes = await self._impl.read(_DEFAULT_READLINE_BUF)
             if not chunk:
                 if self._line_buffer:
                     out, self._line_buffer = self._line_buffer, b""
-                    return out.decode(self._encoding) if self._is_text else out
+                    return out.decode(self._encoding) if self._is_text else out # type: ignore
                 return "" if self._is_text else b""
             self._line_buffer += chunk
 
@@ -133,11 +132,11 @@ class AsyncFile:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
-    async def write(self, data: Union[str, bytes, bytearray, memoryview]) -> int:
+    async def write(self, data: str | bytes | bytearray | memoryview) -> int:
         if self._is_text:
             if not isinstance(data, str):
                 raise TypeError("Text mode requires str input.")
-            raw: bytes = data.encode(self._encoding)
+            raw: bytes = data.encode(self._encoding) # type: ignore
         else:
             if isinstance(data, str):
                 raise TypeError("Binary mode requires bytes-like input, not str.")
@@ -175,7 +174,7 @@ class AsyncFile:
     @classmethod
     def open(
         cls,
-        path: Union[str, Path],
+        path: str | Path,
         mode: str = "rb",
         encoding: str | None = None,
     ) -> "AsyncFile":
@@ -183,7 +182,7 @@ class AsyncFile:
 
 
 def open(
-    path: Union[str, Path],
+    path: str | Path,
     mode: str = "rb",
     encoding: str | None = None,
 ) -> AsyncFile:

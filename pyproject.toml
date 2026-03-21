@@ -1,18 +1,52 @@
 [build-system]
-requires = ["setuptools>=61", "wheel", "pybind11>=2.10"]
+requires = ["setuptools>=61", "wheel", "pybind11>=2.10", "pybind11-global"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "aiowinfile"
+version = "0.2.0"
+description = "Async Windows IOCP file API for Python"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Patchouli-CN", email = "your.email@example.com"}
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License", # 或者你的许可证
-    "Operating System :: Microsoft :: Windows", # 🚩 核心标记：告诉 PyPI 和 pip 这只是给 Windows 的
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: C++",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Hardware :: Hardware Drivers",
 ]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Patchouli-CN/aiowinfile"
+Repository = "https://github.com/Patchouli-CN/aiowinfile.git"
+
+[tool.setuptools]
+packages = ["aiowinfile"]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+include = ["aiowinfile*"]
+
+[tool.setuptools.ext-modules]
+"aiowinfile._aiowinfile" = {sources = [
+    "src/globals.cpp",
+    "src/pool.cpp",
+    "src/loop_handle.cpp",
+    "src/iocp.cpp",
+    "src/file_handle.cpp",
+    "src/handle_pool.cpp",
+    "src/bindings.cpp",
+]}
