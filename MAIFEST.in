@@ -1,0 +1,4 @@
+# MANIFEST.in
+include README.md
+include LICENSE
+recursive-include aiowinfile *.py *.pyd *.pyi
