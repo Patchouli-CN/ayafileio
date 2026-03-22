@@ -93,7 +93,7 @@ This reuses file handles across open/close cycles, reducing expensive `CreateFil
 
 ```python
 class AsyncFile:
-    def __init__(self, path: str | Path, mode: str = "rb", encoding: str | None = None)
+    def __init__(self, path: str | Path, mode: str = "rb", encoding: str | None = None): ...
     async def read(self, size: int = -1) -> str | bytes: ...
     async def write(self, data: str | bytes) -> int: ...
     async def seek(self, offset: int, whence: int = 0) -> int: ...
@@ -115,8 +115,8 @@ class AsyncFile:
 ### Functions
 
 ```python
-def set_handle_pool_limits(max_per_key: int, max_total: int) -> None
-def get_handle_pool_limits() -> tuple[int, int]
+def set_handle_pool_limits(max_per_key: int, max_total: int) -> None: ...
+def get_handle_pool_limits() -> tuple[int, int]: ...
 ```
 
 ## 🧪 Running Benchmarks
