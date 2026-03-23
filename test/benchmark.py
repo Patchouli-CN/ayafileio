@@ -18,7 +18,7 @@ except ImportError:
 try:
     import aiowinfile
     # 性能调优可以加这个，让测试结果更准确
-    # aiowinfile.set_handle_pool_limits(512, 16384)
+    aiowinfile.set_handle_pool_limits(512, 16384)
 except ImportError:
     aiowinfile = None
 
