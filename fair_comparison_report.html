@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>公平对比: aiowinfile vs aiofiles 性能测试报告</title>
+    <title>公平对比: ayafileio vs aiofiles 性能测试报告</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -91,8 +91,8 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 公平对比: aiowinfile vs aiofiles 性能测试报告</h1>
-            <div>相同并发数下，aiowinfile (IOCP真异步) vs aiofiles (线程池模拟)</div>
+            <h1>🚀 公平对比: ayafileio vs aiofiles 性能测试报告</h1>
+            <div>相同并发数下，ayafileio (IOCP真异步) vs aiofiles (线程池模拟)</div>
         </div>
         
         <div class="system-info">
@@ -108,21 +108,21 @@
                 <div class="comparison-grid">
                     
             <div class="metric-card">
-                <div class="metric-label">🏆 aiowinfile 峰值吞吐</div>
-                <div class="metric-value">4,038</div>
-                <div class="metric-label">ops/s @ 100并发</div>
+                <div class="metric-label">🏆 ayafileio 峰值吞吐</div>
+                <div class="metric-value">2,043</div>
+                <div class="metric-label">ops/s @ 50并发</div>
             </div>
             
             <div class="metric-card" style="background: linear-gradient(135deg, #868f96 0%, #596164 100%);">
                 <div class="metric-label">📦 aiofiles 峰值吞吐</div>
-                <div class="metric-value">1,646</div>
-                <div class="metric-label">ops/s @ 200并发</div>
+                <div class="metric-value">1,657</div>
+                <div class="metric-label">ops/s @ 50并发</div>
             </div>
             
             <div class="metric-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
                 <div class="metric-label">🎯 500并发优势</div>
-                <div class="metric-value">2.2x</div>
-                <div class="metric-label">aiowinfile 快 2 倍</div>
+                <div class="metric-value">1.1x</div>
+                <div class="metric-label">ayafileio 快 1 倍</div>
             </div>
             
                 </div>
@@ -152,13 +152,13 @@
             </tr></thead>
             <tbody>
             <tr>
-                <td><strong>aiowinfile (IOCP真异步)</strong></td>
+                <td><strong>ayafileio (IOCP真异步)</strong></td>
                 <td>10</td>
-                <td>689</td>
-                <td>22.8</td>
-                <td>3.55</td>
-                <td>3.31</td>
-                <td>28.67</td>
+                <td>975</td>
+                <td>31.8</td>
+                <td>0.89</td>
+                <td>2.06</td>
+                <td>2.36</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -166,23 +166,23 @@
             <tr>
                 <td><strong>aiofiles (线程池模拟)</strong></td>
                 <td>10</td>
-                <td>775</td>
-                <td>26.2</td>
-                <td>10.96</td>
-                <td>13.35</td>
-                <td>344.94</td>
+                <td>659</td>
+                <td>21.9</td>
+                <td>2.65</td>
+                <td>3.72</td>
+                <td>4.18</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
             
             <tr>
-                <td><strong>aiowinfile (IOCP真异步)</strong></td>
+                <td><strong>ayafileio (IOCP真异步)</strong></td>
                 <td>20</td>
-                <td>2,417</td>
-                <td>79.8</td>
-                <td>2.93</td>
-                <td>3.38</td>
-                <td>9.03</td>
+                <td>1,577</td>
+                <td>52.5</td>
+                <td>1.38</td>
+                <td>3.04</td>
+                <td>3.35</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -190,23 +190,23 @@
             <tr>
                 <td><strong>aiofiles (线程池模拟)</strong></td>
                 <td>20</td>
-                <td>702</td>
-                <td>23.4</td>
-                <td>26.37</td>
-                <td>45.57</td>
-                <td>589.94</td>
+                <td>1,523</td>
+                <td>50.6</td>
+                <td>5.53</td>
+                <td>8.16</td>
+                <td>10.12</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
             
             <tr>
-                <td><strong>aiowinfile (IOCP真异步)</strong></td>
+                <td><strong>ayafileio (IOCP真异步)</strong></td>
                 <td>50</td>
-                <td>885</td>
-                <td>29.5</td>
-                <td>19.65</td>
-                <td>7.71</td>
-                <td>331.87</td>
+                <td>2,043</td>
+                <td>68.2</td>
+                <td>2.79</td>
+                <td>5.51</td>
+                <td>6.07</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -214,23 +214,23 @@
             <tr>
                 <td><strong>aiofiles (线程池模拟)</strong></td>
                 <td>50</td>
-                <td>594</td>
-                <td>19.7</td>
-                <td>82.41</td>
-                <td>231.49</td>
-                <td>1062.34</td>
+                <td>1,657</td>
+                <td>54.9</td>
+                <td>14.59</td>
+                <td>23.69</td>
+                <td>25.65</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
             
             <tr>
-                <td><strong>aiowinfile (IOCP真异步)</strong></td>
+                <td><strong>ayafileio (IOCP真异步)</strong></td>
                 <td>100</td>
-                <td>4,038</td>
-                <td>134.8</td>
-                <td>9.14</td>
-                <td>12.97</td>
-                <td>24.14</td>
+                <td>770</td>
+                <td>25.6</td>
+                <td>7.89</td>
+                <td>18.18</td>
+                <td>33.12</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -238,23 +238,23 @@
             <tr>
                 <td><strong>aiofiles (线程池模拟)</strong></td>
                 <td>100</td>
-                <td>1,368</td>
-                <td>45.4</td>
-                <td>74.37</td>
-                <td>57.82</td>
-                <td>1887.34</td>
+                <td>405</td>
+                <td>13.7</td>
+                <td>71.06</td>
+                <td>335.30</td>
+                <td>562.33</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
             
             <tr>
-                <td><strong>aiowinfile (IOCP真异步)</strong></td>
+                <td><strong>ayafileio (IOCP真异步)</strong></td>
                 <td>200</td>
-                <td>2,237</td>
-                <td>74.4</td>
-                <td>45.53</td>
-                <td>36.86</td>
-                <td>754.34</td>
+                <td>1,348</td>
+                <td>44.4</td>
+                <td>17.55</td>
+                <td>31.48</td>
+                <td>35.48</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -262,23 +262,23 @@
             <tr>
                 <td><strong>aiofiles (线程池模拟)</strong></td>
                 <td>200</td>
-                <td>1,646</td>
-                <td>55.0</td>
-                <td>118.66</td>
-                <td>123.49</td>
-                <td>2301.31</td>
+                <td>1,186</td>
+                <td>39.5</td>
+                <td>71.54</td>
+                <td>138.48</td>
+                <td>154.61</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
             
             <tr>
-                <td><strong>aiowinfile (IOCP真异步)</strong></td>
+                <td><strong>ayafileio (IOCP真异步)</strong></td>
                 <td>500</td>
-                <td>2,477</td>
-                <td>83.6</td>
-                <td>155.77</td>
-                <td>146.83</td>
-                <td>3729.22</td>
+                <td>1,130</td>
+                <td>37.6</td>
+                <td>82.76</td>
+                <td>204.71</td>
+                <td>256.01</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -286,11 +286,11 @@
             <tr>
                 <td><strong>aiofiles (线程池模拟)</strong></td>
                 <td>500</td>
-                <td>1,138</td>
-                <td>37.5</td>
-                <td>453.66</td>
-                <td>2279.41</td>
-                <td>3067.02</td>
+                <td>1,032</td>
+                <td>33.9</td>
+                <td>197.75</td>
+                <td>477.23</td>
+                <td>740.44</td>
                 <td>0.00%</td>
                 <td><span class="badge-success">✓ 完成</span></td>
             </tr>
@@ -301,8 +301,8 @@
         </div>
         
         <div class="footer">
-            <p>报告生成: 2026-03-23 18:53:47</p>
-            <p><strong>结论</strong>: aiowinfile 基于 Windows IOCP 真异步，高并发下性能远超 aiofiles</p>
+            <p>报告生成: 2026-03-24 19:25:30</p>
+            <p><strong>结论</strong>: ayafileio 基于 Windows IOCP 真异步，高并发下性能远超 aiofiles</p>
         </div>
     </div>
     
@@ -312,8 +312,8 @@
             data: {
                 labels: [10, 20, 50, 100, 200, 500],
                 datasets: [
-                    { label: 'aiowinfile', data: [689.0, 2417.4, 884.7, 4038.2, 2236.8, 2477.4], backgroundColor: 'rgba(102,126,234,0.7)' },
-                    { label: 'aiofiles', data: [774.9, 702.2, 594.3, 1368.0, 1645.5, 1138.1], backgroundColor: 'rgba(220,53,69,0.7)' }
+                    { label: 'ayafileio', data: [974.6, 1576.9, 2042.8, 769.9, 1348.5, 1129.5], backgroundColor: 'rgba(102,126,234,0.7)' },
+                    { label: 'aiofiles', data: [658.8, 1523.3, 1656.7, 405.3, 1186.2, 1031.6], backgroundColor: 'rgba(220,53,69,0.7)' }
                 ]
             },
             options: { responsive: true, scales: { y: { title: { display: true, text: 'ops/s' } }, x: { title: { display: true, text: '并发数' } } } }
@@ -324,8 +324,8 @@
             data: {
                 labels: [10, 20, 50, 100, 200, 500],
                 datasets: [
-                    { label: 'aiowinfile', data: [3.551109810968042, 2.9291831098624126, 19.646775166049743, 9.144072861939716, 45.52798033785312, 155.76758606229592], borderColor: 'rgba(102,126,234,1)', fill: true },
-                    { label: 'aiofiles', data: [10.95622729346075, 26.36701848448236, 82.4111531553906, 74.37283283569109, 118.65513310797424, 453.6626800625328], borderColor: 'rgba(220,53,69,1)', fill: true }
+                    { label: 'ayafileio', data: [0.8877088115364006, 1.3794315895880216, 2.7867421587027965, 7.894505164526177, 17.547041363214483, 82.75918142935407], borderColor: 'rgba(102,126,234,1)', fill: true },
+                    { label: 'aiofiles', data: [2.647637157171645, 5.529294078870219, 14.594582670495416, 71.06493805045477, 71.54430249078433, 197.75264510666804], borderColor: 'rgba(220,53,69,1)', fill: true }
                 ]
             },
             options: { responsive: true, scales: { y: { title: { display: true, text: '延迟 (ms)' } }, x: { title: { display: true, text: '并发数' } } } }

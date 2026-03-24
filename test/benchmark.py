@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import BenchmarkConfig, DEFAULT_CONFIG
 from .metrics import PerformanceMetrics
+import statistics
 
 try:
     from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
@@ -395,21 +396,31 @@ class ServerBenchmark:
             task = None
 
         for clients in client_counts:
-            if progress is not None:
-                progress.update(task, description=f"aiowinfile {clients}并发 测试中") # type: ignore
-            win_metrics = await self.test_ayafileio(file_paths, clients)
+            # ayafileio 多次运行并聚合
+            win_runs = []
+            for i in range(self.config.repeats):
+                if progress is not None:
+                    progress.update(task, description=f"ayafileio {clients}并发 第{i+1}/{self.config.repeats} 次")
+                win_runs.append(await self.test_ayafileio(file_paths, clients))
+                await asyncio.sleep(0.5)
+            win_metrics = self._aggregate_metrics(win_runs)
             results.append(win_metrics)
             if progress is not None:
-                progress.update(task, advance=1) # type: ignore
+                progress.update(task, advance=1)
 
-            if progress is not None:
-                progress.update(task, description=f"aiofiles {clients}并发 测试中") # type: ignore
-            aio_metrics = await self.test_aiofiles(file_paths, clients)
+            # aiofiles 多次运行并聚合
+            aio_runs = []
+            for i in range(self.config.repeats):
+                if progress is not None:
+                    progress.update(task, description=f"aiofiles {clients}并发 第{i+1}/{self.config.repeats} 次")
+                aio_runs.append(await self.test_aiofiles(file_paths, clients))
+                await asyncio.sleep(0.5)
+            aio_metrics = self._aggregate_metrics(aio_runs)
             results.append(aio_metrics)
             if progress is not None:
-                progress.update(task, advance=1) # type: ignore
+                progress.update(task, advance=1)
 
-            # 如果 aiofiles 连续失败，停止测试
+            # 如果 aiofiles 在较大并发下持续不完成，停止测试
             if not aio_metrics.completed and clients >= 100:
                 break
 
@@ -418,3 +429,53 @@ class ServerBenchmark:
             progress.refresh()
 
         return results
+
+    def _aggregate_metrics(self, metrics_list: list[PerformanceMetrics]) -> PerformanceMetrics:
+        """将多次运行的结果聚合为一个稳定的指标，剔除两侧异常值并取中位数/中位延迟等。"""
+        if not metrics_list:
+            return PerformanceMetrics(completed=False)
+
+        # 优先使用已完成的运行
+        completed = [m for m in metrics_list if m.completed]
+        use = completed if completed else metrics_list
+
+        # 聚合基本数值使用中位数
+        ops = [m.total_operations for m in use]
+        times = [m.total_time for m in use]
+        bytes_ = [m.total_bytes for m in use]
+        errors = [m.error_count for m in use]
+
+        agg = PerformanceMetrics()
+        agg.name = use[0].name
+        agg.concurrent_clients = use[0].concurrent_clients
+        agg.total_operations = int(statistics.median(ops)) if ops else 0
+        agg.total_time = float(statistics.median(times)) if times else 0.0
+        agg.total_bytes = int(statistics.median(bytes_)) if bytes_ else 0
+        agg.error_count = int(statistics.median(errors)) if errors else 0
+
+        # 合并并修剪延迟数据以去掉抖动导致的异常值
+        combined_lat = []
+        for m in use:
+            combined_lat.extend(m.raw_latencies)
+        combined_lat.sort()
+        n = len(combined_lat)
+        drop = int(n * self.config.discard_fraction_per_side)
+        if n > 20 and drop > 0 and n > drop * 2:
+            trimmed = combined_lat[drop: n - drop]
+        else:
+            trimmed = combined_lat
+
+        agg.raw_latencies = trimmed
+        agg.calculate_percentiles()
+
+        # 资源使用取中位数
+        try:
+            agg.cpu_usage = statistics.median([m.cpu_usage for m in use])
+            agg.memory_usage = statistics.median([m.memory_usage for m in use])
+            agg.thread_count = int(statistics.median([m.thread_count for m in use]))
+            agg.handle_count = int(statistics.median([m.handle_count for m in use]))
+        except Exception:
+            pass
+
+        agg.completed = all(m.completed for m in metrics_list)
+        return agg

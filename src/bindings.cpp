@@ -56,14 +56,16 @@ PYBIND11_MODULE(_ayafileio, m) {
     init_iocp();
 #endif
 
-    auto atexit = py::module_::import("atexit");
-    atexit.attr("register")(py::cpp_function([]() {
-#ifdef _WIN32
-        close_all_files();
+    // 清理由 Python 层负责注册；在 C++ 层暴露一个可调用的 cleanup()
+    m.def("cleanup", []() {
+        // 总是先尝试 drain handle pool（跨平台）
         handle_pool_drain();
+#ifdef _WIN32
+        // Windows 特有：关闭所有打开文件并停止 IOCP
+        close_all_files();
         shutdown_iocp();
 #endif
-    }));
+    }, "Perform native cleanup (safe to call from Python atexit)");
 
     py::class_<PyAsyncFile>(m, "AsyncFile")
         .def(py::init<const std::string &, const std::string &>(),

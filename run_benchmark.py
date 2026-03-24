@@ -31,7 +31,7 @@ async def main():
     console = Console() if RICH_AVAILABLE else None
     
     # 打印标题
-    title = "🚀 公平对比测试: aiowinfile (IOCP真异步) vs aiofiles (线程池模拟)"
+    title = "🚀 公平对比测试: ayafileio (IOCP真异步) vs aiofiles (线程池模拟)"
     if console:
         console.print(Panel.fit(
             f"[bold cyan]{title}[/bold cyan]\n"
@@ -45,17 +45,17 @@ async def main():
     
     # 检查依赖
     try:
-        import aiowinfile
-        console.print("[green]✅ aiowinfile: 可用[/green]")
+        import ayafileio
+        console.print("[green]✅ ayafileio: 可用[/green]")
     except ImportError:
-        console.print("[red]❌ aiowinfile: 不可用，请先安装[/red]")
+        console.print("[red]❌ ayafileio: 不可用，请先安装[/red]")
         return
     
     try:
         import aiofiles
         console.print("[yellow]📦 aiofiles: 可用[/yellow]")
     except ImportError:
-        console.print("[yellow]⚠️  aiofiles: 不可用，将只测试 aiowinfile[/yellow]")
+        console.print("[yellow]⚠️  aiofiles: 不可用，将只测试 ayafileio[/yellow]")
     
     # 创建测试目录
     test_dir = Path("./benchmark_data")

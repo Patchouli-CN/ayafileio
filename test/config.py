@@ -31,6 +31,10 @@ class BenchmarkConfig:
     
     # 是否清理系统缓存（需要管理员权限）
     clear_cache: bool = False
+    # 每个测试点重复次数（取中间值以降低噪声）
+    repeats: int = 3
+    # 去除延迟分布中两端的比例（每侧），用于剔除抖动导致的异常值
+    discard_fraction_per_side: float = 0.10
 
 
 # 默认配置

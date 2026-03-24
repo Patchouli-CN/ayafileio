@@ -7,8 +7,20 @@ from ._ayafileio import (
     set_handle_pool_limits as _set_handle_pool_limits,
     get_handle_pool_limits as _get_handle_pool_limits,
 )
-if sys.platform == "win32":
-    from ._ayafileio import set_iocp_worker_count as _set_iocp_worker_count
+# 尝试导入 Windows 专用的 set_iocp_worker_count（如果扩展在该平台上提供）
+_has_native_set_iocp = False
+try:
+    if sys.platform == "win32":
+        from ._ayafileio import set_iocp_worker_count as _set_iocp_worker_count
+        _has_native_set_iocp = True
+except Exception:
+    _has_native_set_iocp = False
+
+# 导入本机 cleanup（若存在）
+try:
+    from ._ayafileio import cleanup as _native_cleanup
+except Exception:
+    _native_cleanup = None
 
 _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 
@@ -25,14 +37,54 @@ def get_handle_pool_limits() -> tuple[int, int]:
     return _get_handle_pool_limits()
 
 
-if sys.platform == "win32":
-    def set_iocp_worker_count(count: int = 0) -> None:
-        """设置 IOCP 工作线程数量。
+def set_io_worker_count(count: int = 0) -> None:
+    """通用的设置 I/O worker 数量的接口（跨平台）。
 
-        Args:
-            count: 0=自动（CPU核心数*2，上限16），1-128=固定数量
-        """
-        _set_iocp_worker_count(count)
+    在 Windows 上这会委托给底层的 `set_iocp_worker_count`；在非 Windows 平台
+    暂时仅做参数校验并记录到模块状态，供后续后端实现使用。
+
+    Args:
+        count: 0=自动（推荐），1-128=固定数量
+    """
+    if not isinstance(count, int):
+        raise TypeError("count must be int")
+    if not (count == 0 or (1 <= count <= 128)):
+        raise ValueError("worker count must be 0 (auto) or 1-128")
+    if _has_native_set_iocp:
+        _set_iocp_worker_count(count) # type: ignore
+    else:
+        # 非 Windows 平台：记录到模块变量，供未来后端使用或查询
+        globals()['_io_worker_count'] = count
+
+
+def set_iocp_worker_count(count: int = 0) -> None:
+    """兼容旧 API 的别名，指向 `set_io_worker_count`。"""
+    set_io_worker_count(count)
+
+
+def _register_native_cleanup() -> None:
+    """在 Python 层统一注册本机清理逻辑，避免直接在本机层注册 atexit 导致的潜在不安全行为。"""
+    if _native_cleanup is None:
+        return
+
+    try:
+        import atexit as _atexit
+
+        def _cleanup_wrapper() -> None:
+            try:
+                _native_cleanup() # type: ignore
+            except Exception:
+                # 在解释器退出期间忽略异常，避免抛出
+                pass
+
+        _atexit.register(_cleanup_wrapper)
+    except Exception:
+        # 极少情况：若无法导入 atexit，则静默忽略
+        pass
+
+
+# 执行注册
+_register_native_cleanup()
 
 
 class AsyncFile:
@@ -206,10 +258,10 @@ def open(
 
     示例::
 
-        async with aiowinfile.open('data.bin', 'rb') as f:
+        async with ayafileio.open('data.bin', 'rb') as f:
             data = await f.read()
 
-        async with aiowinfile.open('log.txt', 'w', encoding='utf-8') as f:
+        async with ayafileio.open('log.txt', 'w', encoding='utf-8') as f:
             await f.write('hello')
     """
     return AsyncFile(path, mode, encoding)

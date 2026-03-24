@@ -25,7 +25,7 @@ class HTMLReportGenerator:
     def generate(self, output_path: Path) -> str:
         """生成 HTML 报告"""
         # 分组结果
-        win_results = [r for r in self.results if 'aiowinfile' in r.name and r.completed]
+        win_results = [r for r in self.results if 'ayafileio' in r.name and r.completed]
         aio_results = [r for r in self.results if 'aiofiles' in r.name and r.completed]
         
         # 准备图表数据
@@ -132,7 +132,7 @@ class HTMLReportGenerator:
     <div class="container">
         <div class="header">
             <h1>🚀 {self.title}</h1>
-            <div>相同并发数下，aiowinfile (IOCP真异步) vs aiofiles (线程池模拟)</div>
+            <div>相同并发数下，ayafileio (IOCP真异步) vs aiofiles (线程池模拟)</div>
         </div>
         
         <div class="system-info">
@@ -172,7 +172,7 @@ class HTMLReportGenerator:
         
         <div class="footer">
             <p>报告生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <p><strong>结论</strong>: aiowinfile 基于 Windows IOCP 真异步，高并发下性能远超 aiofiles</p>
+            <p><strong>结论</strong>: ayafileio 基于 Windows IOCP 真异步，高并发下性能远超 aiofiles</p>
         </div>
     </div>
     
@@ -182,7 +182,7 @@ class HTMLReportGenerator:
             data: {{
                 labels: {json.dumps(all_clients)},
                 datasets: [
-                    {{ label: 'aiowinfile', data: {json.dumps(win_ops)}, backgroundColor: 'rgba(102,126,234,0.7)' }},
+                    {{ label: 'ayafileio', data: {json.dumps(win_ops)}, backgroundColor: 'rgba(102,126,234,0.7)' }},
                     {{ label: 'aiofiles', data: {json.dumps(aio_ops)}, backgroundColor: 'rgba(220,53,69,0.7)' }}
                 ]
             }},
@@ -194,7 +194,7 @@ class HTMLReportGenerator:
             data: {{
                 labels: {json.dumps(all_clients)},
                 datasets: [
-                    {{ label: 'aiowinfile', data: {json.dumps(win_latency)}, borderColor: 'rgba(102,126,234,1)', fill: true }},
+                    {{ label: 'ayafileio', data: {json.dumps(win_latency)}, borderColor: 'rgba(102,126,234,1)', fill: true }},
                     {{ label: 'aiofiles', data: {json.dumps(aio_latency)}, borderColor: 'rgba(220,53,69,1)', fill: true }}
                 ]
             }},
@@ -223,7 +223,7 @@ class HTMLReportGenerator:
         if win_max:
             cards.append(f"""
             <div class="metric-card">
-                <div class="metric-label">🏆 aiowinfile 峰值吞吐</div>
+                <div class="metric-label">🏆 ayafileio 峰值吞吐</div>
                 <div class="metric-value">{win_max.ops_per_second:,.0f}</div>
                 <div class="metric-label">ops/s @ {win_max.concurrent_clients}并发</div>
             </div>
@@ -249,7 +249,7 @@ class HTMLReportGenerator:
             <div class="metric-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
                 <div class="metric-label">🎯 {max_common}并发优势</div>
                 <div class="metric-value">{ratio:.1f}x</div>
-                <div class="metric-label">aiowinfile 快 {ratio:.0f} 倍</div>
+                <div class="metric-label">ayafileio 快 {ratio:.0f} 倍</div>
             </div>
             """)
         
