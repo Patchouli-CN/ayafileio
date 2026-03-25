@@ -19,19 +19,6 @@ Unlike traditional thread-pool based approaches, `ayafileio` leverages Windows' 
 - ✅ **Configurable Handle Pool**: Tune performance for your workload (on windows)
 - ✅ **Cross Platform**: Optimized for Windows IOCP architecture, but use thread-pool on another platform
 
-## 📊 Performance
-
-Real-world benchmarks show significant advantages over thread-pool alternatives:
-
-| Concurrency | ayafileio (ops/s) | aiofiles (ops/s) | Speedup |
-|------------|-------------------|------------------|---------|
-| 10         | 688              | 1,166           | ~0.59x   |
-| 50         | 2,972            | 1,320           | ~2.3x   |
-| 200        | 2,981            | 1,244           | ~2.4x   |
-
-*Results from benchmark suite on Windows 10, HDD storage. Higher concurrency shows even greater advantages.*
-> Note: At low concurrency (10), ayafileio is slightly slower than aiofiles due to IOCP initialization overhead and kernel-mode transition costs. The advantage begins to show at 20+ concurrent operations, reaching a peak speedup of 2.4x at 200 concurrency.
-
 ## 🛠️ Installation
 
 ```bash
