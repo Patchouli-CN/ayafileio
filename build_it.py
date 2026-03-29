@@ -56,6 +56,11 @@ def main() -> int:
     p.add_argument("--yes", "-y", action="store_true", help="自动确认提示")
     p.add_argument("--platform", default="windows", help="传给 cibuildwheel 的 --platform 参数")
     args = p.parse_args()
+    
+    if os.environ.get("CI"):  # GitHub Actions、GitLab CI 等环境
+        print("Running in CI mode")
+        # 自动确认所有交互
+        args.yes = True
 
     temp_dir = Path(args.temp)
     cache_dir = temp_dir / "pip_cache"
