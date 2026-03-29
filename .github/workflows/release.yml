@@ -27,16 +27,14 @@ jobs:
       - name: Build wheels
         run: python build_it.py --platform auto --output dist --skip-install --yes
 
-      - name: Install built wheel and run tests
+      - name: Install built wheel and run tests (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-            set -euxo pipefail
-          python -m pip install --upgrade pip
-          pip install dist/*.whl
-          python -V
-          # Run the provided test script
-          python test_base.py
+          set -euxo pipefail
           echo "=== Environment ==="
+          python -V
+          pip --version
           echo "RUNNER_OS=$RUNNER_OS"
 
           echo "=== Wheel contents ==="
@@ -51,253 +49,149 @@ jobs:
 
           echo "=== Installed package info ==="
           pip show ayafileio || true
-          python - <<'PY'
-import sys,os,traceback
-print('python', sys.version)
-print('sys.path:')
-print('\n'.join(sys.path))
-try:
-    import ayafileio
-    print('ayafileio __file__ =', ayafileio.__file__)
-    print('package dir listing:')
-    print('\n'.join(os.listdir(os.path.dirname(ayafileio.__file__))))
-except Exception:
-    traceback.print_exc()
-    # continue to attempt import of extension specifically
-try:
-    import importlib
-    importlib.import_module('ayafileio._ayafileio')
-    print('Successfully imported ayafileio._ayafileio')
-except Exception:
-    import traceback
-    print('Failed to import ayafileio._ayafileio:')
-    traceback.print_exc()
-    # dump available files under package for debugging
-    try:
-        import ayafileio, glob
-        pkgdir = os.path.dirname(ayafileio.__file__)
-        print('pkgdir =', pkgdir)
-        print('candidates:')
-        print('\n'.join(glob.glob(os.path.join(pkgdir,'*'))))
-    except Exception:
-        pass
-PY
+
+          cat > diag.py <<'PY'
+          import sys,os,traceback,glob
+          print('python', sys.version)
+          print('sys.path:')
+          print('\n'.join(sys.path))
+          try:
+              import ayafileio
+              print('ayafileio __file__ =', ayafileio.__file__)
+              print('package dir listing:')
+              print('\n'.join(os.listdir(os.path.dirname(ayafileio.__file__))))
+          except Exception:
+              traceback.print_exc()
+          try:
+              import importlib
+              importlib.import_module('ayafileio._ayafileio')
+              print('Successfully imported ayafileio._ayafileio')
+          except Exception:
+              import traceback
+              print('Failed to import ayafileio._ayafileio:')
+              traceback.print_exc()
+              try:
+                  import ayafileio, glob, os
+                  pkgdir = os.path.dirname(ayafileio.__file__)
+                  print('pkgdir =', pkgdir)
+                  print('candidates:')
+                  print('\n'.join(glob.glob(os.path.join(pkgdir,'*'))))
+              except Exception:
+                  pass
+          PY
+
+          python diag.py || true
+          rm -f diag.py
 
           echo "=== Inspect binary dependencies ==="
-          # find candidate extension files and inspect with ldd/otool when available
-          python - <<'PY'
-import os,glob,ayafileio
-pkgdir=os.path.dirname(ayafileio.__file__)
-files=glob.glob(os.path.join(pkgdir,'*.so'))+glob.glob(os.path.join(pkgdir,'*.dylib'))+glob.glob(os.path.join(pkgdir,'*.pyd'))
-print('\n'.join(files))
-PY
+          for f in $(python - <<'PY'
+          import os,glob,ayafileio
+          pkgdir=os.path.dirname(ayafileio.__file__)
+          print(' '.join(glob.glob(os.path.join(pkgdir,'*.so'))))
+          PY
+          ); do
+            if [ -n "$f" ]; then
+              echo "ldd $f"; ldd "$f" || true
+            fi
+          done
 
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            for f in $(python - <<'PY'
-import os,glob,ayafileio
-pkgdir=os.path.dirname(ayafileio.__file__)
-print(' '.join(glob.glob(os.path.join(pkgdir,'*.so'))))
-PY
-); do
-              if [ -n "$f" ]; then
-                echo "ldd $f"; ldd "$f" || true
-              fi
-            done
-          fi
+          for f in $(python - <<'PY'
+          import os,glob,ayafileio
+          pkgdir=os.path.dirname(ayafileio.__file__)
+          print(' '.join(glob.glob(os.path.join(pkgdir,'*.so'))))
+          PY
+          ); do
+            if [ -n "$f" ]; then
+              echo "otool -L $f"; otool -L "$f" || true
+            fi
+          done || true
 
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            for f in $(python - <<'PY'
-import os,glob,ayafileio
-pkgdir=os.path.dirname(ayafileio.__file__)
-print(' '.join(glob.glob(os.path.join(pkgdir,'*.so'))))
-PY
-); do
-              if [ -n "$f" ]; then
-                echo "otool -L $f"; otool -L "$f" || true
-              fi
-            done
-          fi
-
-        - name: Install built wheel and run tests (Linux/macOS)
-          if: runner.os != 'Windows'
-          shell: bash
-          run: |
-            set -euxo pipefail
-            echo "=== Environment ==="
-            python -V
-            pip --version
-            echo "RUNNER_OS=$RUNNER_OS"
-
-            echo "=== Wheel contents ==="
-            ls -la dist || true
-            unzip -l dist/*.whl || true
-
-            echo "=== Upgrade build tools ==="
-            python -m pip install --upgrade pip setuptools wheel
-
-            echo "=== Installing wheel ==="
-            pip install dist/*.whl
-
-            echo "=== Installed package info ==="
-            pip show ayafileio || true
-
-            cat > diag.py <<'PY'
-  import sys,os,traceback,glob
-  print('python', sys.version)
-  print('sys.path:')
-  print('\n'.join(sys.path))
-  try:
-      import ayafileio
-      print('ayafileio __file__ =', ayafileio.__file__)
-      print('package dir listing:')
-      print('\n'.join(os.listdir(os.path.dirname(ayafileio.__file__))))
-  except Exception:
-      traceback.print_exc()
-  try:
-      import importlib
-      importlib.import_module('ayafileio._ayafileio')
-      print('Successfully imported ayafileio._ayafileio')
-  except Exception:
-      import traceback
-      print('Failed to import ayafileio._ayafileio:')
-      traceback.print_exc()
-      try:
-          import ayafileio, glob, os
-          pkgdir = os.path.dirname(ayafileio.__file__)
-          print('pkgdir =', pkgdir)
-          print('candidates:')
-          print('\n'.join(glob.glob(os.path.join(pkgdir,'*'))))
-      except Exception:
-          pass
-  PY
-
-            python diag.py || true
-            rm -f diag.py
-
-            echo "=== Inspect binary dependencies ==="
-            for f in $(python - <<'PY'
-  import os,glob,ayafileio
-  pkgdir=os.path.dirname(ayafileio.__file__)
-  print(' '.join(glob.glob(os.path.join(pkgdir,'*.so'))))
-  PY
-  ); do
-              if [ -n "$f" ]; then
-                echo "ldd $f"; ldd "$f" || true
-              fi
-            done
-
-            for f in $(python - <<'PY'
-  import os,glob,ayafileio
-  pkgdir=os.path.dirname(ayafileio.__file__)
-  print(' '.join(glob.glob(os.path.join(pkgdir,'*.so'))))
-  PY
-  ); do
-              if [ -n "$f" ]; then
-                echo "otool -L $f"; otool -L "$f" || true
-              fi
-            done || true
-
-            echo "=== Run test_base.py (capture full traceback) ==="
-            python test_base.py || (
-              echo "test_base.py failed — showing Python import diagnostics";
-              python - <<'PY'
-  import traceback,sys
-  try:
-      import ayafileio
-      print('ayafileio imported, __file__:', ayafileio.__file__)
-  except Exception:
-      traceback.print_exc()
-      sys.exit(1)
-  PY
-              exit 1
-            )
-
-        - name: Install built wheel and run tests (Windows)
-          if: runner.os == 'Windows'
-          shell: pwsh
-          run: |
-            $ErrorActionPreference = 'Stop'
-            Write-Host '=== Environment ==='
-            python -V
-            pip --version
-
-            Write-Host '=== Wheel contents ==='
-            Get-ChildItem -Path dist -File -Force | Format-Table
-            python -m zipfile -l (Get-ChildItem dist -Filter *.whl | Select-Object -First 1).FullName
-
-            Write-Host '=== Upgrade build tools ==='
-            python -m pip install --upgrade pip setuptools wheel
-
-            Write-Host '=== Installing wheel ==='
-            pip install dist\*.whl
-
-            Write-Host '=== Installed package info ==='
-            pip show ayafileio -v || Write-Host 'pip show failed'
-
-            $diag = @'
-  import sys,os,traceback,glob
-  print('python', sys.version)
-  print('sys.path:')
-  print('\n'.join(sys.path))
-  try:
-      import ayafileio
-      print('ayafileio __file__ =', ayafileio.__file__)
-      print('package dir listing:')
-      print('\n'.join(os.listdir(os.path.dirname(ayafileio.__file__))))
-  except Exception:
-      traceback.print_exc()
-  try:
-      import importlib
-      importlib.import_module('ayafileio._ayafileio')
-      print('Successfully imported ayafileio._ayafileio')
-  except Exception:
-      import traceback
-      print('Failed to import ayafileio._ayafileio:')
-      traceback.print_exc()
-      try:
-          import ayafileio, glob, os
-          pkgdir = os.path.dirname(ayafileio.__file__)
-          print('pkgdir =', pkgdir)
-          print('candidates:')
-          print('\n'.join(glob.glob(os.path.join(pkgdir,'*'))))
-      except Exception:
-          pass
-  '@
-
-            $diag | Out-File -Encoding utf8 diag.py
-            python diag.py
-            Remove-Item diag.py -Force
-
-            Write-Host '=== Run test_base.py (capture full traceback) ==='
-            try {
-              python test_base.py
-            } catch {
-              Write-Host 'test_base.py failed — showing Python import diagnostics'
-              python - <<'PY'
-  import traceback,sys
-  try:
-      import ayafileio
-      print('ayafileio imported, __file__:', ayafileio.__file__)
-  except Exception:
-      traceback.print_exc()
-      sys.exit(1)
-  PY
-              exit 1
-            }
           echo "=== Run test_base.py (capture full traceback) ==="
           python test_base.py || (
             echo "test_base.py failed — showing Python import diagnostics";
             python - <<'PY'
-import traceback,sys
-try:
-    import ayafileio
-    print('ayafileio imported, __file__:', ayafileio.__file__)
-except Exception:
-    traceback.print_exc()
-    sys.exit(1)
-PY
+            import traceback,sys
+            try:
+                import ayafileio
+                print('ayafileio imported, __file__:', ayafileio.__file__)
+            except Exception:
+                traceback.print_exc()
+                sys.exit(1)
+            PY
             exit 1
           )
+
+      - name: Install built wheel and run tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host '=== Environment ==='
+          python -V
+          pip --version
+
+          Write-Host '=== Wheel contents ==='
+          Get-ChildItem -Path dist -File -Force | Format-Table
+          python -m zipfile -l (Get-ChildItem dist -Filter *.whl | Select-Object -First 1).FullName
+
+          Write-Host '=== Upgrade build tools ==='
+          python -m pip install --upgrade pip setuptools wheel
+
+          Write-Host '=== Installing wheel ==='
+          pip install dist\*.whl
+
+          Write-Host '=== Installed package info ==='
+          pip show ayafileio -v || Write-Host 'pip show failed'
+
+          $diag = @'
+          import sys,os,traceback,glob
+          print('python', sys.version)
+          print('sys.path:')
+          print('\n'.join(sys.path))
+          try:
+              import ayafileio
+              print('ayafileio __file__ =', ayafileio.__file__)
+              print('package dir listing:')
+              print('\n'.join(os.listdir(os.path.dirname(ayafileio.__file__))))
+          except Exception:
+              traceback.print_exc()
+          try:
+              import importlib
+              importlib.import_module('ayafileio._ayafileio')
+              print('Successfully imported ayafileio._ayafileio')
+          except Exception:
+              import traceback
+              print('Failed to import ayafileio._ayafileio:')
+              traceback.print_exc()
+              try:
+                  import ayafileio, glob, os
+                  pkgdir = os.path.dirname(ayafileio.__file__)
+                  print('pkgdir =', pkgdir)
+                  print('candidates:')
+                  print('\n'.join(glob.glob(os.path.join(pkgdir,'*'))))
+              except Exception:
+                  pass
+          '@
+
+          $diag | Out-File -Encoding utf8 diag.py
+          python diag.py
+          Remove-Item diag.py -Force
+
+          Write-Host '=== Run test_base.py (capture full traceback) ==='
+          python test_base.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'test_base.py failed — showing Python import diagnostics'
+            python -c @'
+          import traceback,sys
+          try:
+              import ayafileio
+              print('ayafileio imported, __file__:', ayafileio.__file__)
+          except Exception:
+              traceback.print_exc()
+              sys.exit(1)
+          '@
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
