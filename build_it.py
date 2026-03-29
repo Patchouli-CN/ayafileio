@@ -2,7 +2,7 @@
 """跨平台的构建脚本（替代 build_it.bat），使用 argparse 提供灵活构建选项。
 
 用法示例:
-  python build.py --versions 310,311,312 --output dist --clean-cache
+  python build_it.py --versions 310,311,312 --output dist --clean-cache
 
 该脚本会：
  - 检查临时目录可用空间
