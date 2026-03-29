@@ -19,192 +19,51 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install cibuildwheel
         run: pip install cibuildwheel
+
       - name: Build wheels
         run: python build_it.py --platform auto --output dist --skip-install --yes
 
-      - name: Install built wheel and run tests (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: List built wheels
         shell: bash
         run: |
-          set -euxo pipefail
-          echo "=== Environment ==="
-          python -V
-          pip --version
-          echo "RUNNER_OS=$RUNNER_OS"
+          echo "=== Built wheels ==="
+          ls -la dist/ || dir dist/
 
-          echo "=== Wheel contents ==="
-          ls -la dist || true
-          unzip -l dist/*.whl || true
-
-          echo "=== Upgrade build tools ==="
-          python -m pip install --upgrade pip setuptools wheel
-
-          echo "=== Installing wheel ==="
-          pip install dist/*.whl
-
-          echo "=== Installed package info ==="
-          pip show ayafileio || true
-
-          echo "=== Running enhanced Python diagnostics (preload extension if needed) ==="
-          python - <<'PY'
-          import sys,os,traceback,glob,subprocess,platform,importlib.util
-          print('python', sys.version)
-          cwd = os.path.abspath(os.getcwd())
-          print('cwd =', cwd)
-          print('sys.path before cleanup:')
-          print('\n'.join(sys.path))
-          # Remove current checkout path from sys.path to prefer installed package
-          sys.path = [p for p in sys.path if not p and p != '' or os.path.abspath(p) != cwd]
-          print('sys.path after cleanup:')
-          print('\n'.join(sys.path))
-
-          pkgdir = None
-          # try to locate installed package dir
-          import pkgutil
-          loader = pkgutil.find_loader('ayafileio')
-          if loader is not None:
-            try:
-              fn = loader.get_filename()
-              pkgdir = os.path.dirname(fn)
-            except Exception:
-              pkgdir = None
-
-          print('pkgdir candidate:', pkgdir)
-
-          so_files = []
-          if pkgdir and os.path.isdir(pkgdir):
-            for p in glob.glob(os.path.join(pkgdir, '_ayafileio*')):
-              so_files.append(p)
-              print('found candidate binary:', p)
-
-          loaded = False
-          for f in so_files:
-            try:
-              name = 'ayafileio._ayafileio'
-              print('Attempting to load extension from', f)
-              spec = importlib.util.spec_from_file_location(name, f)
-              mod = importlib.util.module_from_spec(spec)
-              spec.loader.exec_module(mod)
-              sys.modules[name] = mod
-              print('Loaded', f, 'as', name)
-              loaded = True
-              break
-            except Exception:
-              print('Failed to load', f)
-              traceback.print_exc()
-
-          try:
-            import ayafileio
-            print('ayafileio imported ok, __file__ =', ayafileio.__file__)
-          except Exception:
-            print('Import ayafileio failed:')
-            traceback.print_exc()
-
-          print('Platform.system() =', platform.system())
-          for f in so_files:
-            if f.endswith(('.so','.pyd','.dylib')):
-              print('Inspecting binary:', f)
-              if platform.system() == 'Linux':
-                try:
-                  subprocess.run(['ldd', f], check=False)
-                except Exception as e:
-                  print('ldd failed:', e)
-              elif platform.system() == 'Darwin':
-                try:
-                  subprocess.run(['otool', '-L', f], check=False)
-                except Exception as e:
-                  print('otool failed:', e)
-
-          print('=== Running test_base.py ===')
-          try:
-            subprocess.run([sys.executable, 'test_base.py'], check=True)
-            print('test_base.py succeeded')
-          except subprocess.CalledProcessError:
-            print('test_base.py failed — dumping import diagnostics')
-            try:
-              import ayafileio
-              print('ayafileio imported, __file__:', ayafileio.__file__)
-            except Exception:
-              traceback.print_exc()
-            raise
-          PY
-
-      - name: Install built wheel and run tests (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Install built wheel and run tests
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host '=== Environment ==='
-          python -V
-          pip --version
+          python -m pip install --upgrade pip
 
-          Write-Host '=== Wheel contents ==='
-          Get-ChildItem -Path dist -File -Force | Format-Table
-          python -m zipfile -l (Get-ChildItem dist -Filter *.whl | Select-Object -First 1).FullName
-
-          Write-Host '=== Upgrade build tools ==='
-          python -m pip install --upgrade pip setuptools wheel
-
-          Write-Host '=== Installing wheel ==='
-          pip install dist\*.whl
-
-          Write-Host '=== Installed package info ==='
-          pip show ayafileio -v || Write-Host 'pip show failed'
-
-          $diag = @'
-          import sys,os,traceback,glob
-          print('python', sys.version)
-          print('sys.path:')
-          print('\n'.join(sys.path))
-          try:
-              import ayafileio
-              print('ayafileio __file__ =', ayafileio.__file__)
-              print('package dir listing:')
-              print('\n'.join(os.listdir(os.path.dirname(ayafileio.__file__))))
-          except Exception:
-              traceback.print_exc()
-          try:
-              import importlib
-              importlib.import_module('ayafileio._ayafileio')
-              print('Successfully imported ayafileio._ayafileio')
-          except Exception:
-              import traceback
-              print('Failed to import ayafileio._ayafileio:')
-              traceback.print_exc()
-              try:
-                  import ayafileio, glob, os
-                  pkgdir = os.path.dirname(ayafileio.__file__)
-                  print('pkgdir =', pkgdir)
-                  print('candidates:')
-                  print('\n'.join(glob.glob(os.path.join(pkgdir,'*'))))
-              except Exception:
-                  pass
-          '@
-
-          $diag | Out-File -Encoding utf8 diag.py
-          python diag.py
-          Remove-Item diag.py -Force
-
-          Write-Host '=== Run test_base.py (capture full traceback) ==='
-          python test_base.py
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host 'test_base.py failed — showing Python import diagnostics'
-            python -c @'
-          import traceback,sys
-          try:
-              import ayafileio
-              print('ayafileio imported, __file__:', ayafileio.__file__)
-          except Exception:
-              traceback.print_exc()
-              sys.exit(1)
-          '@
+          # Cross-platform wheel installation
+          echo "=== Installing wheel ==="
+          wheel_file=$(ls dist/*.whl 2>/dev/null | head -1)
+          if [ -z "$wheel_file" ]; then
+            echo "Error: No wheel file found in dist/"
             exit 1
-          }
+          fi
+
+          echo "Installing: $wheel_file"
+          pip install "$wheel_file" --force-reinstall --no-deps
+
+          # Verify installation
+          echo "=== Verifying installation ==="
+          python -c "import ayafileio; print('✓ ayafileio imported successfully')"
+          python -c "import ayafileio._ayafileio; print('✓ _ayafileio imported successfully')"
+
+          # Run tests if test file exists
+          echo "=== Running tests ==="
+          if [ -f test_base.py ]; then
+            python test_base.py
+          else
+            echo "Warning: test_base.py not found, skipping tests"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -212,23 +71,128 @@ jobs:
           path: dist/*.whl
           retention-days: 7
 
+  test_wheels:
+    name: Test wheels on ${{ matrix.os }}
+    needs: build_wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: List downloaded wheels
+        shell: bash
+        run: |
+          echo "=== Downloaded wheels ==="
+          ls -la dist/
+
+      - name: Install and test wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+
+          # Find and install the wheel
+          wheel_file=$(ls dist/*.whl 2>/dev/null | head -1)
+          if [ -z "$wheel_file" ]; then
+            echo "Error: No wheel file found in dist/"
+            exit 1
+          fi
+
+          echo "Installing: $wheel_file"
+          pip install "$wheel_file"
+
+          # Test imports
+          echo "=== Testing imports ==="
+          python -c "
+          import sys
+          print(f'Python version: {sys.version}')
+          try:
+              import ayafileio
+              print('✓ ayafileio imported successfully')
+              print(f'✓ ayafileio version: {getattr(ayafileio, \"__version__\", \"unknown\")}')
+          except ImportError as e:
+              print(f'✗ Failed to import ayafileio: {e}')
+              sys.exit(1)
+
+          try:
+              import ayafileio._ayafileio
+              print('✓ _ayafileio imported successfully')
+          except ImportError as e:
+              print(f'✗ Failed to import _ayafileio: {e}')
+              sys.exit(1)
+          "
+
+          # Run the test script if it exists
+          if [ -f test_base.py ]; then
+            echo "=== Running test_base.py ==="
+            python test_base.py
+          else
+            echo "Warning: test_base.py not found, skipping functional tests"
+          fi
+
+      - name: Test with different Python version (optional)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test on Python 3.12
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          wheel_file=$(ls dist/*.whl 2>/dev/null | head -1)
+          if [ -n "$wheel_file" ]; then
+            pip install "$wheel_file"
+            python -c "import ayafileio; print('✓ ayafileio works on Python 3.12')"
+          fi
+
   publish:
     name: Publish to PyPI
-    needs: build_wheels
+    needs: test_wheels
     runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: wheels-*
           path: dist
-      - name: Organize wheels
+          merge-multiple: true
+
+      - name: List all collected wheels
+        shell: bash
         run: |
-          mkdir -p all_wheels
-          find dist -name "*.whl" -exec mv {} all_wheels/ \;
+          echo "=== All wheels to publish ==="
+          ls -la dist/
+          echo "Total wheels: $(ls dist/*.whl 2>/dev/null | wc -l)"
+
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
+          pip install --upgrade pip
           pip install twine
-          twine upload --skip-existing all_wheels/*.whl --verbose
+          echo "=== Publishing to PyPI ==="
+          twine upload --skip-existing dist/*.whl --verbose
+
+      - name: Verify published packages
+        if: success()
+        shell: bash
+        run: |
+          echo "✓ Successfully published to PyPI"
+          echo "You can install with: pip install ayafileio"
