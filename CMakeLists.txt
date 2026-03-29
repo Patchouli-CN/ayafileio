@@ -63,24 +63,7 @@ else()
 endif()
 
 # 创建 Python 扩展模块
-nanobind_add_module(_ayafileio ${SOURCES})
-
-# 设置模块属性 - 跨平台统一命名
-if(WIN32)
-    # Windows: 强制使用 .pyd 扩展名
-    set_target_properties(_ayafileio PROPERTIES
-        PREFIX ""
-        SUFFIX ".pyd"
-        OUTPUT_NAME "_ayafileio"
-    )
-else()
-    # Linux/Mac: 也使用简单的 .so 扩展名（不带版本标签）
-    set_target_properties(_ayafileio PROPERTIES
-        PREFIX ""
-        SUFFIX ".so"
-        OUTPUT_NAME "_ayafileio"
-    )
-endif()
+nanobind_add_module(_ayafileio STABLE_ABI ${SOURCES})
 
 # 添加 include 目录
 target_include_directories(_ayafileio PRIVATE
@@ -148,24 +131,7 @@ execute_process(
 message(STATUS "Python site-packages: ${PYTHON_SITE_PACKAGES}")
 
 # 安装扩展模块到 ayafileio 包目录
-install(TARGETS _ayafileio
-    DESTINATION ayafileio
-    LIBRARY DESTINATION ayafileio
-    RUNTIME DESTINATION ayafileio
-)
-
-# 安装 Python 包文件
-install(FILES 
-    ayafileio/__init__.py
-    DESTINATION ayafileio
-)
-
-# 可选：安装 README 和许可证
-install(FILES
-    README.md
-    DESTINATION .
-    OPTIONAL
-)
+install(TARGETS _ayafileio LIBRARY DESTINATION ayafileio)
 
 # 打印安装信息
 message(STATUS "Installation target: ayafileio/")
