@@ -77,7 +77,7 @@ else()
     # Linux/Mac: 使用标准共享库扩展名
     set_target_properties(_ayafileio PROPERTIES
         PREFIX ""
-        SUFFIX "${Python_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}"
+        SUFFIX ".${Python_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}"
     )
 endif()
 
