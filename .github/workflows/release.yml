@@ -61,10 +61,6 @@ jobs:
     name: Publish to PyPI
     needs: build_wheels
     runs-on: ubuntu-latest
-    # 只在推送 tag 或手动触发时发布
-    if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-      github.event_name == 'workflow_dispatch'
     
     steps:
       - uses: actions/download-artifact@v4
