@@ -20,6 +20,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 
 DEFAULT_TEMP = Path("D:/temp/cibw_build") if os.name == "nt" else Path.cwd() / ".cibw_build"
 

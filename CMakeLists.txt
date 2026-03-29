@@ -41,6 +41,7 @@ set(SOURCES
     src/loop_handle.cpp
     src/pool.cpp
     src/file_handle.cpp
+    src/io_backend.cpp
 )
 
 # 根据平台添加后端源文件
