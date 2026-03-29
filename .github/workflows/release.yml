@@ -50,32 +50,32 @@ jobs:
           done
 
   publish:
-  name: Publish to PyPI
-  needs: build_wheels
-  runs-on: ubuntu-latest
-  
-  steps:
-    - uses: actions/download-artifact@v4
-      with:
-        pattern: wheels-*
-        path: dist
-        merge-multiple: true
+    name: Publish to PyPI
+    needs: build_wheels
+    runs-on: ubuntu-latest
     
-    - name: List all collected wheels
-      shell: bash
-      run: |
-        echo "=== Directory structure ==="
-        find dist -type f -name "*.whl"
-        echo "=== All wheels ==="
-        find dist -name "*.whl" -exec ls -la {} \;
-    
-    - name: Publish to PyPI
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: |
-        pip install --upgrade pip
-        pip install twine
-        echo "=== Publishing to PyPI ==="
-        # 使用 find 找到所有 wheel 文件
-        find dist -name "*.whl" -exec twine upload --skip-existing {} +
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      
+      - name: List all collected wheels
+        shell: bash
+        run: |
+          echo "=== Directory structure ==="
+          find dist -type f -name "*.whl"
+          echo "=== All wheels ==="
+          find dist -name "*.whl" -exec ls -la {} \;
+      
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install --upgrade pip
+          pip install twine
+          echo "=== Publishing to PyPI ==="
+          # 使用 find 找到所有 wheel 文件
+          find dist -name "*.whl" -exec twine upload --skip-existing {} +
