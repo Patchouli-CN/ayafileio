@@ -50,56 +50,63 @@ jobs:
           echo "=== Installed package info ==="
           pip show ayafileio || true
 
-          echo "=== Running unified Python diagnostics ==="
+          echo "=== Running enhanced Python diagnostics (preload extension if needed) ==="
           python - <<'PY'
-          import sys,os,traceback,glob,subprocess,platform
+          import sys,os,traceback,glob,subprocess,platform,importlib.util
           print('python', sys.version)
+          cwd = os.path.abspath(os.getcwd())
+          print('cwd =', cwd)
           print('sys.path before cleanup:')
           print('\n'.join(sys.path))
-          # Remove current checkout path (cwd) from sys.path to prefer installed package
-          cwd = os.path.abspath(os.getcwd())
+          # Remove current checkout path from sys.path to prefer installed package
           sys.path = [p for p in sys.path if not p and p != '' or os.path.abspath(p) != cwd]
           print('sys.path after cleanup:')
           print('\n'.join(sys.path))
 
           pkgdir = None
+          # try to locate installed package dir
+          import pkgutil
+          loader = pkgutil.find_loader('ayafileio')
+          if loader is not None:
+            try:
+              fn = loader.get_filename()
+              pkgdir = os.path.dirname(fn)
+            except Exception:
+              pkgdir = None
+
+          print('pkgdir candidate:', pkgdir)
+
+          so_files = []
+          if pkgdir and os.path.isdir(pkgdir):
+            for p in glob.glob(os.path.join(pkgdir, '_ayafileio*')):
+              so_files.append(p)
+              print('found candidate binary:', p)
+
+          loaded = False
+          for f in so_files:
+            try:
+              name = 'ayafileio._ayafileio'
+              print('Attempting to load extension from', f)
+              spec = importlib.util.spec_from_file_location(name, f)
+              mod = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(mod)
+              sys.modules[name] = mod
+              print('Loaded', f, 'as', name)
+              loaded = True
+              break
+            except Exception:
+              print('Failed to load', f)
+              traceback.print_exc()
+
           try:
             import ayafileio
-            pkgdir = os.path.dirname(ayafileio.__file__)
-            print('ayafileio __file__ =', ayafileio.__file__)
-            print('package dir listing:')
-            print('\n'.join(os.listdir(pkgdir)))
+            print('ayafileio imported ok, __file__ =', ayafileio.__file__)
           except Exception:
+            print('Import ayafileio failed:')
             traceback.print_exc()
-
-          try:
-            import importlib
-            importlib.import_module('ayafileio._ayafileio')
-            print('Successfully imported ayafileio._ayafileio')
-          except Exception:
-            print('Failed to import ayafileio._ayafileio:')
-            traceback.print_exc()
-
-          if not pkgdir:
-            # try to find installed package dir
-            import pkgutil
-            spec = pkgutil.find_loader('ayafileio')
-            if spec and hasattr(spec, 'get_filename'):
-              try:
-                fn = spec.get_filename()
-                pkgdir = os.path.dirname(fn)
-              except Exception:
-                pass
-
-          print('pkgdir candidates:', pkgdir)
-          files = []
-          if pkgdir:
-            for p in glob.glob(os.path.join(pkgdir,'*')):
-              files.append(p)
-              print('candidate:', p)
 
           print('Platform.system() =', platform.system())
-          for f in files:
+          for f in so_files:
             if f.endswith(('.so','.pyd','.dylib')):
               print('Inspecting binary:', f)
               if platform.system() == 'Linux':
