@@ -22,7 +22,7 @@ jobs:
       
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
       
       - name: Install build dependencies
         run: |
@@ -36,10 +36,11 @@ jobs:
           pip install cibuildwheel
           python -m cibuildwheel --output-dir dist
         env:
-          CIBW_BUILD: "cp310-abi3"
+          CIBW_BUILD: "cp311-manylinux_x86_64"
           CIBW_ARCHS: "x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_BUILD_FRONTEND: "build"
+          CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
       
       # Windows/macOS: 保持原样
       - name: Build wheel on Windows/macOS
