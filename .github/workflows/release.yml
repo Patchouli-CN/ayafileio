@@ -29,17 +29,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install build scikit-build-core nanobind
       
-      # 关键修改：对于 Linux，使用 manylinux 镜像来构建
+      # Linux: 使用 cibuildwheel 构建正确的 manylinux wheel
       - name: Build wheel on Linux
         if: runner.os == 'Linux'
-        uses: docker://quay.io/pypa/manylinux2014_x86_64:latest
-        with:
-          args: >
-            bash -c "
-              /opt/python/cp311-cp311/bin/python -m pip install build scikit-build-core nanobind &&
-              /opt/python/cp311-cp311/bin/python -m build --wheel --outdir dist
-            "
+        run: |
+          pip install cibuildwheel
+          python -m cibuildwheel --output-dir dist
+        env:
+          CIBW_BUILD: "cp310-abi3"
+          CIBW_ARCHS: "x86_64"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+          CIBW_BUILD_FRONTEND: "build"
       
+      # Windows/macOS: 保持原样
       - name: Build wheel on Windows/macOS
         if: runner.os != 'Linux'
         run: |
