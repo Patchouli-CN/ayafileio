@@ -65,7 +65,7 @@ endif()
 # 创建 Python 扩展模块
 nanobind_add_module(_ayafileio ${SOURCES})
 
-# 设置模块属性 - 关键修复点
+# 设置模块属性 - 跨平台统一命名
 if(WIN32)
     # Windows: 强制使用 .pyd 扩展名
     set_target_properties(_ayafileio PROPERTIES
@@ -74,10 +74,11 @@ if(WIN32)
         OUTPUT_NAME "_ayafileio"
     )
 else()
-    # Linux/Mac: 使用标准共享库扩展名
+    # Linux/Mac: 也使用简单的 .so 扩展名（不带版本标签）
     set_target_properties(_ayafileio PROPERTIES
         PREFIX ""
-        SUFFIX ".${Python_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}"
+        SUFFIX ".so"
+        OUTPUT_NAME "_ayafileio"
     )
 endif()
 
