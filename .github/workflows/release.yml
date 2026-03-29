@@ -2,6 +2,8 @@ name: Build and Publish to PyPI
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -49,7 +51,7 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           pip install twine
-          twine upload all_wheels/*.whl --verbose
+          twine upload --skip-existing all_wheels/*.whl --verbose
 
   create-release:
     name: Create GitHub Release
