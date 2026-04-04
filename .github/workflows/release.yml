@@ -91,97 +91,20 @@ jobs:
           # 安装 wheel
           pip install "$WHEEL"
           
-          # ============================================================
-          # DEBUG: 查看安装后的文件结构
-          # ============================================================
-          echo "=== DEBUG: Python site-packages location ==="
-          python -c "import site; print(site.getsitepackages())"
-          
-          echo "=== DEBUG: ayafileio package contents ==="
-          SITE_PKG=$(python -c "import site; print(site.getsitepackages()[0])")
-          echo "Site packages: $SITE_PKG"
-          
-          if [ -d "$SITE_PKG/ayafileio" ]; then
-            echo "Contents of $SITE_PKG/ayafileio:"
-            ls -la "$SITE_PKG/ayafileio/"
-          else
-            echo "ERROR: ayafileio directory not found in site-packages!"
-            echo "Searching for ayafileio anywhere in site-packages:"
-            find "$SITE_PKG" -name "*ayafileio*" -type d 2>/dev/null || echo "No ayafileio directories found"
-            find "$SITE_PKG" -name "*.pyd" -o -name "*.so" 2>/dev/null | head -20 || echo "No extension files found"
-          fi
-          
-          echo "=== DEBUG: All extension files in site-packages ==="
-          find "$SITE_PKG" -name "*.pyd" -o -name "*.so" 2>/dev/null | head -20 || echo "No extension files found"
-          
-          # 尝试直接导入 .pyd 文件
-          echo "=== DEBUG: Trying to import _ayafileio directly ==="
-          python -c "import sys; print(sys.path)" || true
-          python -c "import _ayafileio" 2>&1 || echo "Cannot import _ayafileio"
-          
-          # ============================================================
-          # 正式测试
-          # ============================================================
-          echo "=== Testing import (with detailed diagnostics) ==="
-          python - <<'PY'
-          import sys, traceback, importlib.util, importlib.machinery, os
-          # Remove the repository top-level from sys.path so the installed wheel is used
-          if sys.path:
+            # 在安装完 wheel 后，移除仓库顶层路径，确保使用已安装的包进行测试
+            python - <<'PY'
+            import sys
+            if sys.path:
               try:
-                  sys.path.pop(0)
+                sys.path.pop(0)
               except Exception:
-                  pass
-          try:
-              import ayafileio
-              print('✓ Import OK')
-          except Exception:
-              traceback.print_exc()
-              print('\n--- Diagnostic info ---')
-              print('sys.version:', sys.version)
-              print('sys.path[0]:', sys.path[0] if sys.path else None)
-              print('site-packages locations:')
-              try:
-                  import site
-                  print(site.getsitepackages())
-              except Exception:
-                  pass
-              print('find_spec ayafileio:', importlib.util.find_spec('ayafileio'))
-              print('find_spec ayafileio._ayafileio:', importlib.util.find_spec('ayafileio._ayafileio'))
-              print('EXTENSION_SUFFIXES:', importlib.machinery.EXTENSION_SUFFIXES)
-              pkg = importlib.util.find_spec('ayafileio')
-              if pkg and pkg.submodule_search_locations:
-                  pkg_dir = pkg.submodule_search_locations[0]
-                  print('package dir:', pkg_dir)
-                  try:
-                      for fn in os.listdir(pkg_dir):
-                          print(' -', fn)
-                  except Exception as e:
-                      print('listdir failed:', e)
-                  # 尝试用 ctypes 加载扩展以获得更具体的 DLL 加载错误（仅 Windows 有用）
-                  for fn in os.listdir(pkg_dir):
-                      if fn.startswith('_ayafileio') and (fn.endswith('.pyd') or fn.endswith('.so')):
-                          full = os.path.join(pkg_dir, fn)
-                          print('Attempt loading via ctypes:', full)
-                          try:
-                              import ctypes
-                              ctypes.CDLL(full)
-                              print('ctypes loaded OK')
-                          except Exception as e:
-                              print('ctypes load failed:', repr(e))
-          PY
+                pass
+            import ayafileio
+            print('Import OK')
+            PY
 
-          echo "=== Running test_base.py (run with repo path removed) ==="
-          python - <<'PY'
-          import sys, runpy
-          if sys.path:
-              try:
-                  sys.path.pop(0)
-              except Exception:
-                  pass
-          runpy.run_path('test_base.py', run_name='__main__')
-          PY
-          
-          echo "=== All tests passed ==="
+            echo "=== Running test_base.py ==="
+            python test_base.py
       
       # 上传 artifacts（只有测试通过才会执行到这里）
       - uses: actions/upload-artifact@v4
