@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ayafileio"
-version = "0.1.8"  # 升级版本号
+version = "0.1.8"
 description = "Cross-platform async file API for Python. Blazing fast like Shameimaru Aya."
 readme = "README.md"
 license = {text = "MIT"}

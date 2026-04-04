@@ -2,8 +2,7 @@ name: Build and Publish to PyPI
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
   workflow_dispatch:
 
 jobs:
