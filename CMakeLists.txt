@@ -63,9 +63,7 @@ else()
 endif()
 
 # 创建 Python 扩展模块
-nanobind_add_module(_ayafileio STABLE_ABI ${SOURCES})
-
-set_target_properties(_ayafileio PROPERTIES SUFFIX ".pyd")
+nanobind_add_module(_ayafileio ${SOURCES})
 
 # 添加 include 目录
 target_include_directories(_ayafileio PRIVATE
