@@ -131,16 +131,37 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
-          path: dist
-          merge-multiple: true
-      
-      - name: List all collected wheels
+          path: wheels
+        
+      - name: Collect and verify wheels
         shell: bash
         run: |
+          # 创建 dist 目录
+          mkdir -p dist
+          
+          # 递归查找所有 .whl 文件并复制到 dist
+          echo "=== Searching for wheel files ==="
+          find wheels -name "*.whl" -type f
+          
+          find wheels -name "*.whl" -type f -exec cp {} dist/ \;
+          
           echo "=== Collected wheels ==="
           ls -la dist/
+          
           echo "=== Wheel count ==="
           ls -la dist/*.whl 2>/dev/null | wc -l
+          
+          # 验证所有 wheel 文件是否完整
+          echo "=== Verifying wheels ==="
+          for wheel in dist/*.whl; do
+            echo "Verifying: $wheel"
+            if unzip -t "$wheel" > /dev/null 2>&1; then
+              echo "✓ $wheel is valid"
+            else
+              echo "✗ $wheel is corrupted"
+              exit 1
+            fi
+          done
       
       - name: Publish to PyPI
         env:
