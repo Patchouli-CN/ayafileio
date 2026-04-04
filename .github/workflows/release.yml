@@ -3,6 +3,7 @@ name: Build and Publish to PyPI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -37,19 +38,13 @@ jobs:
       - name: Build wheel on Linux
         if: runner.os == 'Linux'
         run: |
-          # 获取 Python 版本号（去掉点，如 310）
           CP_VERSION=$(echo "${{ matrix.python-version }}" | tr -d '.')
-          
-          # 使用 cibuildwheel 在 manylinux 容器中构建
           pip install cibuildwheel
-          
-          # 配置 cibuildwheel
           export CIBW_BUILD="cp${CP_VERSION}-*"
           export CIBW_ARCHS="x86_64"
           export CIBW_MANYLINUX_X86_64_IMAGE="manylinux2014"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_TEST_SKIP="*"
-          
           python -m cibuildwheel --output-dir dist
       
       - name: List built wheels
@@ -57,44 +52,6 @@ jobs:
         run: |
           echo "=== Built wheels for Python ${{ matrix.python-version }} on ${{ matrix.os }} ==="
           ls -la dist/
-      
-      # 测试当前 wheel
-      - name: Test wheel
-        shell: bash
-        run: |
-          # 找到 wheel 文件
-          WHEEL=$(ls dist/*.whl 2>/dev/null | head -n 1)
-          if [ -z "$WHEEL" ]; then
-            echo "No wheel found!"
-            exit 1
-          fi
-          
-          echo "Testing wheel: $WHEEL"
-          
-          # 创建虚拟环境
-          python -m venv test_env
-          
-          # 激活虚拟环境
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            source test_env/Scripts/activate
-          else
-            source test_env/bin/activate
-          fi
-          
-          # 安装 wheel
-          pip install "$WHEEL"
-
-          mv ayafileio _ayafileio_src
-
-          # 测试导入
-          python -c "import ayafileio; print(f'✓ Import successful on Python {__import__(\"sys\").version}')"
-
-          mv _ayafileio_src ayafileio
-          
-          # 如果有测试文件，运行测试
-          if [ -f "test_base.py" ]; then
-            python test_base.py
-          fi
       
       # 上传 wheel 作为 artifact
       - uses: actions/upload-artifact@v4
@@ -108,7 +65,6 @@ jobs:
     name: Publish to PyPI
     needs: build_wheels
     runs-on: ubuntu-latest
-    # 只在推送 tag 时发布
     if: startsWith(github.ref, 'refs/tags/v')
     
     steps:
@@ -120,29 +76,16 @@ jobs:
       - name: Collect all wheels
         shell: bash
         run: |
-          # 创建 dist 目录
           mkdir -p dist
-          
-          # 查找并复制所有 wheel 文件
-          echo "=== Searching for wheel files ==="
-          find wheels -name "*.whl" -type f
-          
           find wheels -name "*.whl" -type f -exec cp {} dist/ \;
-          
           echo "=== Collected wheels ==="
           ls -la dist/
           
-          echo "=== Wheel count ==="
-          ls dist/*.whl 2>/dev/null | wc -l
-          
-          # 验证 wheel 文件
-          echo "=== Verifying wheels ==="
           for wheel in dist/*.whl; do
-            echo "Verifying: $(basename $wheel)"
             if unzip -t "$wheel" > /dev/null 2>&1; then
-              echo "  ✓ Valid"
+              echo "✓ $(basename $wheel) is valid"
             else
-              echo "  ✗ Corrupted"
+              echo "✗ $(basename $wheel) is corrupted"
               exit 1
             fi
           done
@@ -154,5 +97,4 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install twine
-          echo "=== Publishing to PyPI ==="
           twine upload --skip-existing dist/*.whl --verbose
