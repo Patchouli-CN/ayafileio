@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
       fail-fast: false
 
     steps:
@@ -62,20 +62,32 @@ jobs:
       - name: Install wheel and run tests
         shell: bash
         run: |
-          # 找到 wheel 文件
-          WHEEL=$(ls dist/*.whl | head -1)
+          # 找到 wheel 文件：优先匹配当前 Python 版本（如 cp312），否则尝试 abi3，再退回任意第一个 wheel
+          PYTAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          echo "Python tag: $PYTAG"
+          WHEEL=$(ls dist/*${PYTAG}*.whl 2>/dev/null | head -n 1 || true)
+          if [ -z "$WHEEL" ]; then
+            WHEEL=$(ls dist/*abi3*.whl 2>/dev/null | head -n 1 || true)
+          fi
+          if [ -z "$WHEEL" ]; then
+            WHEEL=$(ls dist/*.whl 2>/dev/null | head -n 1 || true)
+          fi
+          if [ -z "$WHEEL" ]; then
+            echo "No wheel found in dist/"
+            exit 1
+          fi
           echo "Testing wheel: $WHEEL"
-          
+
           # 创建虚拟环境
           python -m venv test_env
-          
+
           # 激活虚拟环境（跨平台）
           if [ "${{ runner.os }}" = "Windows" ]; then
             source test_env/Scripts/activate
           else
             source test_env/bin/activate
           fi
-          
+
           # 安装 wheel
           pip install "$WHEEL"
           
