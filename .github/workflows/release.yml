@@ -10,12 +10,12 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }} (Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
       fail-fast: false
 
     steps:
@@ -34,14 +34,15 @@ jobs:
       - name: Build wheel on Linux
         if: runner.os == 'Linux'
         run: |
+          CP_VERSION=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          export CIBW_BUILD="cp$CP_VERSION-*"
+          export CIBW_ARCHS="x86_64"
+          export CIBW_MANYLINUX_X86_64_IMAGE="manylinux2014"
+          export CIBW_BUILD_FRONTEND="build"
+          export CIBW_TEST_SKIP="*"
+          
           pip install cibuildwheel
           python -m cibuildwheel --output-dir dist
-        env:
-          CIBW_BUILD: "cp${{ matrix.python-version }}-*"
-          CIBW_ARCHS: "x86_64"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
-          CIBW_BUILD_FRONTEND: "build"
-          CIBW_TEST_SKIP: "*"
       
       # Windows/macOS: 构建 wheel
       - name: Build wheel on Windows/macOS
