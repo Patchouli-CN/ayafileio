@@ -4,6 +4,7 @@
 #include <nanobind/nanobind.h>
 #include <atomic>
 #include <mutex>
+#include <filesystem>
 
 namespace py = nanobind; 
 
@@ -61,11 +62,14 @@ void handle_pool_drain() {
 }
 
 PoolKey make_pool_key(const std::string &path, DWORD access, DWORD disp) {
-    // Canonicalize: lowercase + replace '/' with '\'
+    // 用 filesystem 规范化路径
+    std::wstring wpath = std::filesystem::path(path).lexically_normal().wstring();
+    
+    // 转小写（用于比较）
     std::string canon;
-    canon.reserve(path.size());
-    for (char c : path) {
-        canon += (c == '/') ? '\\' : (char)std::tolower((unsigned char)c);
+    for (wchar_t c : wpath) {
+        canon += (c == L'/') ? '\\' : (char)std::tolower((unsigned char)c);
     }
+    
     return PoolKey{std::move(canon), access, disp};
 }

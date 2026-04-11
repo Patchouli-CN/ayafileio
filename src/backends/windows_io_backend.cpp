@@ -2,6 +2,7 @@
 #include "windows_io_backend.hpp"
 #include "./utils/file_mode.hpp"
 #include <algorithm>
+#include <filesystem>
 
 // cached event loop
 static PyObject   *g_cachedLoop       = nullptr;
@@ -54,8 +55,10 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     bool canReuse = (disp == OPEN_EXISTING || disp == OPEN_ALWAYS);
     if (canReuse) m_handle = handle_pool_acquire(m_poolKey);
 
+    std::wstring wpath = std::filesystem::path(path).wstring();
+
     if (m_handle == INVALID_HANDLE_VALUE) {
-        m_handle = CreateFileA(path.c_str(), access,
+        m_handle = CreateFileW(wpath.c_str(), access,
             FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
             NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
         if (m_handle == INVALID_HANDLE_VALUE)
