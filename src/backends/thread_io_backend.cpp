@@ -252,7 +252,7 @@ void ThreadIOBackend::close_impl() {
         if (t.joinable()) t.join();
     }
     if (m_fd != -1) {
-        close();
+        ::close(m_fd);
         m_fd = -1;
     }
 }

@@ -55,7 +55,7 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     bool canReuse = (disp == OPEN_EXISTING || disp == OPEN_ALWAYS);
     if (canReuse) m_handle = handle_pool_acquire(m_poolKey);
 
-    std::wstring wpath = std::filesystem::path(path).wstring();
+    std::wstring wpath = std::filesystem::u8path(path).wstring();
 
     if (m_handle == INVALID_HANDLE_VALUE) {
         m_handle = CreateFileW(wpath.c_str(), access,
@@ -75,7 +75,7 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
         // Re-associate pooled handle with this FileHandle as completion key.
         if (!CreateIoCompletionPort(m_handle, g_iocp, (ULONG_PTR)this, 0)) {
             CloseHandle(m_handle);
-            m_handle = CreateFileA(path.c_str(), access,
+            m_handle = CreateFileW(wpath.c_str(), access,
                 FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
                 NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
             if (m_handle == INVALID_HANDLE_VALUE)
