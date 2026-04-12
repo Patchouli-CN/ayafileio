@@ -217,7 +217,7 @@ class AsyncFile:
                 raise ValueError(f"Invalid mode: '{mode}'")
             clean = base_char + ("+" if has_plus else "") + "b"
 
-            self._impl = _AsyncFile(self._path, clean)
+        self._impl = _AsyncFile(self._path, clean)
         self._line_buffer = b""
 
     # ── context manager ───────────────────────────────────────────────────────
