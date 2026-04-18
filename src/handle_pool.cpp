@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <filesystem>
+#include "config.hpp"
 
 namespace py = nanobind; 
 
@@ -28,8 +29,8 @@ void handle_pool_release(const PoolKey &key, HANDLE h) {
     if (h == INVALID_HANDLE_VALUE) return;
     std::unique_lock<std::shared_mutex> lk(g_hpMtx);
     auto &vec = g_hpMap[key];
-    size_t maxPerKey = g_hpMaxPerKey.load(std::memory_order_relaxed);
-    size_t maxTotal = g_hpMaxTotal.load(std::memory_order_relaxed);
+    size_t maxPerKey = ayafileio::config().handle_pool_max_per_key();
+    size_t maxTotal = ayafileio::config().handle_pool_max_total();
     if (vec.size() < maxPerKey && g_hpTotal < maxTotal) {
         vec.push_back(h);
         ++g_hpTotal;

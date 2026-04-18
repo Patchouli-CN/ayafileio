@@ -24,6 +24,15 @@ static void refresh_loop_cache(PyObject *loop) {
 }
 
 ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mode) {
+    
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
+    // 使用缓存的配置
+    unsigned num_workers = cfg.io_worker_count();
+
     PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) throw py::python_error();
     refresh_loop_cache(loop);
@@ -64,8 +73,7 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
         }
     }
 
-    // Start worker threads — 尊重全局配置 g_worker_count（0 = 自动）
-    unsigned num_workers = g_worker_count.load();
+
     if (num_workers == 0) {
         unsigned hc = std::thread::hardware_concurrency();
         if (hc == 0) hc = 1;
@@ -73,6 +81,7 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     } else if (!(num_workers >= 1 && num_workers <= 128)) {
         throw py::value_error("worker count must be 0 (auto) or 1-128");
     }
+    
     for (unsigned i = 0; i < num_workers; ++i) {
         m_workers.emplace_back(&ThreadIOBackend::worker_thread, this);
     }
@@ -294,16 +303,22 @@ void ThreadIOBackend::complete_error(IORequest *req, DWORD err) {
 }
 
 IORequest *ThreadIOBackend::make_req(size_t size, PyObject *future, ReqType type) {
-    auto *req          = new IORequest();
-    req->file          = this;
-    req->loop_handle   = m_loop_handle;
-    req->future        = future; Py_INCREF(future);
-    req->set_result    = PyObject_GetAttr(future, g_str_set_result);
+    auto *req = new IORequest();
+    req->file = this;
+    req->loop_handle = m_loop_handle;
+    req->future = future; 
+    Py_INCREF(future);
+    req->set_result = PyObject_GetAttr(future, g_str_set_result);
     req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
-    req->reqSize       = size;
-    req->type          = type;
-    if (size <= POOL_BUF_SIZE) req->poolBuf = pool_acquire();
-    else                       req->heapBuf = new char[size];
+    req->reqSize = size;
+    req->type = type;
+    
+    // 使用基类缓存的缓冲区大小（无锁访问）
+    if (size <= m_cached_buffer_size) {
+        req->poolBuf = pool_acquire();
+    } else {
+        req->heapBuf = new char[size];
+    }
     return req;
 }
 

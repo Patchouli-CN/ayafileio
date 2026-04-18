@@ -18,6 +18,11 @@ static void refresh_loop_cache(PyObject *loop) {
 }
 
 WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &mode) {
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
     static bool ctrl_reg = false;
     if (!ctrl_reg) { SetConsoleCtrlHandler(ctrl_handler, TRUE); ctrl_reg = true; }
 
@@ -271,10 +276,17 @@ void WindowsIOBackend::close_impl() {
     if (!m_running.compare_exchange_strong(expected, false)) return;
     if (m_handle != INVALID_HANDLE_VALUE) {
         CancelIoEx(m_handle, NULL);
+        
+        // 使用配置的超时时间
+        unsigned timeout_ms = ayafileio::config().close_timeout_ms();
         int w = 1;
-        for (int i=0; i<12 && m_pending.load(std::memory_order_acquire)>0; ++i) {
-            Sleep(w); w = std::min(w*2, 32); 
+        int elapsed = 0;
+        while (elapsed < (int)timeout_ms && m_pending.load(std::memory_order_acquire) > 0) {
+            Sleep(w);
+            elapsed += w;
+            w = std::min(w * 2, 32);
         }
+        
         LARGE_INTEGER zero{};
         SetFilePointerEx(m_handle, zero, nullptr, FILE_BEGIN);
         handle_pool_release(m_poolKey, m_handle);
@@ -320,16 +332,22 @@ void WindowsIOBackend::complete_error(IORequest *req, DWORD err) {
 }
 
 IORequest *WindowsIOBackend::make_req(size_t size, PyObject *future, ReqType type) {
-    auto *req          = new IORequest();
-    req->file          = this;
-    req->loop_handle   = m_loop_handle;
-    req->future        = future; Py_INCREF(future);
-    req->set_result    = PyObject_GetAttr(future, g_str_set_result);
+    auto *req = new IORequest();
+    req->file = this;
+    req->loop_handle = m_loop_handle;
+    req->future = future; 
+    Py_INCREF(future);
+    req->set_result = PyObject_GetAttr(future, g_str_set_result);
     req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
-    req->reqSize       = size;
-    req->type          = type;
-    if (size <= POOL_BUF_SIZE) req->poolBuf = pool_acquire();
-    else                       req->heapBuf = new char[size];
+    req->reqSize = size;
+    req->type = type;
+    
+    // 使用缓存的缓冲区大小（无锁访问）
+    if (size <= m_cached_buffer_size) {
+        req->poolBuf = pool_acquire();
+    } else {
+        req->heapBuf = new char[size];
+    }
     return req;
 }
 

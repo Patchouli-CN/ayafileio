@@ -34,6 +34,26 @@ message(STATUS "Python executable: ${Python_EXECUTABLE}")
 message(STATUS "Python version: ${Python_VERSION}")
 message(STATUS "nanobind found: ${nanobind_DIR}")
 
+# ════════════════════════════════════════════════════════════════════════════
+# io_uring 支持 (仅 Linux)
+# ════════════════════════════════════════════════════════════════════════════
+option(ENABLE_IO_URING "Enable io_uring support on Linux" ON)
+
+set(HAVE_IO_URING FALSE)
+if(ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # 检测 liburing
+    find_path(LIBURING_INCLUDE_DIR NAMES liburing.h)
+    find_library(LIBURING_LIBRARY NAMES uring)
+    
+    if(LIBURING_INCLUDE_DIR AND LIBURING_LIBRARY)
+        set(HAVE_IO_URING TRUE)
+        add_compile_definitions(HAVE_IO_URING=1)
+        message(STATUS "✅ io_uring support enabled")
+    else()
+        message(STATUS "⚠️ liburing not found, io_uring support disabled")
+    endif()
+endif()
+
 # 收集源文件
 set(SOURCES
     src/bindings.cpp
@@ -53,11 +73,22 @@ if(WIN32)
         src/iocp.cpp
     )
 else()
-    message(STATUS "Building for Linux/MacOS (Thread Pool Backend)")
+    # Linux/macOS: 默认使用线程池后端
     list(APPEND SOURCES
         src/backends/thread_io_backend.cpp
         src/handle_pool_posix.cpp
     )
+    
+    # 如果启用了 io_uring，添加 io_uring 后端
+    if(HAVE_IO_URING)
+        message(STATUS "Adding io_uring backend (Linux + liburing)")
+        list(APPEND SOURCES
+            src/backends/io_uring_backend.cpp
+        )
+    else()
+        message(STATUS "Building for Linux/MacOS (Thread Pool Backend only)")
+    endif()
+    
     # Linux 需要 pthread
     find_package(Threads REQUIRED)
 endif()
@@ -71,6 +102,12 @@ target_include_directories(_ayafileio PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/backends
 )
+
+# 如果启用 io_uring，添加 liburing 链接
+if(HAVE_IO_URING)
+    target_link_libraries(_ayafileio PRIVATE ${LIBURING_LIBRARY})
+    target_include_directories(_ayafileio PRIVATE ${LIBURING_INCLUDE_DIR})
+endif()
 
 # 设置编译选项
 if(MSVC)

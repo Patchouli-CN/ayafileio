@@ -23,11 +23,17 @@ Windows 上使用 IOCP（I/O 完成端口）实现真异步，Linux 上使用线
     ...     print(content)
 
 高级配置:
-    >>> # 设置句柄池大小（Windows 特有，Linux 优雅降级）
-    >>> ayafileio.set_handle_pool_limits(max_per_key=128, max_total=4096)
+    >>> # 查看当前配置
+    >>> config = ayafileio.get_config()
     >>> 
-    >>> # 设置 I/O 工作线程数（0 = 自动）
-    >>> ayafileio.set_io_worker_count(0)
+    >>> # 修改配置
+    >>> ayafileio.configure({
+    ...     "io_worker_count": 8,
+    ...     "buffer_size": 131072,
+    ... })
+    >>> 
+    >>> # 查看后端信息
+    >>> info = ayafileio.get_backend_info()
 
 性能对比 (vs aiofiles):
     - 100 并发: +55% 吞吐量
@@ -44,6 +50,10 @@ from ._ayafileio import (
     AsyncFile as _AsyncFile,
     set_handle_pool_limits as _set_handle_pool_limits,
     get_handle_pool_limits as _get_handle_pool_limits,
+    configure as _configure,
+    get_config as _get_config,
+    reset_config as _reset_config,
+    get_backend_info as _get_backend_info,
 )
 # 尝试导入 Windows 专用的 set_iocp_worker_count（如果扩展在该平台上提供）
 _has_native_set_iocp = False
@@ -70,6 +80,77 @@ except Exception:
 
 _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# 统一配置 API
+# ════════════════════════════════════════════════════════════════════════════
+
+def configure(options: dict) -> None:
+    """统一配置 ayafileio。
+    
+    Args:
+        options: 配置字典，支持以下键:
+            - handle_pool_max_per_key (int): 每个文件最大缓存句柄数 (Windows, 默认 64)
+            - handle_pool_max_total (int): 全局最大缓存句柄数 (Windows, 默认 2048)
+            - io_worker_count (int): I/O 工作线程数，0=自动 (默认 0, 最大 128)
+            - buffer_pool_max (int): 最大缓存缓冲区数 (默认 512)
+            - buffer_size (int): 单个缓冲区大小，字节 (默认 65536)
+            - close_timeout_ms (int): 关闭时等待 pending I/O 的最大毫秒数 (默认 4000)
+            - io_uring_queue_depth (int): io_uring 队列深度 (Linux, 默认 256)
+            - io_uring_sqpoll (bool): 是否启用 SQPOLL 模式 (Linux, 默认 False)
+            - enable_debug_log (bool): 是否启用调试日志 (默认 False)
+    
+    Example:
+        >>> ayafileio.configure({
+        ...     "io_worker_count": 8,
+        ...     "buffer_size": 131072,
+        ...     "close_timeout_ms": 2000,
+        ... })
+    """
+    _configure(options)
+
+
+def get_config() -> dict:
+    """获取当前配置。
+    
+    Returns:
+        包含所有配置项的字典。
+        
+    Example:
+        >>> config = ayafileio.get_config()
+        >>> print(config["buffer_size"])
+        65536
+    """
+    return _get_config()
+
+
+def reset_config() -> None:
+    """重置配置为默认值。"""
+    _reset_config()
+
+
+def get_backend_info() -> dict:
+    """获取当前后端信息。
+    
+    Returns:
+        包含以下键的字典:
+            - platform (str): 平台名称 ("windows", "linux", "macos", "posix")
+            - backend (str): 后端类型 ("iocp", "io_uring", "thread_pool")
+            - is_truly_async (bool): 是否真异步
+            - description (str): 后端描述
+            
+    Example:
+        >>> info = ayafileio.get_backend_info()
+        >>> print(info)
+        {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, ...}
+    """
+    return _get_backend_info()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 向后兼容的句柄池 API
+# ════════════════════════════════════════════════════════════════════════════
+
 def set_handle_pool_limits(max_per_key: int, max_total: int) -> None:
     """设置句柄池容量限制。"""
     if max_per_key <= 0 or max_total <= 0:
@@ -78,9 +159,13 @@ def set_handle_pool_limits(max_per_key: int, max_total: int) -> None:
 
 
 def get_handle_pool_limits() -> tuple[int, int]:
-    """获取当前句柄池容量限制 (max_per_key,max_total)。"""
+    """获取当前句柄池容量限制 (max_per_key, max_total)。"""
     return _get_handle_pool_limits()
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# 向后兼容的 worker count API
+# ════════════════════════════════════════════════════════════════════════════
 
 def set_io_worker_count(count: int = 0) -> None:
     """通用的设置 I/O worker 数量的接口（跨平台）。
@@ -110,6 +195,10 @@ def set_iocp_worker_count(count: int = 0) -> None:
     set_io_worker_count(count)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 清理和警告
+# ════════════════════════════════════════════════════════════════════════════
+
 def _register_native_cleanup() -> None:
     """在 Python 层统一注册本机清理逻辑，避免直接在本机层注册 atexit 导致的潜在不安全行为。"""
     if _native_cleanup is None:
@@ -130,10 +219,11 @@ def _register_native_cleanup() -> None:
         # 极少情况：若无法导入 atexit，则静默忽略
         pass
 
+
 WARING_ED = False
 """ 是否警告过了 """
 
-# ── 平台检测和警告 ──────────────────────────────────────────────────────
+
 def _warn_fake_async():
     global WARING_ED
     """如果当前平台不支持真异步，发出 UserWarning"""
@@ -143,7 +233,10 @@ def _warn_fake_async():
             # Windows: 真异步 IOCP
             return
         elif sys.platform == "linux":
-            # Linux: 目前是线程池假异步，但未来可以升级到 io_uring
+            # Linux: 可能支持 io_uring，由 C++ 层检测
+            info = get_backend_info()
+            if info.get("backend") == "io_uring":
+                return  # 真异步，不警告
             warnings.warn(
                 "Current Linux backend uses ThreadIOBackend (fake async). "
                 "Native io_uring support is planned for a future release.",
@@ -167,11 +260,16 @@ def _warn_fake_async():
                 UserWarning,
                 stacklevel=3
             )
-    
+
 
 # 执行注册
 _register_native_cleanup()
 _warn_fake_async()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# AsyncFile 类
+# ════════════════════════════════════════════════════════════════════════════
 
 class AsyncFile:
     """跨平台异步文件对象。
@@ -364,3 +462,24 @@ def open(
             await f.write('hello')
     """
     return AsyncFile(path, mode, encoding)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 导出公共 API
+# ════════════════════════════════════════════════════════════════════════════
+
+__all__ = [
+    # 主要 API
+    "open",
+    "AsyncFile",
+    # 配置 API
+    "configure",
+    "get_config",
+    "reset_config",
+    "get_backend_info",
+    # 向后兼容 API
+    "set_handle_pool_limits",
+    "get_handle_pool_limits",
+    "set_io_worker_count",
+    "set_iocp_worker_count",
+]
