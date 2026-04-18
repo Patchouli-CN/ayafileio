@@ -51,17 +51,17 @@ jobs:
           export CIBW_BUILD="cp${CP_VERSION}-*"
           export CIBW_ARCHS="x86_64"
           export CIBW_MANYLINUX_X86_64_IMAGE="manylinux_2_28"
+          export CIBW_MUSLLINUX_X86_64_IMAGE="musllinux_1_2"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_TEST_SKIP="*"
           
           # manylinux: 启用 io_uring，安装 liburing-devel
           export CIBW_ENVIRONMENT="ENABLE_IO_URING=ON"
-          export CIBW_BEFORE_ALL="yum install -y liburing-devel"
+          export CIBW_BEFORE_ALL_MANYLINUX_X86_64="yum install -y liburing-devel"
           
-          # musllinux: 不启用 io_uring（使用默认的线程池后端）
-          # Alpine Linux 没有 liburing 包，让 CMake 自动检测并禁用
-          export CIBW_MUSLLINUX_X86_64_IMAGE="musllinux_1_2"
+          # musllinux: 禁用 io_uring，不安装任何额外包
           export CIBW_ENVIRONMENT_MUSLLINUX_X86_64="ENABLE_IO_URING=OFF"
+          # 不需要设置 CIBW_BEFORE_ALL_MUSLLINUX_X86_64（留空即可）
           
           python -m cibuildwheel --output-dir dist
       
