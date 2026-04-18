@@ -5,6 +5,9 @@
 #ifdef _WIN32
 #include "iocp.hpp"
 #endif
+#ifdef HAVE_IO_URING
+#include <liburing.h>
+#endif
 #include "file_handle.hpp"
 #include "handle_pool.hpp"
 #include "config.hpp"

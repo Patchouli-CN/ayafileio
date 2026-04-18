@@ -65,7 +65,7 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     
     // 设置 io_uring
     if (!setup_uring()) {
-        close(m_fd);
+        ::close(m_fd);
         throw std::runtime_error("Failed to setup io_uring");
     }
     
