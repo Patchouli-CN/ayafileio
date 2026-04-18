@@ -239,7 +239,7 @@ def _warn_fake_async():
                 return  # 真异步，不警告
             warnings.warn(
                 "Current Linux backend uses ThreadIOBackend (fake async). "
-                "Native io_uring support is planned for a future release.",
+                "the io_uring has not support on your linux kernel! (<= 5.1)",
                 UserWarning,
                 stacklevel=3
             )
