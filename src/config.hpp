@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <string>
 #include <mutex>
+#include <stdexcept>
+#include <vector>
 
 namespace ayafileio {
 
