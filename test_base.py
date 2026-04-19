@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-ayafileio 简单测试框架
-直接运行，不依赖 pytest
-"""
-
 import asyncio
 import sys
 import tempfile
@@ -33,15 +27,20 @@ def get_shared_loop():
     """获取或创建共享事件循环"""
     global _shared_loop
     if _shared_loop is None or _shared_loop.is_closed():
-        # 只在 Python < 3.12 中重置事件循环策略
-        # 从 Python 3.12 开始，这个问题已经修复
-        if sys.version_info < (3, 12):
+        # Python 3.12+ 使用 SelectorEventLoop 以避免 C 扩展相关的潜在问题
+        if sys.version_info >= (3, 12):
             try:
-                asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-            except:
-                pass
+                _shared_loop = asyncio.SelectorEventLoop()
+            except Exception:
+                _shared_loop = asyncio.new_event_loop()
+        else:
+            if sys.version_info < (3, 12):
+                try:
+                    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+                except:
+                    pass
+            _shared_loop = asyncio.new_event_loop()
         
-        _shared_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_shared_loop)
     return _shared_loop
 
@@ -663,6 +662,12 @@ def main():
     print("=" * 60)
     print("ayafileio 测试套件")
     print("=" * 60)
+    
+    # 打印环境信息
+    print(f"\nPython: {sys.version}")
+    print(f"Platform: {sys.platform}")
+    info = ayafileio.get_backend_info()
+    print(f"Backend: {info['backend']} (truly_async: {info['is_truly_async']})")
     
     runner.start_time = time.time()
     

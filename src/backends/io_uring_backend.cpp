@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <cerrno>
-#include <sys/eventfd.h>
 #include <cstring>
 #include <chrono>
 #include <thread>
@@ -74,9 +73,6 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     m_cached_buffer_size = cfg.buffer_size();
     m_cached_buffer_pool_max = cfg.buffer_pool_max();
     m_cached_close_timeout_ms = cfg.close_timeout_ms();
-    m_cached_io_uring_queue_depth = cfg.io_uring_queue_depth();
-    m_cached_io_uring_flags = cfg.io_uring_flags();
-    m_cached_io_uring_sqpoll = cfg.io_uring_sqpoll();
     
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
@@ -96,7 +92,6 @@ IOUringBackend::~IOUringBackend() {
         Py_XDECREF(m_create_future);
         Py_XDECREF(m_loop);
     }
-    // m_uring 会自动释放引用
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -126,46 +121,54 @@ void IOUringBackend::ensure_loop_initialized() {
     m_loop_handle = g_cachedLoopHandle;
     
     // 从池中获取 io_uring 实例
+    auto& cfg = ayafileio::config();
     m_uring = UringPool::instance().acquire(
         m_loop,
-        m_cached_io_uring_queue_depth,
-        m_cached_io_uring_flags,
-        m_cached_io_uring_sqpoll
+        &IOUringBackend::reaper_loop_entry,
+        cfg.io_uring_queue_depth(),
+        cfg.io_uring_flags(),
+        cfg.io_uring_sqpoll()
     );
     
     if (!m_uring) {
         throw std::runtime_error("Failed to acquire io_uring instance");
     }
     
-    // 如果 reaper 线程还没启动，启动它
+    // 启动 reaper 线程
     if (!m_uring->reaper_thread.joinable()) {
-        m_uring->reaper_thread = std::thread(&IOUringBackend::reaper_loop_entry, 
-                                              m_uring.get(), this);
+        m_uring->running.store(true, std::memory_order_release);
+        m_uring->reaper_thread = std::thread(&IOUringBackend::reaper_loop_entry, m_uring.get());
     }
     
     m_loop_initialized = true;
 }
 
-void IOUringBackend::reaper_loop_entry(UringInstance* inst, IOUringBackend* backend) {
-    uint64_t event_val;
-    struct io_uring_sqe* sqe;
-    struct io_uring_cqe* cqe;
+// ════════════════════════════════════════════════════════════════════════════
+// Reaper 循环 - 简化版，移除 eventfd
+// ════════════════════════════════════════════════════════════════════════════
+
+void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
+    struct io_uring_cqe* cqe = nullptr;
+    struct __kernel_timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 1000000; // 1ms 超时
     
-    // 提交 eventfd 读取
-    sqe = io_uring_get_sqe(&inst->ring);
-    if (sqe) {
-        io_uring_prep_read(sqe, inst->event_fd, &event_val, sizeof(event_val), 0);
-        io_uring_sqe_set_data(sqe, nullptr);
-        io_uring_submit(&inst->ring);
-    }
-    
-    while (!inst->reaper_stop.load(std::memory_order_relaxed)) {
-        int ret = io_uring_wait_cqe(&inst->ring, &cqe);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            break;
+    while (!inst->reaper_stop.load(std::memory_order_acquire)) {
+        // 使用超时等待，让线程有机会检查 stop 标志
+        int ret = io_uring_wait_cqe_timeout(&inst->ring, &cqe, &ts);
+        
+        if (ret == -ETIME) {
+            // 超时，继续循环检查 stop 标志
+            continue;
+        } else if (ret < 0) {
+            // 严重错误，退出循环
+            if (ret != -EINTR) {
+                break;
+            }
+            continue;
         }
         
+        // 处理所有完成事件
         unsigned head;
         unsigned count = 0;
         
@@ -177,15 +180,6 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst, IOUringBackend* back
                     file->complete_ok(req, static_cast<size_t>(cqe->res));
                 } else {
                     file->complete_error(req, static_cast<DWORD>(-cqe->res));
-                }
-            } else {
-                if (!inst->reaper_stop.load(std::memory_order_relaxed)) {
-                    sqe = io_uring_get_sqe(&inst->ring);
-                    if (sqe) {
-                        io_uring_prep_read(sqe, inst->event_fd, &event_val, sizeof(event_val), 0);
-                        io_uring_sqe_set_data(sqe, nullptr);
-                        io_uring_submit(&inst->ring);
-                    }
                 }
             }
             count++;
@@ -210,6 +204,7 @@ void IOUringBackend::submit_io(IORequest* req, int op, int fd,
     
     struct io_uring_sqe* sqe = io_uring_get_sqe(&m_uring->ring);
     if (!sqe) {
+        // 队列满，稍后重试或返回错误
         complete_error(req, EBUSY);
         return;
     }
@@ -246,7 +241,7 @@ PyObject* IOUringBackend::read(int64_t size) {
     if (!future) return nullptr;
     
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_relaxed), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
     if (closed_future) {
         Py_DECREF(future);
         return closed_future;
@@ -306,7 +301,7 @@ PyObject* IOUringBackend::write(Py_buffer* view) {
     if (!future) return nullptr;
     
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_relaxed), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
     if (closed_future) {
         Py_DECREF(future);
         return closed_future;
@@ -393,7 +388,7 @@ PyObject* IOUringBackend::flush() {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     
-    if (!m_running.load(std::memory_order_relaxed) || m_fd == -1) {
+    if (!m_running.load(std::memory_order_acquire) || m_fd == -1) {
         resolve_exc(future, g_OSError, 0, "flush on closed file");
         return future;
     }
@@ -437,8 +432,16 @@ PyObject* IOUringBackend::close() {
 
 void IOUringBackend::close_impl() {
     bool expected = true;
-    if (!m_running.compare_exchange_strong(expected, false)) return;
+    if (!m_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+        return;  // 已经关闭
+    }
     
+    // 1. 首先停止 reaper 线程（通过 UringInstance）
+    if (m_uring) {
+        m_uring->stop_reaper();
+    }
+    
+    // 2. 等待 pending I/O 完成
     int elapsed = 0;
     int wait_time = 1;
     while (elapsed < static_cast<int>(m_cached_close_timeout_ms) && 
@@ -448,12 +451,13 @@ void IOUringBackend::close_impl() {
         wait_time = std::min(wait_time * 2, 32);
     }
     
-    // 释放 io_uring 实例引用
+    // 3. 释放 io_uring 实例引用
     if (m_uring) {
         UringPool::instance().release(m_uring);
         m_uring.reset();
     }
     
+    // 4. 关闭文件描述符
     if (m_fd != -1) {
         ::close(m_fd);
         m_fd = -1;
@@ -486,7 +490,12 @@ void IOUringBackend::complete_ok(IORequest* req, size_t bytes) {
     Py_XDECREF(req->set_exception);
     req->set_exception = nullptr;
     
-    req->loop_handle->push(set_fn, val);
+    if (set_fn && val) {
+        req->loop_handle->push(set_fn, val);
+    } else {
+        Py_XDECREF(set_fn);
+        Py_XDECREF(val);
+    }
     delete req;
     
     PyGILState_Release(gs);
@@ -507,7 +516,12 @@ void IOUringBackend::complete_error(IORequest* req, DWORD err) {
     Py_XDECREF(req->set_result);
     req->set_result = nullptr;
     
-    req->loop_handle->push(set_fn, exc);
+    if (set_fn && exc) {
+        req->loop_handle->push(set_fn, exc);
+    } else {
+        Py_XDECREF(set_fn);
+        Py_XDECREF(exc);
+    }
     delete req;
     
     PyGILState_Release(gs);
@@ -543,10 +557,12 @@ void IOUringBackend::complete_error_inline(IORequest* req, DWORD err) {
     PyObject* exc = PyObject_CallFunction(exc_class, "is", static_cast<int>(err), "I/O operation failed");
     PyObject* set_fn = req->set_exception;
     req->set_exception = nullptr;
-    PyObject* r = PyObject_CallFunctionObjArgs(set_fn, exc, nullptr);
-    Py_XDECREF(r);
-    Py_DECREF(set_fn);
-    Py_DECREF(exc);
+    if (set_fn && exc) {
+        PyObject* r = PyObject_CallFunctionObjArgs(set_fn, exc, nullptr);
+        Py_XDECREF(r);
+    }
+    Py_XDECREF(set_fn);
+    Py_XDECREF(exc);
     delete req;
 }
 

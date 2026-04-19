@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cerrno>
 #include <cstdio>
+#include <linux/time.h>  // 或者手动定义
 using DWORD = uint32_t;
 using HANDLE = int;
 static constexpr HANDLE INVALID_HANDLE_VALUE = (HANDLE)-1;

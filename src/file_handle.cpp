@@ -26,13 +26,17 @@ FileHandle::FileHandle(const std::string &path, const std::string &mode) {
     }();
     
     if (has_io_uring) {
-        m_backend = new IOUringBackend(path, mode);
-    } else {
-        m_backend = new ThreadIOBackend(path, mode);
+        try {
+            m_backend = new IOUringBackend(path, mode);
+            return;
+        } catch (const std::exception& e) {
+            // io_uring 后端创建失败，降级到线程池
+            // 记录警告（可选）
+        }
     }
-#else
-    m_backend = new ThreadIOBackend(path, mode);
 #endif
+    // 降级到线程池后端
+    m_backend = new ThreadIOBackend(path, mode);
 #endif
 }
 

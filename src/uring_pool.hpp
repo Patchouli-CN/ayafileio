@@ -11,47 +11,42 @@
 #include <condition_variable>
 #include <vector>
 #include <Python.h>
-#include <sys/eventfd.h>
-#include <unistd.h>
-
 
 // ════════════════════════════════════════════════════════════════════════════
 // io_uring 实例池 - 复用 io_uring，避免频繁创建/销毁
 // ════════════════════════════════════════════════════════════════════════════
 
+// 前置声明
+class IOUringBackend;
+
 struct UringInstance {
     struct io_uring ring;
-    int event_fd = -1;
     std::atomic<int> ref_count{0};
     std::atomic<bool> running{true};
     std::thread reaper_thread;
     std::atomic<bool> reaper_stop{false};
-    PyObject* loop = nullptr;  // 关联的事件循环（弱引用）
+    PyObject* loop = nullptr;  // 关联的事件循环（强引用）
     
     // 配置参数
     unsigned queue_depth = 256;
     unsigned flags = 0;
     bool sqpoll = false;
     
+    // reaper 循环函数指针（由 IOUringBackend 设置）
+    using ReaperFunc = void (*)(UringInstance*);
+    ReaperFunc reaper_func = nullptr;
+    
     ~UringInstance() {
         stop_reaper();
         io_uring_queue_exit(&ring);
-        if (event_fd != -1) {
-            ::close(event_fd);
-        }
         Py_XDECREF(loop);
     }
     
     void stop_reaper() {
         if (!running.exchange(false)) return;
-        reaper_stop.store(true);
+        reaper_stop.store(true, std::memory_order_release);
         
-        // 唤醒 reaper 线程
-        if (event_fd != -1) {
-            uint64_t val = 1;
-            ::write(event_fd, &val, sizeof(val));
-        }
-        
+        // 等待 reaper 线程结束
         if (reaper_thread.joinable()) {
             reaper_thread.join();
         }
@@ -71,6 +66,7 @@ public:
     
     // 获取或创建与当前事件循环关联的 io_uring 实例
     std::shared_ptr<UringInstance> acquire(PyObject* loop, 
+                                            UringInstance::ReaperFunc reaper_func,
                                             unsigned queue_depth = 256,
                                             unsigned flags = 0,
                                             bool sqpoll = false) {
@@ -82,7 +78,7 @@ public:
         auto it = m_instances.find(key);
         if (it != m_instances.end()) {
             auto inst = it->second.lock();
-            if (inst && inst->running.load()) {
+            if (inst && inst->running.load(std::memory_order_acquire)) {
                 inst->add_ref();
                 return inst;
             }
@@ -96,6 +92,7 @@ public:
         inst->flags = flags;
         inst->sqpoll = sqpoll;
         inst->loop = loop;
+        inst->reaper_func = reaper_func;
         Py_INCREF(loop);
         
         if (!setup_instance(inst.get())) {
@@ -152,13 +149,6 @@ private:
     }
     
     bool setup_instance(UringInstance* inst) {
-        // 创建 eventfd
-        inst->event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        if (inst->event_fd == -1) {
-            return false;
-        }
-        
-        // 初始化 io_uring
         unsigned actual_flags = inst->flags;
         if (inst->sqpoll) {
             actual_flags |= IORING_SETUP_SQPOLL;
@@ -172,8 +162,6 @@ private:
         
         int ret = io_uring_queue_init(inst->queue_depth, &inst->ring, actual_flags);
         if (ret < 0) {
-            ::close(inst->event_fd);
-            inst->event_fd = -1;
             return false;
         }
         
@@ -205,6 +193,7 @@ private:
                 if (it->expiry <= now) {
                     // 从主 map 中移除
                     if (auto inst = it->instance.lock()) {
+                        inst->stop_reaper();
                         std::lock_guard<std::mutex> lk2(m_mutex);
                         void* key = inst->loop;
                         auto map_it = m_instances.find(key);

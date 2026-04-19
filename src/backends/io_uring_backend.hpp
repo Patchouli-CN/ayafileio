@@ -24,7 +24,7 @@ public:
     void complete_error(IORequest* req, DWORD err) override;
 
     // reaper 循环入口（由池调用）
-    static void reaper_loop_entry(UringInstance* inst, IOUringBackend* backend);
+    static void reaper_loop_entry(UringInstance* inst);
 
 private:
     int m_fd = -1;
@@ -46,7 +46,6 @@ private:
     
     void ensure_loop_initialized();
     void submit_io(IORequest* req, int op, int fd, const void* buf, size_t len, off_t offset);
-    void reaper_loop();
     
     IORequest* make_req(size_t size, PyObject* future, ReqType type) override;
     void complete_error_inline(IORequest* req, DWORD err) override;
@@ -55,9 +54,6 @@ private:
     size_t m_cached_buffer_size = 65536;
     size_t m_cached_buffer_pool_max = 512;
     unsigned m_cached_close_timeout_ms = 4000;
-    unsigned m_cached_io_uring_queue_depth = 256;
-    unsigned m_cached_io_uring_flags = 0;
-    bool m_cached_io_uring_sqpoll = false;
 };
 
 #endif // HAVE_IO_URING
