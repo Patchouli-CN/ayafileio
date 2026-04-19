@@ -4,7 +4,7 @@
 #include "../globals.hpp"
 #include "../config.hpp"
 #include "./utils/file_mode.hpp"
-#include "./utils/error_utils.hpp"
+#include "./utils/error_util.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
