@@ -45,11 +45,20 @@ struct UringInstance {
     ReaperFunc reaper_func = nullptr;
     
     ~UringInstance() {
-        stop_reaper();
+        // 如果 reaper 还在运行，尝试停止它（但可能已经停了，所以加个判断）
+        if (running.exchange(false)) {
+            reaper_stop.store(true);
+            if (event_fd != -1) {
+                uint64_t val = 1;
+                write(event_fd, &val, sizeof(val));  // 唤醒可能还在等待的 reaper
+            }
+            if (reaper_thread.joinable()) {
+                reaper_thread.join();
+            }
+        }
         io_uring_queue_exit(&ring);
         if (event_fd != -1) {
             ::close(event_fd);
-            event_fd = -1;
         }
         Py_XDECREF(loop);
     }
