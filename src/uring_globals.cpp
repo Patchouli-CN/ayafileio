@@ -9,6 +9,6 @@
 
 std::atomic<bool> g_uring_running{false};
 std::mutex g_uring_instances_mtx;
-std::unordered_map<void*, std::weak_ptr<UringInstance>> g_uring_instances;
+std::unordered_map<void*, std::shared_ptr<UringInstance>> g_uring_instances;
 
 #endif // HAVE_IO_URING

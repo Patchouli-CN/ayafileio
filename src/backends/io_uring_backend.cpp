@@ -487,9 +487,6 @@ void IOUringBackend::close_impl() {
     UR_LOG("close_impl start: this=%p, fd=%d, pending=%ld", 
            (void*)this, m_fd, m_pending.load());
     
-    // 注意：不要在这里调用 m_uring->stop_reaper()！
-    // reaper 线程属于共享的 UringInstance，应该只在 cleanup 时停止
-    
     // 等待 pending I/O 完成
     int elapsed = 0;
     int wait_time = 1;
@@ -509,7 +506,7 @@ void IOUringBackend::close_impl() {
                m_pending.load());
     }
     
-    // 释放 io_uring 实例引用（实例保留在管理器中供复用）
+    // 释放 io_uring 实例引用（管理器仍持有，所以实例不会被销毁）
     if (m_uring) {
         UR_LOG("close_impl: releasing uring instance %p", (void*)m_uring.get());
         m_uring.reset();

@@ -14,25 +14,20 @@
 #include <poll.h>
 #include "debug_log.hpp"
 
-// ════════════════════════════════════════════════════════════════════════════
-// io_uring 全局管理器 - 类似 Windows 的 IOCP 全局管理
-// ════════════════════════════════════════════════════════════════════════════
-
 class IOUringBackend;
 
 #define THREAD_ID_HASH() std::hash<std::thread::id>{}(std::this_thread::get_id())
 
-// 全局状态声明（定义在 uring_globals.cpp 中）
 extern std::atomic<bool> g_uring_running;
 extern std::mutex g_uring_instances_mtx;
-extern std::unordered_map<void*, std::weak_ptr<struct UringInstance>> g_uring_instances;
+extern std::unordered_map<void*, std::shared_ptr<struct UringInstance>> g_uring_instances;
 
 struct UringInstance {
     struct io_uring ring;
     std::thread reaper_thread;
     std::atomic<bool> reaper_stop{false};
     std::atomic<bool> reaper_started{false};
-    std::atomic<bool> running{true};      // 标记实例是否可用
+    std::atomic<bool> running{true};
     std::mutex start_mutex;
     PyObject* loop = nullptr;
     int event_fd = -1;
@@ -45,7 +40,6 @@ struct UringInstance {
     ReaperFunc reaper_func = nullptr;
     
     UringInstance() = default;
-    
     UringInstance(const UringInstance&) = delete;
     UringInstance& operator=(const UringInstance&) = delete;
     
@@ -55,21 +49,17 @@ struct UringInstance {
         running.store(false, std::memory_order_release);
         reaper_stop.store(true, std::memory_order_release);
         
-        // 唤醒 reaper
         if (event_fd != -1) {
             uint64_t val = 1;
             write(event_fd, &val, sizeof(val));
         }
         
-        // 等待 reaper 退出
         if (reaper_thread.joinable()) {
             reaper_thread.join();
         }
         
-        // 清理 io_uring
         io_uring_queue_exit(&ring);
         
-        // 关闭 eventfd
         if (event_fd != -1) {
             ::close(event_fd);
         }
@@ -90,10 +80,6 @@ struct UringInstance {
     }
 };
 
-// ════════════════════════════════════════════════════════════════════════════
-// 全局 io_uring 管理器
-// ════════════════════════════════════════════════════════════════════════════
-
 class UringManager {
 public:
     static UringManager& instance() {
@@ -113,7 +99,7 @@ public:
         
         auto it = m_instances.find(key);
         if (it != m_instances.end()) {
-            auto inst = it->second.lock();
+            auto inst = it->second;
             if (inst && inst->running.load(std::memory_order_acquire)) {
                 UR_LOG("UringManager::acquire: found existing instance=%p", (void*)inst.get());
                 return inst;
@@ -127,10 +113,12 @@ public:
         inst->flags = flags;
         inst->sqpoll = sqpoll;
         inst->loop = loop;
+        Py_INCREF(loop);  // 增加引用计数
         inst->reaper_func = reaper_func;
         inst->running.store(true, std::memory_order_release);
         
         if (!setup_instance(inst.get())) {
+            Py_DECREF(loop);
             UR_LOG("UringManager::acquire: setup_instance failed");
             return nullptr;
         }
@@ -161,7 +149,8 @@ public:
         UR_LOG("UringManager::cleanup_all: cleaning %zu instances", m_instances.size());
         
         for (auto& pair : m_instances) {
-            if (auto inst = pair.second.lock()) {
+            auto inst = pair.second;
+            if (inst) {
                 UR_LOG("UringManager::cleanup_all: stopping instance=%p", (void*)inst.get());
                 inst->stop_reaper();
                 if (inst->loop) {
@@ -180,6 +169,18 @@ public:
         }
         
         UR_LOG("UringManager::cleanup_all: done");
+    }
+    
+    // 移除不再使用的实例（当 loop 被销毁时调用）
+    void remove(PyObject* loop) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        void* key = loop;
+        auto it = m_instances.find(key);
+        if (it != m_instances.end()) {
+            UR_LOG("UringManager::remove: removing instance for loop=%p", (void*)loop);
+            it->second->stop_reaper();
+            m_instances.erase(it);
+        }
     }
     
     size_t instance_count() const {
@@ -233,10 +234,9 @@ private:
     }
     
     mutable std::mutex m_mutex;
-    std::unordered_map<void*, std::weak_ptr<UringInstance>> m_instances;
+    std::unordered_map<void*, std::shared_ptr<UringInstance>> m_instances;
 };
 
-// 便捷函数
 inline UringManager& uring_manager() {
     return UringManager::instance();
 }
