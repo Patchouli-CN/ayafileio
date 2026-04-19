@@ -43,8 +43,10 @@ Windows 上使用 IOCP（I/O 完成端口）实现真异步，Linux 上使用线
 
 import sys
 import locale
-import warnings
 from pathlib import Path
+from .util import warn_fake_async
+
+warn_fake_async()
 
 from ._ayafileio import (
     AsyncFile as _AsyncFile,
@@ -219,53 +221,8 @@ def _register_native_cleanup() -> None:
         # 极少情况：若无法导入 atexit，则静默忽略
         pass
 
-
-WARNED = False
-""" 是否警告过了 """
-
-
-def _warn_fake_async():
-    global WARNED
-    """如果当前平台不支持真异步，发出 UserWarning"""
-    if not WARNED:
-        WARNED = True
-        if sys.platform == "win32":
-            # Windows: 真异步 IOCP
-            return
-        elif sys.platform == "linux":
-            # Linux: 可能支持 io_uring，由 C++ 层检测
-            info = get_backend_info()
-            if info.get("backend") == "io_uring":
-                return  # 真异步，不警告
-            warnings.warn(
-                "Current Linux backend uses ThreadIOBackend (fake async). "
-                "the io_uring has not support on your linux kernel! (<= 5.1)",
-                UserWarning,
-                stacklevel=3
-            )
-        elif sys.platform == "darwin":
-            # MacOS: 只能假异步，因为系统不支持
-            warnings.warn(
-                "MacOS does not support native async file I/O. "
-                "Falling back to ThreadIOBackend (fake async). "
-                "This is an OS limitation, not a library issue.",
-                UserWarning,
-                stacklevel=3
-            )
-        else:
-            # 其他 Unix-like 系统
-            warnings.warn(
-                f"Platform '{sys.platform}' uses ThreadIOBackend (fake async). "
-                "Native async I/O is not available on this platform.",
-                UserWarning,
-                stacklevel=3
-            )
-
-
 # 执行注册
 _register_native_cleanup()
-_warn_fake_async()
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # AsyncFile 类
