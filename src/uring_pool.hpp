@@ -13,6 +13,7 @@
 #include <Python.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include <poll.h>          // for POLLIN
 #include "debug_log.hpp"
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -21,6 +22,9 @@
 
 // 前置声明
 class IOUringBackend;
+
+// 辅助宏：安全打印 std::thread::id（转换为 size_t 哈希值）
+#define THREAD_ID_HASH() std::hash<std::thread::id>{}(std::this_thread::get_id())
 
 struct UringInstance {
     struct io_uring ring;
@@ -52,7 +56,7 @@ struct UringInstance {
     
     void stop_reaper() {
         if (!running.exchange(false)) return;
-        UR_LOG("UringInstance::stop_reaper: stopping reaper, inst=%p", (void*)this);
+        UR_LOG("UringInstance::stop_reaper: stopping reaper, inst=%p, thread_hash=0x%zx", (void*)this, THREAD_ID_HASH());
         reaper_stop.store(true, std::memory_order_release);
         
         // 向 eventfd 写入 1 字节，强制唤醒 reaper 线程
@@ -95,7 +99,7 @@ public:
         
         // 使用 loop 指针作为 key
         void* key = loop;
-        UR_LOG("UringPool::acquire: loop=%p, key=%p", (void*)loop, key);
+        UR_LOG("UringPool::acquire: loop=%p, key=%p, thread_hash=0x%zx", (void*)loop, key, THREAD_ID_HASH());
         
         auto it = m_instances.find(key);
         if (it != m_instances.end()) {

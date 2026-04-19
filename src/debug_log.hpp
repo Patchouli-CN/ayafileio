@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <thread>
 #include <atomic>
+#include <functional>  // for std::hash
 
 #ifdef AYAFILEIO_VERBOSE_LOGGING
 
@@ -13,12 +14,11 @@
         auto now = std::chrono::steady_clock::now(); \
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>( \
             now.time_since_epoch()).count() % 1000000; \
-        std::fprintf(stderr, "[%6ld][0x%lx] " fmt "\n", \
-            ms, std::this_thread::get_id(), ##__VA_ARGS__); \
+        std::fprintf(stderr, "[%6ld][0x%zx] " fmt "\n", \
+            ms, std::hash<std::thread::id>{}(std::this_thread::get_id()), ##__VA_ARGS__); \
         std::fflush(stderr); \
     } while(0)
 
-// 限频日志：同一位置同一消息至少间隔 N 次才打印
 #define UR_LOG_RATELIMIT(counter_var, interval, fmt, ...) \
     do { \
         static std::atomic<int> _cnt{0}; \
@@ -28,7 +28,6 @@
         } \
     } while(0)
 
-// 用于 reaper 循环的空转日志限流
 #define UR_LOG_REAPER_IDLE() \
     do { \
         static std::atomic<int> idle_cnt{0}; \
