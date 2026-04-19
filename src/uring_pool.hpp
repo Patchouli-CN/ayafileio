@@ -48,6 +48,17 @@ struct UringInstance {
         UR_LOG("UringInstance::stop_reaper: stopping reaper, inst=%p", (void*)this);
         reaper_stop.store(true, std::memory_order_release);
         
+        // 向 io_uring 提交一个 NOP 以唤醒 reaper 线程
+        struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+        if (sqe) {
+            io_uring_prep_nop(sqe);
+            io_uring_sqe_set_data(sqe, nullptr);
+            int submitted = io_uring_submit(&ring);
+            UR_LOG("UringInstance::stop_reaper: submitted NOP to wake reaper, submitted=%d", submitted);
+        } else {
+            UR_LOG("UringInstance::stop_reaper: failed to get SQE for NOP");
+        }
+        
         // 等待 reaper 线程结束
         if (reaper_thread.joinable()) {
             reaper_thread.join();
