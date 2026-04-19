@@ -30,10 +30,15 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     m_cached_buffer_pool_max = cfg.buffer_pool_max();
     m_cached_close_timeout_ms = cfg.close_timeout_ms();
     
-    // 使用缓存的配置
-    unsigned num_workers = cfg.io_worker_count();
-
-    // ⚠️ 延迟获取事件循环，不在构造函数中获取！
+    // 保存工作线程数量，但不立即启动
+    m_num_workers = cfg.io_worker_count();
+    if (m_num_workers == 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0) hc = 1;
+        m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
+    } else if (!(m_num_workers >= 1 && m_num_workers <= 128)) {
+        throw py::value_error("worker count must be 0 (auto) or 1-128");
+    }
 
     int flags = O_RDONLY;
     ModeInfo mi;
@@ -65,19 +70,8 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
             m_filePos = st.st_size;
         }
     }
-
-    // 只在需要时创建 worker 线程
-    if (num_workers == 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 1;
-        num_workers = std::max(1u, std::min(hc * 2u, 16u));
-    } else if (!(num_workers >= 1 && num_workers <= 128)) {
-        throw py::value_error("worker count must be 0 (auto) or 1-128");
-    }
     
-    for (unsigned i = 0; i < num_workers; ++i) {
-        m_workers.emplace_back(&ThreadIOBackend::worker_thread, this);
-    }
+    // 不再在构造函数中启动工作线程
 }
 
 ThreadIOBackend::~ThreadIOBackend() {
@@ -88,14 +82,31 @@ ThreadIOBackend::~ThreadIOBackend() {
     }
 }
 
+void ThreadIOBackend::start_workers() {
+    if (m_workers_started) return;
+    std::lock_guard<std::mutex> lk(m_loop_init_mtx);
+    if (m_workers_started) return;
+    
+    m_workers.reserve(m_num_workers);
+    for (unsigned i = 0; i < m_num_workers; ++i) {
+        m_workers.emplace_back(&ThreadIOBackend::worker_thread, this);
+    }
+    m_workers_started = true;
+}
+
 void ThreadIOBackend::ensure_loop_initialized() {
     if (m_loop_initialized) return;
     std::lock_guard<std::mutex> lk(m_loop_init_mtx);
-    if (m_loop_initialized) return;  // 双重检查
+    if (m_loop_initialized) return;
+    
+    // 先启动工作线程
+    if (!m_workers_started) {
+        start_workers();
+    }
     
     PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) {
-        PyErr_Clear();  // 清除错误状态
+        PyErr_Clear();
         throw std::runtime_error("No running event loop");
     }
     refresh_loop_cache(loop);
@@ -276,7 +287,6 @@ PyObject *ThreadIOBackend::flush() {
 PyObject *ThreadIOBackend::close() {
     // close 可能在没有初始化事件循环的情况下调用
     if (!m_loop_initialized) {
-        // 直接同步关闭
         close_impl();
         Py_RETURN_NONE;
     }
@@ -299,6 +309,7 @@ void ThreadIOBackend::close_impl() {
     for (auto& t : m_workers) {
         if (t.joinable()) t.join();
     }
+    m_workers.clear();
     if (m_fd != -1) {
         ::close(m_fd);
         m_fd = -1;
@@ -357,7 +368,6 @@ IORequest *ThreadIOBackend::make_req(size_t size, PyObject *future, ReqType type
     req->reqSize = size;
     req->type = type;
     
-    // 使用按需分配的缓冲区池
     if (size <= m_cached_buffer_size) {
         req->poolBuf = pool_acquire_with_size(size);
     } else {

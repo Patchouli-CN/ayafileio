@@ -55,20 +55,6 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     m_cached_io_uring_flags = cfg.io_uring_flags();
     m_cached_io_uring_sqpoll = cfg.io_uring_sqpoll();
     
-    // 创建 eventfd 用于唤醒 reaper 线程
-    m_event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (m_event_fd == -1) {
-        ::close(m_fd);
-        throw std::runtime_error("Failed to create eventfd");
-    }
-    
-    // 设置 io_uring
-    if (!setup_uring()) {
-        ::close(m_event_fd);
-        ::close(m_fd);
-        throw std::runtime_error("Failed to setup io_uring");
-    }
-    
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
@@ -79,6 +65,8 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
             m_filePos = st.st_size;
         }
     }
+    
+    // 不在构造函数中初始化 io_uring，延迟到第一次 I/O 操作
 }
 
 IOUringBackend::~IOUringBackend() {
@@ -89,13 +77,42 @@ IOUringBackend::~IOUringBackend() {
     }
 }
 
+void IOUringBackend::start_uring() {
+    if (m_uring_started) return;
+    std::lock_guard<std::mutex> lk(m_loop_init_mtx);
+    if (m_uring_started) return;
+    
+    // 创建 eventfd 用于唤醒 reaper 线程
+    m_event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (m_event_fd == -1) {
+        throw std::runtime_error("Failed to create eventfd");
+    }
+    
+    // 设置 io_uring
+    if (!setup_uring()) {
+        ::close(m_event_fd);
+        m_event_fd = -1;
+        throw std::runtime_error("Failed to setup io_uring");
+    }
+    
+    m_uring_started = true;
+}
+
 void IOUringBackend::ensure_loop_initialized() {
     if (m_loop_initialized) return;
     std::lock_guard<std::mutex> lk(m_loop_init_mtx);
     if (m_loop_initialized) return;
     
+    // 先启动 io_uring
+    if (!m_uring_started) {
+        start_uring();
+    }
+    
     PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
-    if (!loop) throw py::python_error();
+    if (!loop) {
+        PyErr_Clear();
+        throw std::runtime_error("No running event loop");
+    }
     refresh_loop_cache(loop);
     m_loop = loop;
     m_create_future = g_cachedFutureFn;
@@ -120,12 +137,16 @@ bool IOUringBackend::setup_uring() {
 }
 
 void IOUringBackend::teardown_uring() {
+    if (!m_uring_started) return;
+    
     m_reaper_stop.store(true);
     
     // 唤醒 reaper 线程
-    uint64_t val = 1;
-    ssize_t written = ::write(m_event_fd, &val, sizeof(val));
-    (void)written;  // 忽略返回值
+    if (m_event_fd != -1) {
+        uint64_t val = 1;
+        ssize_t written = ::write(m_event_fd, &val, sizeof(val));
+        (void)written;  // 忽略返回值
+    }
     
     if (m_reaper_thread.joinable()) {
         m_reaper_thread.join();
@@ -136,6 +157,8 @@ void IOUringBackend::teardown_uring() {
         ::close(m_event_fd);
         m_event_fd = -1;
     }
+    
+    m_uring_started = false;
 }
 
 void IOUringBackend::reaper_loop() {
@@ -219,7 +242,15 @@ PyObject* IOUringBackend::read(int64_t size) {
             resolve_bytes(future, nullptr, 0);
             return future;
         }
-        readSize = (size < 0 || (size_t)size > (size_t)rem) ? (size_t)rem : (size_t)size;
+        
+        if (size < 0) {
+            readSize = static_cast<size_t>(rem);
+        } else {
+            size_t sz = static_cast<size_t>(size);
+            size_t r = static_cast<size_t>(rem);
+            readSize = (sz > r) ? r : sz;
+        }
+        
         if (readSize == 0) {
             resolve_bytes(future, nullptr, 0);
             return future;
@@ -334,17 +365,6 @@ PyObject* IOUringBackend::flush() {
 PyObject* IOUringBackend::close() {
     if (!m_loop_initialized) {
         close_impl();
-        // 创建一个临时 future 返回
-        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
-        if (loop) {
-            refresh_loop_cache(loop);
-            PyObject* future = PyObject_CallNoArgs(g_cachedFutureFn);
-            Py_DECREF(loop);
-            if (future) {
-                resolve_ok(future, Py_None);
-                return future;
-            }
-        }
         Py_RETURN_NONE;
     }
     

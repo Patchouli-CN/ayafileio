@@ -9,11 +9,6 @@
 #include <cstdint>
 #include <condition_variable>
 
-// ════════════════════════════════════════════════════════════════════════════
-// §8  MacOS IO Backend (using epoll and threads)
-// 兄弟我求你，别再报错啦！
-// ════════════════════════════════════════════════════════════════════════════
-
 class ThreadIOBackend : public IOBackendBase {
 public:
     ThreadIOBackend(const std::string& path, const std::string& mode);
@@ -39,6 +34,7 @@ private:
     
     // 延迟初始化的事件循环相关成员
     bool m_loop_initialized = false;
+    bool m_workers_started = false;  // 新增：工作线程是否已启动
     std::mutex m_loop_init_mtx;
     PyObject* m_loop = nullptr;
     PyObject* m_create_future = nullptr;
@@ -46,12 +42,14 @@ private:
 
     // Thread pool for async operations
     std::vector<std::thread> m_workers;
+    unsigned m_num_workers = 0;  // 新增：保存工作线程数量
     std::mutex m_queueMtx;
     std::queue<std::function<void()>> m_taskQueue;
     std::condition_variable m_cv;
     bool m_stop = false;
 
     void ensure_loop_initialized();
+    void start_workers();  // 新增：启动工作线程
     void worker_thread();
     void enqueue_task(std::function<void()> task);
 

@@ -36,6 +36,7 @@ private:
     
     // 延迟初始化
     bool m_loop_initialized = false;
+    bool m_uring_started = false;  // 新增：io_uring 和 reaper 线程是否已启动
     std::mutex m_loop_init_mtx;
     PyObject* m_loop = nullptr;
     PyObject* m_create_future = nullptr;
@@ -46,6 +47,7 @@ private:
     std::atomic<bool> m_reaper_stop{false};
     
     void ensure_loop_initialized();
+    void start_uring();  // 新增：启动 io_uring 和 reaper 线程
     void reaper_loop();
     void submit_io(IORequest* req, int op, int fd, const void* buf, size_t len, off_t offset);
     bool setup_uring();
