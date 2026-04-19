@@ -140,38 +140,46 @@ void IOUringBackend::ensure_loop_initialized() {
     }
     LOG("ensure_loop_initialized: got loop %p", (void*)loop);
     
-    std::lock_guard<std::mutex> lk(m_loop_init_mtx);
-    if (m_loop_initialized) {
-        Py_DECREF(loop);
-        LOG("ensure_loop_initialized: already initialized by another thread");
-        return;
+    bool need_start_uring = false;
+    {
+        std::lock_guard<std::mutex> lk(m_loop_init_mtx);
+        if (m_loop_initialized) {
+            Py_DECREF(loop);
+            LOG("ensure_loop_initialized: already initialized by another thread");
+            return;
+        }
+        
+        refresh_loop_cache(loop);
+        m_loop = loop;
+        Py_INCREF(m_loop);
+        m_create_future = g_cachedFutureFn;
+        Py_INCREF(m_create_future);
+        m_loop_handle = g_cachedLoopHandle;
+        
+        if (!m_uring_started) {
+            need_start_uring = true;
+        }
+        
+        m_loop_initialized = true;
     }
     
-    refresh_loop_cache(loop);
-    
-    m_loop = loop;
-    Py_INCREF(m_loop);
-    
-    m_create_future = g_cachedFutureFn;
-    Py_INCREF(m_create_future);
-    
-    m_loop_handle = g_cachedLoopHandle;
-    
-    LOG("ensure_loop_initialized: m_uring_started=%d", m_uring_started);
-    if (!m_uring_started) {
+    // 在锁外启动 io_uring，避免死锁
+    if (need_start_uring) {
+        LOG("ensure_loop_initialized: starting io_uring (outside lock)");
         start_uring();
     }
     
-    m_loop_initialized = true;
     LOG("ensure_loop_initialized: DONE");
 }
 
 void IOUringBackend::start_uring() {
     LOG("start_uring START: m_uring_started=%d", m_uring_started);
-    if (m_uring_started) return;
     
     std::lock_guard<std::mutex> lk(m_loop_init_mtx);
-    if (m_uring_started) return;
+    if (m_uring_started) {
+        LOG("start_uring: already started");
+        return;
+    }
     
     LOG("start_uring: creating eventfd");
     m_event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
