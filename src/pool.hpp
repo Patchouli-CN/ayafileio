@@ -22,7 +22,7 @@ struct PoolBuf {
     PoolBuf& operator=(const PoolBuf&) = delete;
 };
 
-// 按大小分桶的缓冲区池
+// 按大小分桶缓冲区池
 class BufferPool {
 public:
     static BufferPool& instance() {
