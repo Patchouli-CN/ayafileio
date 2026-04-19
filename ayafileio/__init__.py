@@ -220,15 +220,15 @@ def _register_native_cleanup() -> None:
         pass
 
 
-WARING_ED = False
+WARNED = False
 """ 是否警告过了 """
 
 
 def _warn_fake_async():
-    global WARING_ED
+    global WARNED
     """如果当前平台不支持真异步，发出 UserWarning"""
-    if not WARING_ED:
-        WARING_ED = True
+    if not WARNED:
+        WARNED = True
         if sys.platform == "win32":
             # Windows: 真异步 IOCP
             return

@@ -56,7 +56,7 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     m_cached_io_uring_sqpoll = cfg.io_uring_sqpoll();
     
     // 创建 eventfd 用于唤醒 reaper 线程
-    m_event_fd = ::eventfd(0, EFD_NONBLOCK);
+    m_event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (m_event_fd == -1) {
         ::close(m_fd);
         throw std::runtime_error("Failed to create eventfd");
@@ -139,10 +139,13 @@ void IOUringBackend::teardown_uring() {
 }
 
 void IOUringBackend::reaper_loop() {
+    // 分配一个小的缓冲区来消费 eventfd 的值
+    uint64_t event_val;
+    
     // 将 eventfd 添加到 io_uring 中
     struct io_uring_sqe* sqe = io_uring_get_sqe(&m_ring);
     if (sqe) {
-        io_uring_prep_read(sqe, m_event_fd, nullptr, 0, 0);
+        io_uring_prep_read(sqe, m_event_fd, &event_val, sizeof(event_val), 0);
         io_uring_sqe_set_data(sqe, nullptr);
         io_uring_submit(&m_ring);
     }
@@ -168,7 +171,7 @@ void IOUringBackend::reaper_loop() {
             if (!m_reaper_stop.load(std::memory_order_relaxed)) {
                 sqe = io_uring_get_sqe(&m_ring);
                 if (sqe) {
-                    io_uring_prep_read(sqe, m_event_fd, nullptr, 0, 0);
+                    io_uring_prep_read(sqe, m_event_fd, &event_val, sizeof(event_val), 0);
                     io_uring_sqe_set_data(sqe, nullptr);
                     io_uring_submit(&m_ring);
                 }
@@ -336,6 +339,7 @@ PyObject* IOUringBackend::close() {
         if (loop) {
             refresh_loop_cache(loop);
             PyObject* future = PyObject_CallNoArgs(g_cachedFutureFn);
+            Py_DECREF(loop);
             if (future) {
                 resolve_ok(future, Py_None);
                 return future;
@@ -422,8 +426,9 @@ IORequest* IOUringBackend::make_req(size_t size, PyObject* future, ReqType type)
     req->reqSize = size;
     req->type = type;
     
+    // 使用按需分配的缓冲区池
     if (size <= m_cached_buffer_size) {
-        req->poolBuf = pool_acquire();
+        req->poolBuf = pool_acquire_with_size(size);
     } else {
         req->heapBuf = new char[size];
     }

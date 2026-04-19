@@ -147,7 +147,7 @@ PyObject *ThreadIOBackend::read(int64_t size) {
         }
         int64_t rem = (int64_t)st.st_size - (int64_t)m_filePos;
         if (rem <= 0) { resolve_bytes(future, nullptr, 0); return future; }
-        readSize = (size<0||size>rem) ? (size_t)rem : (size_t)size;
+        readSize = (size<0||(size_t)size>rem) ? (size_t)rem : (size_t)size;
         if (readSize == 0) { resolve_bytes(future, nullptr, 0); return future; }
         offset = m_filePos;
         m_filePos += readSize;
@@ -265,18 +265,26 @@ PyObject *ThreadIOBackend::close() {
     if (!m_loop_initialized) {
         // 直接同步关闭
         close_impl();
-        PyObject *future = PyObject_CallNoArgs(g_cachedFutureFn ? g_cachedFutureFn : 
-            []() {
-                // 如果连缓存都没有，尝试获取
-                PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
-                if (!loop) return (PyObject*)nullptr;
-                refresh_loop_cache(loop);
-                return g_cachedFutureFn;
-            }());
+        
+        // 尝试获取事件循环创建 future
+        PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
+        PyObject *future = nullptr;
+        
+        if (loop) {
+            refresh_loop_cache(loop);
+            if (g_cachedFutureFn) {
+                future = PyObject_CallNoArgs(g_cachedFutureFn);
+            }
+            Py_DECREF(loop);
+        }
+        
         if (future) {
             resolve_ok(future, Py_None);
             return future;
         }
+        
+        // 如果无法创建 future，返回 None
+        Py_RETURN_NONE;
     }
     
     ensure_loop_initialized();
@@ -351,9 +359,9 @@ IORequest *ThreadIOBackend::make_req(size_t size, PyObject *future, ReqType type
     req->reqSize = size;
     req->type = type;
     
-    // 使用基类缓存的缓冲区大小（无锁访问）
+    // 使用按需分配的缓冲区池
     if (size <= m_cached_buffer_size) {
-        req->poolBuf = pool_acquire();
+        req->poolBuf = pool_acquire_with_size(size);
     } else {
         req->heapBuf = new char[size];
     }

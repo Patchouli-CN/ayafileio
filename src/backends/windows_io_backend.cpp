@@ -1,4 +1,3 @@
-
 #include "windows_io_backend.hpp"
 #include "./utils/file_mode.hpp"
 #include <algorithm>
@@ -133,7 +132,7 @@ PyObject *WindowsIOBackend::read(int64_t size) {
         }
         int64_t rem = (int64_t)fs.QuadPart - (int64_t)m_filePos;
         if (rem <= 0) { resolve_bytes(future, nullptr, 0); return future; }
-        readSize = (size<0||size>rem) ? (size_t)rem : (size_t)size;
+        readSize = (size<0||(size_t)size>rem) ? (size_t)rem : (size_t)size;
         if (readSize == 0) { resolve_bytes(future, nullptr, 0); return future; }
         offset = m_filePos;
         m_filePos += readSize;
@@ -342,9 +341,9 @@ IORequest *WindowsIOBackend::make_req(size_t size, PyObject *future, ReqType typ
     req->reqSize = size;
     req->type = type;
     
-    // 使用缓存的缓冲区大小（无锁访问）
+    // 使用按需分配的缓冲区池
     if (size <= m_cached_buffer_size) {
-        req->poolBuf = pool_acquire();
+        req->poolBuf = pool_acquire_with_size(size);
     } else {
         req->heapBuf = new char[size];
     }
@@ -360,5 +359,3 @@ void WindowsIOBackend::complete_error_inline(IORequest *req, DWORD err) {
     Py_XDECREF(r); Py_DECREF(set_fn); Py_DECREF(exc);
     delete req;
 }
-
-
