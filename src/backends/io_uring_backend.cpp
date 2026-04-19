@@ -3,6 +3,7 @@
 #include "io_uring_backend.hpp"
 #include "../globals.hpp"
 #include "../config.hpp"
+#include "../uring_pool.hpp"
 #include "./utils/file_mode.hpp"
 #include "./utils/error_util.hpp"
 #include <fcntl.h>
