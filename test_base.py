@@ -33,11 +33,14 @@ def get_shared_loop():
     """获取或创建共享事件循环"""
     global _shared_loop
     if _shared_loop is None or _shared_loop.is_closed():
-        # 重置事件循环策略（修复某些 Python 版本的兼容性问题）
-        try:
-            asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-        except:
-            pass
+        # 只在 Python < 3.12 中重置事件循环策略
+        # 从 Python 3.12 开始，这个问题已经修复
+        if sys.version_info < (3, 12):
+            try:
+                asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+            except:
+                pass
+        
         _shared_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_shared_loop)
     return _shared_loop
@@ -113,8 +116,20 @@ class TestRunner:
     def run_async(self, name: str, coro_func: Callable[[], Awaitable[None]]):
         """运行单个异步测试（使用共享事件循环）"""
         try:
-            loop = get_shared_loop()
-            loop.run_until_complete(coro_func())
+            # Python 3.12 有 eager_task_factory 相关的 segfault bug
+            # 对该版本使用独立事件循环
+            if sys.version_info == (3, 12):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(coro_func())
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            else:
+                loop = get_shared_loop()
+                loop.run_until_complete(coro_func())
+            
             self.passed += 1
             print(f"  ✅ {name}")
         except AssertionError as e:
