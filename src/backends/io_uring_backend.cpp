@@ -105,7 +105,8 @@ IOUringBackend::~IOUringBackend() {
 void IOUringBackend::ensure_loop_initialized() {
     if (m_loop_initialized) return;
     UR_LOG("ensure_loop_initialized start: this=%p", (void*)this);
-    
+
+    // 获取当前运行中的事件循环
     PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) {
         PyErr_Clear();
@@ -113,21 +114,23 @@ void IOUringBackend::ensure_loop_initialized() {
         throw std::runtime_error("No running event loop");
     }
     UR_LOG("ensure_loop_initialized: got loop=%p", (void*)loop);
-    
+
     std::lock_guard<std::mutex> lk(m_loop_init_mtx);
     if (m_loop_initialized) {
         Py_DECREF(loop);
         UR_LOG("ensure_loop_initialized: already initialized by another thread");
         return;
     }
-    
+
+    // 刷新全局缓存（loop、create_future 等）
     refresh_loop_cache(loop);
     m_loop = loop;
     Py_INCREF(m_loop);
     m_create_future = g_cachedFutureFn;
     Py_INCREF(m_create_future);
     m_loop_handle = g_cachedLoopHandle;
-    
+
+    // 从配置中获取参数
     auto& cfg = ayafileio::config();
     m_uring = UringPool::instance().acquire(
         m_loop,
@@ -136,20 +139,21 @@ void IOUringBackend::ensure_loop_initialized() {
         cfg.io_uring_flags(),
         cfg.io_uring_sqpoll()
     );
-    
+
     if (!m_uring) {
         UR_LOG("ensure_loop_initialized: failed to acquire uring instance");
         throw std::runtime_error("Failed to acquire io_uring instance");
     }
-    UR_LOG("ensure_loop_initialized: acquired uring instance=%p, queue_depth=%u", (void*)m_uring.get(), cfg.io_uring_queue_depth());
-    
-    // 启动 reaper 线程
+    UR_LOG("ensure_loop_initialized: acquired uring instance=%p, queue_depth=%u",
+           (void*)m_uring.get(), cfg.io_uring_queue_depth());
+
+    // 启动 reaper 线程（如果尚未运行）
     if (!m_uring->reaper_thread.joinable()) {
         m_uring->running.store(true, std::memory_order_release);
         m_uring->reaper_thread = std::thread(&IOUringBackend::reaper_loop_entry, m_uring.get());
         UR_LOG("ensure_loop_initialized: started reaper thread for uring=%p", (void*)m_uring.get());
     }
-    
+
     m_loop_initialized = true;
     UR_LOG("ensure_loop_initialized done: this=%p", (void*)this);
 }
