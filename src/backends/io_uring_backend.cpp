@@ -167,22 +167,42 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
            (void*)inst, inst->ring.ring_fd, inst->event_fd);
     
     struct io_uring_cqe* cqe = nullptr;
+    int idle_iterations = 0;
+    int wait_errors = 0;
     
     while (!inst->reaper_stop.load(std::memory_order_acquire)) {
+        UR_LOG("reaper_loop: waiting for CQE, stop=%d", inst->reaper_stop.load());
+        
         // 阻塞等待任意一个 CQE（包括 eventfd 可读事件或 I/O 完成事件）
         int ret = io_uring_wait_cqe(&inst->ring, &cqe);
+        
+        UR_LOG("reaper_loop: io_uring_wait_cqe returned ret=%d", ret);
+        
         if (ret < 0) {
             if (ret == -EINTR) {
+                UR_LOG("reaper_loop: interrupted by signal, continuing");
                 continue;  // 被信号中断，继续等待
             }
-            UR_LOG("reaper_loop: io_uring_wait_cqe error ret=%d, exiting", ret);
-            break;
+            wait_errors++;
+            UR_LOG("reaper_loop: io_uring_wait_cqe error ret=%d, errno=%d, error_count=%d", 
+                   ret, errno, wait_errors);
+            
+            // 如果连续出错超过 10 次，强制退出
+            if (wait_errors > 10) {
+                UR_LOG("reaper_loop: too many errors, forcing exit");
+                break;
+            }
+            continue;
         }
+        
+        wait_errors = 0;  // 重置错误计数
         
         // 处理所有可用 CQE
         unsigned head;
         unsigned count = 0;
         bool got_eventfd = false;
+        
+        UR_LOG("reaper_loop: processing CQEs...");
         
         io_uring_for_each_cqe(&inst->ring, head, cqe) {
             IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
@@ -198,7 +218,7 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
             } else {
                 // data 为空的 CQE 是我们的 eventfd poll 完成事件
                 got_eventfd = true;
-                UR_LOG("reaper got eventfd wakeup");
+                UR_LOG("reaper got eventfd wakeup, cqe->res=%d", cqe->res);
                 
                 // 如果是 eventfd 触发，需要重新提交 poll 请求以继续监听
                 if (!inst->reaper_stop.load(std::memory_order_acquire)) {
@@ -207,6 +227,7 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
                         io_uring_prep_poll_add(sqe, inst->event_fd, POLLIN);
                         io_uring_sqe_set_data(sqe, nullptr);
                         int submitted = io_uring_submit(&inst->ring);
+                        UR_LOG("reaper_loop: resubmitted eventfd poll, submitted=%d", submitted);
                         if (submitted < 0) {
                             UR_LOG("reaper_loop: failed to resubmit eventfd poll, ret=%d", submitted);
                         }
@@ -224,9 +245,12 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
         }
         
         // 如果收到了 eventfd 且 reaper_stop 已设置，循环将自然退出
+        if (got_eventfd && inst->reaper_stop.load(std::memory_order_acquire)) {
+            UR_LOG("reaper_loop: got eventfd and stop flag set, exiting");
+        }
     }
     
-    UR_LOG("reaper_loop_entry exit: inst=%p", (void*)inst);
+    UR_LOG("reaper_loop_entry exit: inst=%p, stop=%d", (void*)inst, inst->reaper_stop.load());
 }
 
 // ════════════════════════════════════════════════════════════════════════════

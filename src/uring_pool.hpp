@@ -64,25 +64,65 @@ struct UringInstance {
     }
     
     void stop_reaper() {
-        if (!running.exchange(false)) return;
-        UR_LOG("UringInstance::stop_reaper: stopping reaper, inst=%p, thread_hash=0x%zx", (void*)this, THREAD_ID_HASH());
+        if (!running.exchange(false)) {
+            UR_LOG("UringInstance::stop_reaper: already stopped, inst=%p", (void*)this);
+            return;
+        }
+        UR_LOG("UringInstance::stop_reaper: stopping reaper, inst=%p, thread_hash=0x%zx, event_fd=%d", 
+            (void*)this, THREAD_ID_HASH(), event_fd);
+        
         reaper_stop.store(true, std::memory_order_release);
+        UR_LOG("UringInstance::stop_reaper: set reaper_stop=true");
         
         // 向 eventfd 写入 1 字节，强制唤醒 reaper 线程
         if (event_fd != -1) {
+            // 先读取 eventfd 清空它（如果有未读数据）
+            uint64_t dummy;
+            ssize_t read_ret = read(event_fd, &dummy, sizeof(dummy));
+            UR_LOG("UringInstance::stop_reaper: pre-read eventfd, ret=%zd", read_ret);
+            
             uint64_t val = 1;
             ssize_t ret = write(event_fd, &val, sizeof(val));
             if (ret != sizeof(val)) {
                 UR_LOG("UringInstance::stop_reaper: write to eventfd failed, ret=%zd, errno=%d", ret, errno);
             } else {
-                UR_LOG("UringInstance::stop_reaper: wrote to eventfd to wake reaper");
+                UR_LOG("UringInstance::stop_reaper: wrote to eventfd to wake reaper, fd=%d", event_fd);
             }
+        } else {
+            UR_LOG("UringInstance::stop_reaper: event_fd is -1, cannot wake reaper");
         }
         
-        // 等待 reaper 线程结束
+        // 等待 reaper 线程结束，但加上超时保护
         if (reaper_thread.joinable()) {
-            reaper_thread.join();
-            UR_LOG("UringInstance::stop_reaper: reaper thread joined");
+            UR_LOG("UringInstance::stop_reaper: waiting for reaper thread to join...");
+            
+            // 使用超时等待，最多等 5 秒
+            auto start = std::chrono::steady_clock::now();
+            bool joined = false;
+            
+            while (!joined) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                
+                if (elapsed > 5000) {
+                    UR_LOG("UringInstance::stop_reaper: timeout waiting for reaper, detaching thread!");
+                    reaper_thread.detach();
+                    break;
+                }
+                
+                // 尝试再次写入 eventfd 唤醒
+                if (elapsed > 1000 && elapsed < 1100 && event_fd != -1) {
+                    uint64_t val = 1;
+                    write(event_fd, &val, sizeof(val));
+                    UR_LOG("UringInstance::stop_reaper: re-wrote to eventfd after 1s timeout");
+                }
+                
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            if (joined) {
+                UR_LOG("UringInstance::stop_reaper: reaper thread joined");
+            }
         }
     }
     
