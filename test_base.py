@@ -2,6 +2,11 @@ import asyncio
 import sys
 import tempfile
 import time
+import os
+import signal
+import subprocess
+import threading
+import traceback
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -13,8 +18,265 @@ if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-
 import ayafileio
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 超时诊断工具
+# ════════════════════════════════════════════════════════════════════════════
+
+class TimeoutDiagnostics:
+    """超时诊断工具 - 当测试卡住时自动收集堆栈信息"""
+    
+    _instance = None
+    _timeout_seconds = 30  # 单个测试超时时间
+    _current_test_name = None
+    _start_time = None
+    _watchdog_thread = None
+    _stop_watchdog = False
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+    
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+    
+    def start_test(self, name: str):
+        """开始一个新测试"""
+        with self._lock:
+            self._current_test_name = name
+            self._start_time = time.time()
+            self._stop_watchdog = False
+            
+            # 启动看门狗线程
+            if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+                self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+                self._watchdog_thread.start()
+    
+    def stop_test(self):
+        """测试完成"""
+        with self._lock:
+            self._current_test_name = None
+            self._start_time = None
+    
+    def _watchdog_loop(self):
+        """看门狗循环 - 检测超时"""
+        while not self._stop_watchdog:
+            time.sleep(1)  # 每秒检查一次
+            
+            with self._lock:
+                if self._current_test_name and self._start_time:
+                    elapsed = time.time() - self._start_time
+                    if elapsed > self._timeout_seconds:
+                        self._handle_timeout(self._current_test_name, elapsed)
+                        break
+    
+    def _handle_timeout(self, test_name: str, elapsed: float):
+        """处理超时 - 收集诊断信息"""
+        print(f"\n{'=' * 80}")
+        print(f"⚠️  TIMEOUT DETECTED: '{test_name}' running for {elapsed:.1f}s")
+        print(f"{'=' * 80}\n")
+        
+        # 1. 打印 Python 线程堆栈
+        self._print_python_stacks()
+        
+        # 2. 尝试获取 native 堆栈（Linux/macOS）
+        self._print_native_stacks()
+        
+        # 3. 打印 asyncio 任务信息
+        self._print_asyncio_tasks()
+        
+        # 4. 尝试打印 io_uring 状态
+        self._print_io_uring_status()
+        
+        print(f"\n{'=' * 80}")
+        print("Terminating due to timeout...")
+        print(f"{'=' * 80}")
+        
+        # 强制退出
+        os._exit(1)
+    
+    def _print_python_stacks(self):
+        """打印所有 Python 线程的堆栈"""
+        print("\n--- Python Thread Stacks ---")
+        try:
+            for thread_id, frame in sys._current_frames().items():
+                thread_name = "Unknown"
+                for t in threading.enumerate():
+                    if t.ident == thread_id:
+                        thread_name = t.name
+                        break
+                print(f"\n[Thread {thread_id} ({thread_name})]")
+                traceback.print_stack(frame)
+        except Exception as e:
+            print(f"Failed to get Python stacks: {e}")
+    
+    def _print_native_stacks(self):
+        """打印 native 堆栈（使用 GDB/LLDB）"""
+        print("\n--- Native Stacks ---")
+        
+        pid = os.getpid()
+        
+        if sys.platform == "linux":
+            self._gdb_backtrace(pid)
+        elif sys.platform == "darwin":
+            self._lldb_backtrace(pid)
+        elif sys.platform == "win32":
+            self._windows_stacks(pid)
+    
+    def _gdb_backtrace(self, pid: int):
+        """使用 GDB 获取 native 堆栈"""
+        try:
+            # 检查 GDB 是否可用
+            subprocess.run(["gdb", "--version"], capture_output=True, timeout=2)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            print("GDB not available. Install gdb for native stack traces.")
+            return
+        
+        try:
+            # 创建 GDB 命令文件
+            gdb_commands = f"""set pagination off
+set print thread-events off
+info threads
+thread apply all bt full
+detach
+quit
+"""
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.gdb', delete=False) as f:
+                f.write(gdb_commands)
+                cmd_file = f.name
+            
+            # 执行 GDB
+            cmd = ["gdb", "-p", str(pid), "-batch", "-x", cmd_file]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            
+            print(result.stdout)
+            if result.stderr:
+                print("GDB stderr:", result.stderr)
+            
+            os.unlink(cmd_file)
+        except subprocess.TimeoutExpired:
+            print("GDB timed out")
+        except Exception as e:
+            print(f"GDB failed: {e}")
+    
+    def _lldb_backtrace(self, pid: int):
+        """使用 LLDB 获取 native 堆栈（macOS）"""
+        try:
+            lldb_commands = f"""
+process attach --pid {pid}
+thread backtrace all
+detach
+quit
+"""
+            # macOS 上 LLDB 的调用方式
+            result = subprocess.run(
+                ["lldb", "-o", f"process attach --pid {pid}", 
+                 "-o", "thread backtrace all", "-o", "detach", "-o", "quit"],
+                capture_output=True, text=True, timeout=15
+            )
+            print(result.stdout)
+        except FileNotFoundError:
+            print("LLDB not available.")
+        except subprocess.TimeoutExpired:
+            print("LLDB timed out")
+        except Exception as e:
+            print(f"LLDB failed: {e}")
+    
+    def _windows_stacks(self, pid: int):
+        """Windows 堆栈"""
+        print("Windows native stack trace not implemented in this version.")
+        print("Consider using Process Explorer or WinDbg for debugging.")
+    
+    def _print_asyncio_tasks(self):
+        """打印所有 asyncio 任务"""
+        print("\n--- Asyncio Tasks ---")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            print("No running event loop")
+            return
+        
+        try:
+            tasks = asyncio.all_tasks(loop)
+            print(f"Total tasks: {len(tasks)}")
+            for i, task in enumerate(tasks):
+                print(f"\nTask {i}: {task}")
+                print(f"  Done: {task.done()}")
+                if task.done():
+                    try:
+                        result = task.result()
+                        print(f"  Result: {result}")
+                    except Exception as e:
+                        print(f"  Exception: {e}")
+                else:
+                    print("  Stack:")
+                    try:
+                        stack = task.get_stack()
+                        for frame in stack:
+                            print(f"    {frame}")
+                    except Exception as e:
+                        print(f"    (failed to get stack: {e})")
+        except Exception as e:
+            print(f"Failed to get asyncio tasks: {e}")
+    
+    def _print_io_uring_status(self):
+        """打印 io_uring 后端状态（如果可用）"""
+        if sys.platform != "linux":
+            return
+        
+        print("\n--- io_uring Status ---")
+        try:
+            info = ayafileio.get_backend_info()
+            if info.get("backend") == "io_uring":
+                print("Backend: io_uring (active)")
+                # 可以添加更多 io_uring 特定的诊断
+            else:
+                print(f"Backend: {info.get('backend', 'unknown')}")
+        except Exception as e:
+            print(f"Failed to get backend info: {e}")
+
+
+# 全局超时诊断实例
+_timeout_diag = TimeoutDiagnostics.get_instance()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 信号处理器（备用方案 - 用于 SIGALRM）
+# ════════════════════════════════════════════════════════════════════════════
+
+def setup_signal_handler():
+    """设置信号处理器用于超时（Linux/macOS）"""
+    if sys.platform == "win32":
+        return
+    
+    def signal_handler(signum, frame):
+        print(f"\n{'=' * 80}")
+        print(f"Received signal {signum} - TIMEOUT")
+        print(f"{'=' * 80}\n")
+        
+        # 打印 Python 堆栈
+        print("\n--- Python Stack (signal handler) ---")
+        traceback.print_stack(frame)
+        
+        # 打印所有线程堆栈
+        print("\n--- All Thread Stacks (signal handler) ---")
+        for thread_id, thread_frame in sys._current_frames().items():
+            thread_name = "Unknown"
+            for t in threading.enumerate():
+                if t.ident == thread_id:
+                    thread_name = t.name
+                    break
+            print(f"\n[Thread {thread_id} ({thread_name})]")
+            traceback.print_stack(thread_frame)
+        
+        sys.exit(1)
+    
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.signal(signal.SIGUSR1, signal_handler)  # 可用于手动触发
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -58,15 +320,20 @@ def cleanup_shared_loop():
                 _shared_loop.run_until_complete(
                     asyncio.gather(*pending, return_exceptions=True)
                 )
-        except:
-            pass
-        _shared_loop.close()
+        except Exception as e:
+            print(f"Warning: Error during loop cleanup: {e}")
+        
+        try:
+            _shared_loop.close()
+        except Exception as e:
+            print(f"Warning: Error closing loop: {e}")
+        
         _shared_loop = None
         asyncio.set_event_loop(None)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 简单的测试运行器
+# 测试运行器
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestRunner:
@@ -76,11 +343,21 @@ class TestRunner:
         self.skipped = 0
         self.failures = []
         self.start_time = None
+        self.enable_timeout_diag = os.environ.get("AYAFILEIO_TIMEOUT_DIAG", "1") == "1"
+        self.timeout_seconds = int(os.environ.get("AYAFILEIO_TEST_TIMEOUT", "30"))
+        
+        # 配置超时时间
+        TimeoutDiagnostics._timeout_seconds = self.timeout_seconds
+        
+        # 设置信号处理器
+        setup_signal_handler()
     
     def test(self, name: str):
         """测试装饰器"""
         def decorator(func: Callable[[], Awaitable[None]]):
             async def wrapper():
+                if self.enable_timeout_diag:
+                    _timeout_diag.start_test(name)
                 try:
                     await func()
                     self.passed += 1
@@ -93,6 +370,9 @@ class TestRunner:
                     self.failed += 1
                     self.failures.append((name, f"{type(e).__name__}: {e}"))
                     print(f"  💥 {name}: {type(e).__name__}: {e}")
+                finally:
+                    if self.enable_timeout_diag:
+                        _timeout_diag.stop_test()
             return wrapper
         return decorator
     
@@ -113,16 +393,29 @@ class TestRunner:
                 print(f"  💥 {name}: {type(e).__name__}: {e}")
     
     def run_async(self, name: str, coro_func: Callable[[], Awaitable[None]]):
-        """运行单个异步测试（使用共享事件循环）"""
+        """运行单个异步测试"""
+        if self.enable_timeout_diag:
+            _timeout_diag.start_test(name)
+        
         try:
-            # Python 3.12 有 eager_task_factory 相关的 segfault bug
-            # 对该版本使用独立事件循环
-            if sys.version_info == (3, 12):
+            # Python 3.10, 3.12, 3.14 使用独立事件循环以避免已知问题
+            problematic_versions = {(3, 10), (3, 12), (3, 14)}
+            use_isolated_loop = sys.version_info[:2] in problematic_versions
+            
+            if use_isolated_loop:
+                print(f"  [Using isolated loop for Python {sys.version_info[:2]}]")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
                     loop.run_until_complete(coro_func())
                 finally:
+                    # 确保所有任务完成
+                    try:
+                        pending = asyncio.all_tasks(loop)
+                        if pending:
+                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception as e:
+                        print(f"    Warning: Error cleaning up pending tasks: {e}")
                     loop.close()
                     asyncio.set_event_loop(None)
             else:
@@ -139,6 +432,9 @@ class TestRunner:
             self.failed += 1
             self.failures.append((name, f"{type(e).__name__}: {e}"))
             print(f"  💥 {name}: {type(e).__name__}: {e}")
+        finally:
+            if self.enable_timeout_diag:
+                _timeout_diag.stop_test()
     
     def print_summary(self):
         total = self.passed + self.failed + self.skipped
@@ -600,42 +896,33 @@ async def test_encoding_gbk():
 async def test_exclusive_create():
     path = get_temp_path(".txt")
     try:
-        print("第一次打开")
         async with ayafileio.open(path, "x") as f:
             await f.write("test")
-        print("第一次成功")
         
-        print("第二次打开")
         async with ayafileio.open(path, "x") as f:
             await f.write("test")
-        print("第二次成功")
         assert False
-    except FileExistsError as e:
-        print(f"捕获到 FileExistsError: {e}")
-    except Exception as e:
-        print(f"捕获到其他异常: {type(e).__name__}: {e}")
+    except FileExistsError:
+        pass
     finally:
         path.unlink(missing_ok=True)
-    print("测试结束")
 
 
 async def test_read_write_mode():
     path = get_temp_path(".txt")
     try:
-        print("开始 test_read_write_mode")
         async with ayafileio.open(path, "w") as f:
             await f.write("Hello, World!")
         
         async with ayafileio.open(path, "r+") as f:
             content = await f.read()
-            assert content == "Hello, World!", f"内容不是Hello, World，而是: {content}"
+            assert content == "Hello, World!"
             
             await f.seek(0)
             await f.write("Hi")
             await f.seek(0)
             new_content = await f.read()
-            assert new_content == "Hillo, World!", f"内容不是Hillo, World!，而是: {new_content}"
-        print("结束 test_read_write_mode")
+            assert new_content == "Hillo, World!"
     finally:
         path.unlink(missing_ok=True)
 
@@ -643,13 +930,11 @@ async def test_read_write_mode():
 async def test_w_plus_mode():
     path = get_temp_path(".txt")
     try:
-        print("开始 test_w_plus_mode")
         async with ayafileio.open(path, "w+") as f:
             await f.write("test")
             await f.seek(0)
             content = await f.read()
             assert content == "test"
-        print("结束 test_w_plus_mode")
     finally:
         path.unlink(missing_ok=True)
 
@@ -668,6 +953,8 @@ def main():
     print(f"Platform: {sys.platform}")
     info = ayafileio.get_backend_info()
     print(f"Backend: {info['backend']} (truly_async: {info['is_truly_async']})")
+    print(f"Timeout diagnostics: {'enabled' if runner.enable_timeout_diag else 'disabled'}")
+    print(f"Test timeout: {runner.timeout_seconds}s")
     
     runner.start_time = time.time()
     
