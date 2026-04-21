@@ -83,12 +83,12 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
         }
     }
     
-    // 不在构造函数中启动工作线程
+    // 不在构造函数中启动工作线程，延迟到第一次 I/O
 }
 
 ThreadIOBackend::~ThreadIOBackend() {
     close_impl();
-    if (m_loop_initialized) {
+    if (m_loop_initialized.load(std::memory_order_acquire)) {
         Py_XDECREF(m_create_future);
         Py_XDECREF(m_loop);
     }
@@ -99,7 +99,11 @@ ThreadIOBackend::~ThreadIOBackend() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void ThreadIOBackend::start_workers() {
-    if (!m_workers.empty()) return;
+    // 防止重复启动
+    bool expected = false;
+    if (!m_workers_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;  // 已经启动
+    }
     
     m_workers.reserve(m_num_workers);
     for (unsigned i = 0; i < m_num_workers; ++i) {
@@ -108,16 +112,21 @@ void ThreadIOBackend::start_workers() {
 }
 
 void ThreadIOBackend::ensure_loop_initialized() {
-    if (m_loop_initialized) return;
+    // 快速路径：已初始化
+    if (m_loop_initialized.load(std::memory_order_acquire)) {
+        return;
+    }
     
+    // 获取事件循环（必须在持有 GIL 的情况下）
     PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) {
         PyErr_Clear();
         throw std::runtime_error("No running event loop");
     }
     
+    // 双重检查锁
     std::lock_guard<std::mutex> lk(m_loop_init_mtx);
-    if (m_loop_initialized) {
+    if (m_loop_initialized.load(std::memory_order_relaxed)) {
         Py_DECREF(loop);
         return;
     }
@@ -129,22 +138,40 @@ void ThreadIOBackend::ensure_loop_initialized() {
     Py_INCREF(m_create_future);
     m_loop_handle = g_cachedLoopHandle;
     
-    start_workers();
+    // 标记为已初始化
+    m_loop_initialized.store(true, std::memory_order_release);
     
-    m_loop_initialized = true;
+    // ════════════════════════════════════════════════════════════════════════
+    // 关键修复：释放 GIL 后再启动工作线程
+    // 避免 macOS 上的死锁问题
+    // ════════════════════════════════════════════════════════════════════════
+    PyThreadState* _save = PyEval_SaveThread();
+    start_workers();
+    PyEval_RestoreThread(_save);
 }
 
 void ThreadIOBackend::worker_thread() {
+    // 工作线程主循环 - 完全不碰 Python 对象，只处理 C++ 任务
     while (true) {
         std::function<void()> task;
         {
             std::unique_lock<std::mutex> lk(m_queueMtx);
-            m_cv.wait(lk, [this] { return m_stop || !m_taskQueue.empty(); });
-            if (m_stop && m_taskQueue.empty()) return;
+            m_cv.wait(lk, [this] { 
+                return m_stop.load(std::memory_order_acquire) || !m_taskQueue.empty(); 
+            });
+            
+            if (m_stop.load(std::memory_order_acquire) && m_taskQueue.empty()) {
+                return;
+            }
+            
             task = std::move(m_taskQueue.front());
             m_taskQueue.pop();
         }
-        task();
+        
+        // 执行任务（任务内部会自己处理 GIL 获取）
+        if (task) {
+            task();
+        }
     }
 }
 
@@ -161,11 +188,9 @@ void ThreadIOBackend::enqueue_task(std::function<void()> task) {
 // ════════════════════════════════════════════════════════════════════════════
 
 PyObject *ThreadIOBackend::read(int64_t size) {
-    // 确保事件循环已初始化
     try {
         ensure_loop_initialized();
     } catch (const std::runtime_error&) {
-        // 没有事件循环，返回带异常的 Future
         return create_rejected_future(nullptr, g_ValueError, 
                                       "No running event loop", 0);
     }
@@ -173,9 +198,8 @@ PyObject *ThreadIOBackend::read(int64_t size) {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
 
-    // 检查文件是否已关闭
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_relaxed), m_fd, m_create_future);
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
     if (closed_future) {
         Py_DECREF(future);
         return closed_future;
@@ -234,7 +258,7 @@ PyObject *ThreadIOBackend::write(Py_buffer *view) {
     if (!future) return nullptr;
 
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_relaxed), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
     if (closed_future) {
         Py_DECREF(future);
         return closed_future;
@@ -325,7 +349,7 @@ PyObject *ThreadIOBackend::flush() {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     
-    if (!m_running.load(std::memory_order_relaxed) || m_fd == -1) {
+    if (!m_running.load(std::memory_order_acquire) || m_fd == -1) {
         resolve_exc(future, g_OSError, 0, "flush on closed file");
         return future;
     }
@@ -341,7 +365,7 @@ PyObject *ThreadIOBackend::flush() {
 
 PyObject *ThreadIOBackend::close() {
     // 未初始化事件循环的情况
-    if (!m_loop_initialized) {
+    if (!m_loop_initialized.load(std::memory_order_acquire)) {
         PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
         if (!loop) {
             PyErr_Clear();
@@ -371,12 +395,12 @@ PyObject *ThreadIOBackend::close() {
 
 void ThreadIOBackend::close_impl() {
     bool expected = true;
-    if (!m_running.compare_exchange_strong(expected, false)) return;
-    
-    {
-        std::lock_guard<std::mutex> lk(m_queueMtx);
-        m_stop = true;
+    if (!m_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+        return;  // 已经关闭
     }
+    
+    // 停止工作线程
+    m_stop.store(true, std::memory_order_release);
     m_cv.notify_all();
     
     for (auto& t : m_workers) {
@@ -386,6 +410,7 @@ void ThreadIOBackend::close_impl() {
     }
     m_workers.clear();
     
+    // 等待 pending I/O
     int elapsed = 0;
     int wait_time = 1;
     while (elapsed < static_cast<int>(m_cached_close_timeout_ms) && 
