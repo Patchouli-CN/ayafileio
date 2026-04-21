@@ -9,6 +9,11 @@
 #include <liburing.h>
 #include "uring_pool.hpp"
 #endif
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 #include "file_handle.hpp"
 #include "handle_pool.hpp"
 #include "config.hpp"
@@ -160,9 +165,61 @@ static py::dict py_get_backend_info() {
     
 #elif defined(__APPLE__)
     info["platform"] = "macos";
-    info["backend"] = "dispatch_io";
-    info["is_truly_async"] = true;
-    info["description"] = "Dispatch I/O (GCD) - native async I/O";
+    
+    // 运行时检测 Dispatch I/O 是否真的可用
+    static bool gcd_available = []() {
+        // 尝试创建测试用的 dispatch queue
+        dispatch_queue_t test_queue = dispatch_queue_create(
+            "com.ayafileio.test", 
+            DISPATCH_QUEUE_SERIAL
+        );
+        if (!test_queue) {
+            return false;
+        }
+        
+        // 创建临时文件测试 Dispatch I/O
+        char tmp_path[] = "/tmp/ayafileio_test_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        if (fd == -1) {
+            dispatch_release(test_queue);
+            return false;
+        }
+        
+        // 尝试创建 dispatch I/O channel
+        dispatch_io_t test_channel = dispatch_io_create(
+            DISPATCH_IO_RANDOM,
+            fd,
+            test_queue,
+            ^(int error) {
+                // cleanup handler - 文件描述符会在这里被关闭
+            }
+        );
+        
+        bool available = (test_channel != nullptr);
+        
+        if (test_channel) {
+            dispatch_io_close(test_channel, DISPATCH_IO_STOP);
+            dispatch_release(test_channel);
+        } else {
+            // 如果 channel 创建失败，手动关闭 fd
+            close(fd);
+        }
+        
+        unlink(tmp_path);
+        dispatch_release(test_queue);
+        
+        return available;
+    }();
+    
+    if (gcd_available) {
+        info["backend"] = "dispatch_io";
+        info["is_truly_async"] = true;
+        info["description"] = "Dispatch I/O (GCD) - native async I/O";
+    } else {
+        info["backend"] = "thread_pool";
+        info["is_truly_async"] = false;
+        info["description"] = "Thread pool - fallback mode (Dispatch I/O not available)";
+    }
     
 #else
     info["platform"] = "posix";
