@@ -10,6 +10,7 @@
 #include "../globals.hpp"
 #include "./utils/file_mode.hpp"
 #include "./utils/error_util.hpp"
+#include "../debug_log.hpp"
 #include <thread>
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -22,15 +23,23 @@ static LoopHandle* g_cachedLoopHandle = nullptr;
 static std::mutex  g_cacheMtx;
 
 static void refresh_loop_cache(PyObject* loop) {
+    UR_DEBUG_LOG("ThreadIOBackend: refresh_loop_cache start, loop=%p", (void*)loop);
     std::lock_guard<std::mutex> lk(g_cacheMtx);
-    if (loop == g_cachedLoop) return;
+    if (loop == g_cachedLoop) {
+        UR_DEBUG_LOG("ThreadIOBackend: refresh_loop_cache cache hit");
+        return;
+    }
     Py_XDECREF(g_cachedFutureFn);
     g_cachedLoop       = loop;
     g_cachedFutureFn   = PyObject_GetAttr(loop, g_str_create_future);
     if (g_cachedFutureFn) {
         Py_INCREF(g_cachedFutureFn);
+        UR_DEBUG_LOG("ThreadIOBackend: refresh_loop_cache got create_future");
+    } else {
+        UR_DEBUG_LOG("ThreadIOBackend: refresh_loop_cache FAILED to get create_future");
     }
     g_cachedLoopHandle = get_or_create_loop_handle(loop);
+    UR_DEBUG_LOG("ThreadIOBackend: refresh_loop_cache done");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -38,6 +47,8 @@ static void refresh_loop_cache(PyObject* loop) {
 // ════════════════════════════════════════════════════════════════════════════
 
 ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mode) {
+    UR_DEBUG_LOG("ThreadIOBackend: constructor start, path=%s, mode=%s", path.c_str(), mode.c_str());
+    
     auto& cfg = ayafileio::config();
     m_cached_buffer_size = cfg.buffer_size();
     m_cached_buffer_pool_max = cfg.buffer_pool_max();
@@ -48,8 +59,9 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
         unsigned hc = std::thread::hardware_concurrency();
         if (hc == 0) hc = 1;
         m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
-    } else if (!(m_num_workers >= 1 && m_num_workers <= 128)) {
-        throw py::value_error("worker count must be 0 (auto) or 1-128");
+        UR_DEBUG_LOG("ThreadIOBackend: auto worker count = %u (hc=%u)", m_num_workers, hc);
+    } else {
+        UR_DEBUG_LOG("ThreadIOBackend: configured worker count = %u", m_num_workers);
     }
 
     int flags = O_RDONLY;
@@ -57,6 +69,7 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     try {
         mi = parse_mode(mode);
     } catch (const std::invalid_argument &e) {
+        UR_DEBUG_LOG("ThreadIOBackend: parse_mode failed: %s", e.what());
         throw py::value_error(e.what());
     }
     bool appendMode = mi.appendMode;
@@ -68,10 +81,13 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
 
     m_appendMode = appendMode;
 
+    UR_DEBUG_LOG("ThreadIOBackend: opening file with flags=%d", flags);
     m_fd = open(path.c_str(), flags, 0644);
     if (m_fd == -1) {
+        UR_DEBUG_LOG("ThreadIOBackend: open failed, errno=%d", errno);
         throw_os_error("Failed to open file", path.c_str());
     }
+    UR_DEBUG_LOG("ThreadIOBackend: file opened, fd=%d", m_fd);
 
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
@@ -80,18 +96,21 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
         struct stat st;
         if (fstat(m_fd, &st) == 0) {
             m_filePos = st.st_size;
+            UR_DEBUG_LOG("ThreadIOBackend: append mode, filePos=%llu", (unsigned long long)m_filePos);
         }
     }
     
-    // 不在构造函数中启动工作线程，延迟到第一次 I/O
+    UR_DEBUG_LOG("ThreadIOBackend: constructor done, this=%p", (void*)this);
 }
 
 ThreadIOBackend::~ThreadIOBackend() {
+    UR_DEBUG_LOG("ThreadIOBackend: destructor start, this=%p", (void*)this);
     close_impl();
     if (m_loop_initialized.load(std::memory_order_acquire)) {
         Py_XDECREF(m_create_future);
         Py_XDECREF(m_loop);
     }
+    UR_DEBUG_LOG("ThreadIOBackend: destructor done");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -99,88 +118,111 @@ ThreadIOBackend::~ThreadIOBackend() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void ThreadIOBackend::start_workers() {
-    // 防止重复启动
+    UR_DEBUG_LOG("ThreadIOBackend: start_workers called, this=%p", (void*)this);
+    
     bool expected = false;
     if (!m_workers_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        return;  // 已经启动
+        UR_DEBUG_LOG("ThreadIOBackend: workers already started, skipping");
+        return;
     }
     
+    UR_DEBUG_LOG("ThreadIOBackend: starting %u workers", m_num_workers);
     m_workers.reserve(m_num_workers);
     for (unsigned i = 0; i < m_num_workers; ++i) {
+        UR_DEBUG_LOG("ThreadIOBackend: creating worker %u", i);
         m_workers.emplace_back(&ThreadIOBackend::worker_thread, this);
     }
+    UR_DEBUG_LOG("ThreadIOBackend: all workers created");
 }
 
 void ThreadIOBackend::ensure_loop_initialized() {
-    // 快速路径：已初始化
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized start, this=%p, already_init=%d", 
+                 (void*)this, m_loop_initialized.load());
+    
     if (m_loop_initialized.load(std::memory_order_acquire)) {
+        UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized already initialized, returning");
         return;
     }
     
-    // 获取事件循环（必须在持有 GIL 的情况下）
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized calling get_running_loop...");
     PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) {
         PyErr_Clear();
+        UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized NO RUNNING LOOP");
         throw std::runtime_error("No running event loop");
     }
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized got loop=%p", (void*)loop);
     
-    // 双重检查锁
-    std::lock_guard<std::mutex> lk(m_loop_init_mtx);
-    if (m_loop_initialized.load(std::memory_order_relaxed)) {
-        Py_DECREF(loop);
-        return;
+    {
+        std::lock_guard<std::mutex> lk(m_loop_init_mtx);
+        UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized inside lock");
+        
+        if (m_loop_initialized.load(std::memory_order_relaxed)) {
+            UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized another thread initialized");
+            Py_DECREF(loop);
+            return;
+        }
+        
+        UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized refreshing cache...");
+        refresh_loop_cache(loop);
+        m_loop = loop;
+        Py_INCREF(m_loop);
+        m_create_future = g_cachedFutureFn;
+        Py_INCREF(m_create_future);
+        m_loop_handle = g_cachedLoopHandle;
+        
+        m_loop_initialized.store(true, std::memory_order_release);
+        UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized marked as initialized");
     }
     
-    refresh_loop_cache(loop);
-    m_loop = loop;
-    Py_INCREF(m_loop);
-    m_create_future = g_cachedFutureFn;
-    Py_INCREF(m_create_future);
-    m_loop_handle = g_cachedLoopHandle;
-    
-    // 标记为已初始化
-    m_loop_initialized.store(true, std::memory_order_release);
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // 关键修复：释放 GIL 后再启动工作线程
-    // 避免 macOS 上的死锁问题
-    // ════════════════════════════════════════════════════════════════════════
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized releasing GIL before starting workers...");
     PyThreadState* _save = PyEval_SaveThread();
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized GIL released, starting workers...");
     start_workers();
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized workers started, restoring GIL...");
     PyEval_RestoreThread(_save);
+    UR_DEBUG_LOG("ThreadIOBackend::ensure_loop_initialized done, this=%p", (void*)this);
 }
 
 void ThreadIOBackend::worker_thread() {
-    // 工作线程主循环 - 完全不碰 Python 对象，只处理 C++ 任务
+    UR_DEBUG_LOG("ThreadIOBackend: worker_thread started");
+    
     while (true) {
         std::function<void()> task;
         {
             std::unique_lock<std::mutex> lk(m_queueMtx);
+            UR_DEBUG_LOG("ThreadIOBackend: worker waiting for task...");
             m_cv.wait(lk, [this] { 
                 return m_stop.load(std::memory_order_acquire) || !m_taskQueue.empty(); 
             });
             
             if (m_stop.load(std::memory_order_acquire) && m_taskQueue.empty()) {
+                UR_DEBUG_LOG("ThreadIOBackend: worker stopping");
                 return;
             }
             
             task = std::move(m_taskQueue.front());
             m_taskQueue.pop();
+            UR_DEBUG_LOG("ThreadIOBackend: worker got task, queue_size=%zu", m_taskQueue.size());
         }
         
-        // 执行任务（任务内部会自己处理 GIL 获取）
         if (task) {
+            UR_DEBUG_LOG("ThreadIOBackend: worker executing task");
             task();
+            UR_DEBUG_LOG("ThreadIOBackend: worker task completed");
         }
     }
 }
 
 void ThreadIOBackend::enqueue_task(std::function<void()> task) {
+    UR_DEBUG_LOG("ThreadIOBackend: enqueue_task, this=%p", (void*)this);
     {
         std::lock_guard<std::mutex> lk(m_queueMtx);
         m_taskQueue.push(std::move(task));
+        UR_DEBUG_LOG("ThreadIOBackend: task enqueued, queue_size=%zu", m_taskQueue.size());
     }
     m_cv.notify_one();
+    UR_DEBUG_LOG("ThreadIOBackend: notified one worker");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -188,19 +230,26 @@ void ThreadIOBackend::enqueue_task(std::function<void()> task) {
 // ════════════════════════════════════════════════════════════════════════════
 
 PyObject *ThreadIOBackend::read(int64_t size) {
+    UR_DEBUG_LOG("ThreadIOBackend::read start, this=%p, size=%ld", (void*)this, size);
+    
     try {
         ensure_loop_initialized();
-    } catch (const std::runtime_error&) {
-        return create_rejected_future(nullptr, g_ValueError, 
-                                      "No running event loop", 0);
+    } catch (const std::runtime_error& e) {
+        UR_DEBUG_LOG("ThreadIOBackend::read ensure_loop failed: %s", e.what());
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
     
     PyObject* future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
+    if (!future) {
+        UR_DEBUG_LOG("ThreadIOBackend::read failed to create future");
+        return nullptr;
+    }
+    UR_DEBUG_LOG("ThreadIOBackend::read future created");
 
     PyObject* closed_future = check_closed_and_return_future(
         m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
     if (closed_future) {
+        UR_DEBUG_LOG("ThreadIOBackend::read file is closed");
         Py_DECREF(future);
         return closed_future;
     }
@@ -210,12 +259,17 @@ PyObject *ThreadIOBackend::read(int64_t size) {
         std::lock_guard<std::mutex> lk(m_posMtx);
         struct stat st;
         if (fstat(m_fd, &st) != 0) {
+            UR_DEBUG_LOG("ThreadIOBackend::read fstat failed, errno=%d", errno);
             set_os_error("fstat failed");
             resolve_exc(future, g_OSError, errno, "fstat failed");
             return future;
         }
         int64_t rem = (int64_t)st.st_size - (int64_t)m_filePos;
-        if (rem <= 0) { resolve_bytes(future, nullptr, 0); return future; }
+        if (rem <= 0) { 
+            UR_DEBUG_LOG("ThreadIOBackend::read EOF");
+            resolve_bytes(future, nullptr, 0); 
+            return future; 
+        }
         
         if (size < 0) {
             readSize = static_cast<size_t>(rem);
@@ -225,32 +279,44 @@ PyObject *ThreadIOBackend::read(int64_t size) {
             readSize = (sz > r) ? r : sz;
         }
         
-        if (readSize == 0) { resolve_bytes(future, nullptr, 0); return future; }
+        if (readSize == 0) { 
+            resolve_bytes(future, nullptr, 0); 
+            return future; 
+        }
         offset = m_filePos;
         m_filePos += readSize;
     }
 
     IORequest *req = make_req(readSize, future, ReqType::Read);
+    UR_DEBUG_LOG("ThreadIOBackend::read req=%p, offset=%llu, size=%zu", 
+                 (void*)req, (unsigned long long)offset, readSize);
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, readSize]() {
+        UR_DEBUG_LOG("ThreadIOBackend::read task executing, fd=%d, offset=%llu, size=%zu",
+                     m_fd, (unsigned long long)offset, readSize);
         ssize_t got = pread(m_fd, req->buf(), readSize, offset);
+        UR_DEBUG_LOG("ThreadIOBackend::read task done, got=%zd", got);
         if (got >= 0) {
             complete_ok(req, static_cast<size_t>(got));
         } else {
+            UR_DEBUG_LOG("ThreadIOBackend::read task failed, errno=%d", errno);
             complete_error(req, errno);
         }
     });
 
+    UR_DEBUG_LOG("ThreadIOBackend::read returning future");
     return future;
 }
 
 PyObject *ThreadIOBackend::write(Py_buffer *view) {
+    UR_DEBUG_LOG("ThreadIOBackend::write start, this=%p, size=%zd", (void*)this, view->len);
+    
     try {
         ensure_loop_initialized();
-    } catch (const std::runtime_error&) {
-        return create_rejected_future(nullptr, g_ValueError, 
-                                      "No running event loop", 0);
+    } catch (const std::runtime_error& e) {
+        UR_DEBUG_LOG("ThreadIOBackend::write ensure_loop failed: %s", e.what());
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
     
     size_t size = static_cast<size_t>(view->len);
@@ -289,13 +355,19 @@ PyObject *ThreadIOBackend::write(Py_buffer *view) {
 
     IORequest *req = make_req(size, future, ReqType::Write);
     memcpy(req->buf(), view->buf, size);
+    UR_DEBUG_LOG("ThreadIOBackend::write req=%p, offset=%llu, size=%zu", 
+                 (void*)req, (unsigned long long)offset, size);
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, size]() {
+        UR_DEBUG_LOG("ThreadIOBackend::write task executing, fd=%d, offset=%llu, size=%zu",
+                     m_fd, (unsigned long long)offset, size);
         ssize_t wrote = pwrite(m_fd, req->buf(), size, static_cast<off_t>(offset));
+        UR_DEBUG_LOG("ThreadIOBackend::write task done, wrote=%zd", wrote);
         if (wrote >= 0) {
             complete_ok(req, static_cast<size_t>(wrote));
         } else {
+            UR_DEBUG_LOG("ThreadIOBackend::write task failed, errno=%d", errno);
             complete_error(req, errno);
         }
     });
@@ -304,11 +376,12 @@ PyObject *ThreadIOBackend::write(Py_buffer *view) {
 }
 
 PyObject *ThreadIOBackend::seek(int64_t offset, int whence) {
+    UR_DEBUG_LOG("ThreadIOBackend::seek start, offset=%ld, whence=%d", offset, whence);
+    
     try {
         ensure_loop_initialized();
     } catch (const std::runtime_error&) {
-        return create_rejected_future(nullptr, g_ValueError, 
-                                      "No running event loop", 0);
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
     
     PyObject* future = PyObject_CallNoArgs(m_create_future);
@@ -333,17 +406,19 @@ PyObject *ThreadIOBackend::seek(int64_t offset, int whence) {
             return future;
         }
     }
+    UR_DEBUG_LOG("ThreadIOBackend::seek new pos=%llu", (unsigned long long)m_filePos);
     PyObject *pos = PyLong_FromUnsignedLongLong(m_filePos);
     resolve_ok(future, pos); Py_DECREF(pos);
     return future;
 }
 
 PyObject *ThreadIOBackend::flush() {
+    UR_DEBUG_LOG("ThreadIOBackend::flush start, this=%p", (void*)this);
+    
     try {
         ensure_loop_initialized();
     } catch (const std::runtime_error&) {
-        return create_rejected_future(nullptr, g_ValueError, 
-                                      "No running event loop", 0);
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
     
     PyObject* future = PyObject_CallNoArgs(m_create_future);
@@ -355,17 +430,22 @@ PyObject *ThreadIOBackend::flush() {
     }
     
     if (fsync(m_fd) != 0) {
+        UR_DEBUG_LOG("ThreadIOBackend::flush fsync failed, errno=%d", errno);
         set_os_error("fsync failed");
         resolve_exc(future, g_OSError, errno, "fsync failed");
         return future;
     }
+    UR_DEBUG_LOG("ThreadIOBackend::flush done");
     resolve_ok(future, Py_None);
     return future;
 }
 
 PyObject *ThreadIOBackend::close() {
-    // 未初始化事件循环的情况
+    UR_DEBUG_LOG("ThreadIOBackend::close start, this=%p, initialized=%d", 
+                 (void*)this, m_loop_initialized.load());
+    
     if (!m_loop_initialized.load(std::memory_order_acquire)) {
+        UR_DEBUG_LOG("ThreadIOBackend::close not initialized, closing directly");
         PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
         if (!loop) {
             PyErr_Clear();
@@ -385,7 +465,6 @@ PyObject *ThreadIOBackend::close() {
         return future;
     }
     
-    // 正常路径：已初始化事件循环
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     close_impl();
@@ -394,12 +473,15 @@ PyObject *ThreadIOBackend::close() {
 }
 
 void ThreadIOBackend::close_impl() {
+    UR_DEBUG_LOG("ThreadIOBackend::close_impl start, this=%p, fd=%d", (void*)this, m_fd);
+    
     bool expected = true;
     if (!m_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
-        return;  // 已经关闭
+        UR_DEBUG_LOG("ThreadIOBackend::close_impl already closed");
+        return;
     }
     
-    // 停止工作线程
+    UR_DEBUG_LOG("ThreadIOBackend::close_impl stopping workers...");
     m_stop.store(true, std::memory_order_release);
     m_cv.notify_all();
     
@@ -409,12 +491,14 @@ void ThreadIOBackend::close_impl() {
         }
     }
     m_workers.clear();
+    UR_DEBUG_LOG("ThreadIOBackend::close_impl workers stopped");
     
-    // 等待 pending I/O
     int elapsed = 0;
     int wait_time = 1;
     while (elapsed < static_cast<int>(m_cached_close_timeout_ms) && 
            m_pending.load(std::memory_order_acquire) > 0) {
+        UR_DEBUG_LOG("ThreadIOBackend::close_impl waiting for pending I/O, elapsed=%d, pending=%ld",
+                     elapsed, m_pending.load());
         std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
         elapsed += wait_time;
         wait_time = std::min(wait_time * 2, 32);
@@ -423,7 +507,9 @@ void ThreadIOBackend::close_impl() {
     if (m_fd != -1) {
         ::close(m_fd);
         m_fd = -1;
+        UR_DEBUG_LOG("ThreadIOBackend::close_impl fd closed");
     }
+    UR_DEBUG_LOG("ThreadIOBackend::close_impl done");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -431,6 +517,7 @@ void ThreadIOBackend::close_impl() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void ThreadIOBackend::complete_ok(IORequest *req, size_t bytes) {
+    UR_DEBUG_LOG("ThreadIOBackend::complete_ok req=%p, bytes=%zu", (void*)req, bytes);
     m_pending.fetch_sub(1, std::memory_order_release);
     
     PyGILState_STATE gs = PyGILState_Ensure();
@@ -456,9 +543,11 @@ void ThreadIOBackend::complete_ok(IORequest *req, size_t bytes) {
     delete req;
 
     PyGILState_Release(gs);
+    UR_DEBUG_LOG("ThreadIOBackend::complete_ok done");
 }
 
 void ThreadIOBackend::complete_error(IORequest *req, DWORD err) {
+    UR_DEBUG_LOG("ThreadIOBackend::complete_error req=%p, err=%u", (void*)req, err);
     m_pending.fetch_sub(1, std::memory_order_release);
     
     PyGILState_STATE gs = PyGILState_Ensure();
@@ -477,6 +566,7 @@ void ThreadIOBackend::complete_error(IORequest *req, DWORD err) {
     delete req;
 
     PyGILState_Release(gs);
+    UR_DEBUG_LOG("ThreadIOBackend::complete_error done");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -503,6 +593,7 @@ IORequest *ThreadIOBackend::make_req(size_t size, PyObject *future, ReqType type
 }
 
 void ThreadIOBackend::complete_error_inline(IORequest *req, DWORD err) {
+    UR_DEBUG_LOG("ThreadIOBackend::complete_error_inline req=%p, err=%u", (void*)req, err);
     m_pending.fetch_sub(1, std::memory_order_relaxed);
     PyObject *exc_class = map_posix_error(static_cast<int>(err));
     PyObject *exc = PyObject_CallFunction(exc_class, "is", static_cast<int>(err), "I/O operation failed");

@@ -5,7 +5,11 @@
 #include <cstdio>
 #include <thread>
 #include <atomic>
-#include <functional>  // for std::hash
+#include <functional>
+
+// ════════════════════════════════════════════════════════════════════════════
+// 调试日志宏 - 支持运行时开关
+// ════════════════════════════════════════════════════════════════════════════
 
 #ifdef AYAFILEIO_VERBOSE_LOGGING
 
@@ -19,6 +23,12 @@
         std::fflush(stderr); \
     } while(0)
 
+#define UR_LOG_RAW(fmt, ...) \
+    do { \
+        std::fprintf(stderr, fmt, ##__VA_ARGS__); \
+        std::fflush(stderr); \
+    } while(0)
+
 #define UR_LOG_RATELIMIT(counter_var, interval, fmt, ...) \
     do { \
         static std::atomic<int> _cnt{0}; \
@@ -28,17 +38,11 @@
         } \
     } while(0)
 
-#define UR_LOG_REAPER_IDLE() \
-    do { \
-        static std::atomic<int> idle_cnt{0}; \
-        int c = idle_cnt.fetch_add(1); \
-        if (c % 10000 == 0) { \
-            UR_LOG("reaper loop idle (iter=%d)", c); \
-        } \
-    } while(0)
-
 #else
 #define UR_LOG(fmt, ...) ((void)0)
+#define UR_LOG_RAW(fmt, ...) ((void)0)
 #define UR_LOG_RATELIMIT(counter, interval, fmt, ...) ((void)0)
-#define UR_LOG_REAPER_IDLE() ((void)0)
 #endif
+
+#define UR_DEBUG_LOG(fmt, ...) \
+        UR_LOG(fmt, ##__VA_ARGS__);
