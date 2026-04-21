@@ -9,11 +9,15 @@ import tempfile
 import time
 import json
 import os
+import io
 import sys
 import statistics
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Awaitable
+
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # 检查依赖
 try:
