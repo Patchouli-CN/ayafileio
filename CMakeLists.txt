@@ -238,8 +238,6 @@ endif()
 if(APPLE)
     target_compile_options(_ayafileio PRIVATE -stdlib=libc++)
     target_link_libraries(_ayafileio PRIVATE -stdlib=libc++)
-    # 链接 Dispatch 框架 (GCD)
-    target_link_libraries(_ayafileio PRIVATE "-framework Dispatch")
     message(STATUS "🍎 macOS: linked Dispatch framework for native async I/O")
     
     # 输出 macOS 版本信息
