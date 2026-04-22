@@ -57,6 +57,154 @@ class Config:
     
     # 是否启用 ayafileio 性能调优
     enable_tuning: bool = True
+    
+    # 调优模式: "auto", "aggressive", "conservative", "none"
+    tuning_mode: str = "auto"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 平台自适应调优
+# ════════════════════════════════════════════════════════════════════════════
+
+def get_platform_info() -> dict:
+    """获取详细平台信息"""
+    info = {
+        "system": sys.platform,
+        "is_linux": sys.platform == "linux",
+        "is_windows": sys.platform == "win32",
+        "is_macos": sys.platform == "darwin",
+    }
+    
+    # 获取 CPU 核心数
+    try:
+        info["cpu_count"] = os.cpu_count() or 4
+    except:
+        info["cpu_count"] = 4
+    
+    # 检测内存大小（粗略）
+    try:
+        if sys.platform == "linux":
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    if line.startswith("MemTotal"):
+                        info["mem_kb"] = int(line.split()[1])
+                        break
+        elif sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            memoryStatus = MEMORYSTATUSEX()
+            memoryStatus.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if kernel32.GlobalMemoryStatusEx(ctypes.byref(memoryStatus)):
+                info["mem_bytes"] = memoryStatus.ullTotalPhys
+        elif sys.platform == "darwin":
+            import subprocess
+            result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
+            if result.returncode == 0:
+                info["mem_bytes"] = int(result.stdout.strip())
+    except:
+        pass
+    
+    return info
+
+
+def apply_platform_tuning(config: Config):
+    """根据平台和调优模式应用最优配置"""
+    platform_info = get_platform_info()
+    backend_info = ayafileio.get_backend_info()
+    
+    print(f"\n🔧 平台自适应调优:")
+    print(f"   - 系统: {platform_info['system']}")
+    print(f"   - 后端: {backend_info['backend']}")
+    print(f"   - CPU: {platform_info.get('cpu_count', '?')} 核心")
+    
+    tuning_config = {}
+    
+    # 根据调优模式决定策略
+    if config.tuning_mode == "none":
+        print("   - 调优模式: 无 (使用默认配置)")
+        return
+    
+    if config.tuning_mode == "aggressive":
+        print("   - 调优模式: 激进 (追求极致性能)")
+        # 激进模式：最大化缓冲区
+        tuning_config["buffer_size"] = 1024 * 1024  # 1MB
+        tuning_config["buffer_pool_max"] = 2048
+        tuning_config["close_timeout_ms"] = 5000
+        
+        if platform_info["is_linux"]:
+            tuning_config["io_uring_queue_depth"] = 1024
+            tuning_config["io_uring_sqpoll"] = True
+        
+    elif config.tuning_mode == "conservative":
+        print("   - 调优模式: 保守 (稳定性优先)")
+        tuning_config["buffer_size"] = 64 * 1024
+        tuning_config["buffer_pool_max"] = 256
+        tuning_config["close_timeout_ms"] = 4000
+        
+    else:  # "auto" - 自动选择
+        print("   - 调优模式: 自动")
+        
+        # 根据后端类型自动调优
+        if backend_info["backend"] == "iocp":
+            # Windows IOCP: 大缓冲区 + 高并发
+            tuning_config["buffer_size"] = 512 * 1024  # 512KB
+            tuning_config["buffer_pool_max"] = 1024
+            tuning_config["close_timeout_ms"] = 3000
+            print("     - Windows IOCP: 大缓冲区模式 (512KB)")
+            
+        elif backend_info["backend"] == "io_uring":
+            # Linux io_uring: 中等缓冲区 + 大队列
+            tuning_config["buffer_size"] = 256 * 1024  # 256KB
+            tuning_config["buffer_pool_max"] = 1024
+            tuning_config["io_uring_queue_depth"] = 512
+            tuning_config["io_uring_sqpoll"] = False  # CI 环境不建议开启
+            tuning_config["close_timeout_ms"] = 4000
+            print("     - Linux io_uring: 批量提交模式 (队列深度=512)")
+            
+        elif backend_info["backend"] == "dispatch_io":
+            # macOS Dispatch I/O: 中等缓冲区
+            tuning_config["buffer_size"] = 256 * 1024
+            tuning_config["buffer_pool_max"] = 512
+            tuning_config["close_timeout_ms"] = 4000
+            print("     - macOS Dispatch I/O: 标准模式")
+            
+        else:  # thread_pool
+            # 线程池降级模式
+            cpu_count = platform_info.get("cpu_count", 4)
+            tuning_config["io_worker_count"] = min(cpu_count * 2, 16)
+            tuning_config["buffer_size"] = 128 * 1024
+            tuning_config["buffer_pool_max"] = 512
+            print(f"     - 线程池模式: worker数={tuning_config['io_worker_count']}")
+    
+    # 应用配置
+    if tuning_config:
+        try:
+            ayafileio.configure(tuning_config)
+            print(f"   ✅ 已应用配置: {tuning_config}")
+        except Exception as e:
+            print(f"   ⚠️ 配置应用失败: {e}")
+
+
+def apply_ayafileio_tuning(config: Config):
+    """应用 ayafileio 性能调优配置（兼容旧接口）"""
+    if not config.enable_tuning:
+        print("  ⚙️  ayafileio 使用默认配置")
+        return
+    
+    # 使用平台自适应调优
+    apply_platform_tuning(config)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -165,16 +313,6 @@ def generate_json_item(size: int) -> dict:
         "data": os.urandom(size - 200).hex()[:size - 200],
     }
     return item
-
-
-def apply_ayafileio_tuning():
-    """应用 ayafileio 性能调优配置"""
-    ayafileio.configure({
-        "buffer_size": 256 * 1024,        # 256KB 缓冲区（默认 64KB）
-        "buffer_pool_max": 1024,          # 增大缓冲区池
-        "close_timeout_ms": 2000,         # 缩短关闭超时
-    })
-    print("  🔧 ayafileio 性能调优已启用: buffer_size=256KB, buffer_pool_max=1024")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -377,11 +515,8 @@ async def run_benchmark(config: Config) -> dict:
     print(f"📌 ayafileio 后端: {info['backend']} (真异步: {info['is_truly_async']})")
     print(f"📌 aiofiles: 线程池模拟异步 (假异步)")
     
-    # 应用性能调优
-    if config.enable_tuning:
-        apply_ayafileio_tuning()
-    else:
-        print("  ⚙️  ayafileio 使用默认配置")
+    # 应用性能调优（使用新的平台自适应调优）
+    apply_ayafileio_tuning(config)
     
     print(f"\n⚙️  测试配置:")
     print(f"   - 截图文件大小: {config.screenshot_size // 1024} KB")
@@ -391,6 +526,7 @@ async def run_benchmark(config: Config) -> dict:
     print(f"   - 最大并发: {config.concurrent_limit}")
     print(f"   - 预热轮数: {config.warmup_rounds}")
     print(f"   - 测试轮数: {config.test_rounds}")
+    print(f"   - 调优模式: {config.tuning_mode}")
     
     # 准备测试数据
     print("\n📦 准备测试数据...")
@@ -412,6 +548,7 @@ async def run_benchmark(config: Config) -> dict:
         "backend": info["backend"],
         "is_truly_async": info["is_truly_async"],
         "tuning_enabled": config.enable_tuning,
+        "tuning_mode": config.tuning_mode,
         "config": {
             "screenshot_size_kb": config.screenshot_size // 1024,
             "screenshot_count": config.screenshot_count,
@@ -613,7 +750,7 @@ async def run_benchmark(config: Config) -> dict:
 │                                    测试结果对比                                         │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ 平台: {info['platform']:<10}  ayafileio 后端: {info['backend']:<12}  真异步: {info['is_truly_async']} │
-│ 调优: {'启用 (buffer=256KB)' if config.enable_tuning else '默认'}                                         │
+│ 调优: {config.tuning_mode} 模式                                                         │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ 场景                     │ 指标              │ ayafileio  │ aiofiles   │ 对比         │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
@@ -643,6 +780,16 @@ async def run_benchmark(config: Config) -> dict:
 
 def main():
     """主函数"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="ayafileio 性能基准测试")
+    parser.add_argument("--tuning", choices=["auto", "aggressive", "conservative", "none"],
+                        default="auto", help="调优模式 (默认: auto)")
+    parser.add_argument("--rounds", type=int, default=5, help="测试轮数")
+    parser.add_argument("--items", type=int, default=5000, help="Dataset 条目数")
+    
+    args = parser.parse_args()
+    
     if sys.platform == "win32":
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -653,7 +800,12 @@ def main():
         except Exception:
             pass
     
-    config = Config()
+    config = Config(
+        test_rounds=args.rounds,
+        item_count=args.items,
+        tuning_mode=args.tuning,
+        enable_tuning=(args.tuning != "none")
+    )
     
     try:
         results = asyncio.run(run_benchmark(config))
