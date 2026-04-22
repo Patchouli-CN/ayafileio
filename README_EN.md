@@ -1,27 +1,41 @@
 
+---
+
 # ayafileio
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
+[![Version](https://img.shields.io/badge/version-1.0.0-red.svg)]()
 
-> **"The fastest file I/O in Gensokyo, swift as the Wind God Maiden."**
+> **"The fastest file I/O in Gensokyo, swift as the Wind God Maiden."**  
 > *— Aya Shameimaru, always flying at full speed*
 
 **Cross-platform asynchronous file I/O library using native async I/O where available.**  
-On Windows it leverages **IOCP** (I/O Completion Ports); on Linux it supports **io_uring** (kernel 5.1+) with automatic fallback to thread pool; on macOS it uses thread pool.
+Windows leverages **IOCP** (I/O Completion Ports), Linux uses **io_uring** (kernel 5.1+), and macOS uses **Dispatch I/O (GCD)** for truly non-blocking file operations.
+
+## 🏆 The Only True Async on All Three Major Platforms
+
+| Platform | Backend | True Async | Description |
+|----------|---------|------------|-------------|
+| **Windows** | IOCP | ✅ | NT kernel native I/O Completion Ports |
+| **Linux** | io_uring | ✅ | Next-gen async I/O (kernel 5.1+) |
+| **macOS** | Dispatch I/O | ✅ | GCD kernel-level async I/O |
+
+**ayafileio is the only Python library providing true async file I/O on Windows, Linux, and macOS.**
 
 ## 📸 Key Features
 
 | Feature | Description |
-|--------:|:------------|
-| 🍃 **Zero thread overhead** | No `run_in_executor` needed; no background threads on true async platforms |
-| 📰 **Kernel-level completion** | IOCP / io_uring provide true async I/O without user-space scheduling |
-| ⚡ **High concurrency** | Handles thousands of concurrent file operations with low overhead |
-| 🎴 **Familiar API** | Standard file-like interface with `async/await` support |
+|---------|-------------|
+| 🍃 **Zero thread overhead** | No background threads on true async platforms |
+| 📰 **Kernel-level completion** | IOCP / io_uring / Dispatch I/O direct to kernel |
+| ⚡ **High concurrency** | Handles thousands of concurrent file operations |
+| 🎴 **Familiar API** | aiofiles-compatible, supports `async/await` |
 | 📖 **Text & binary support** | Automatic encoding/decoding in text modes |
 | 🔧 **Unified configuration** | Runtime tunable parameters for all backends |
-| 🌍 **Cross-platform** | Works on Windows, Linux, and macOS |
+| 🌍 **Cross-platform** | Windows, Linux, and macOS |
+| 🐍 **Latest Python** | Supports 3.10, 3.11, 3.12, 3.13, 3.14 |
 
 ## 🛠️ Installation
 
@@ -31,8 +45,8 @@ pip install ayafileio
 
 **System requirements:**
 - Python 3.10+
-- Windows 7 / Server 2008 R2 or newer, or Linux (kernel 5.1+ for io_uring), or macOS
-- No external dependencies
+- Windows 7+ / Linux (kernel 5.1+ for io_uring) / macOS 10.10+
+- No external dependencies, precompiled wheels available
 
 ## 🚀 Quick Start
 
@@ -58,9 +72,23 @@ async def main():
 asyncio.run(main())
 ```
 
+## 🔍 Backend Information
+
+Check which backend is currently in use:
+
+```python
+import ayafileio
+
+info = ayafileio.get_backend_info()
+print(info)
+# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True}
+# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True}
+# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True}
+```
+
 ## ⚙️ Unified Configuration
 
-`ayafileio` provides a unified configuration system that allows runtime tuning of all parameters:
+`ayafileio` provides a unified configuration system that allows runtime tuning:
 
 ```python
 import ayafileio
@@ -68,17 +96,6 @@ import ayafileio
 # View current configuration
 config = ayafileio.get_config()
 print(config)
-# {
-#     "handle_pool_max_per_key": 64,
-#     "handle_pool_max_total": 2048,
-#     "io_worker_count": 0,
-#     "buffer_pool_max": 512,
-#     "buffer_size": 65536,
-#     "close_timeout_ms": 4000,
-#     "io_uring_queue_depth": 256,
-#     "io_uring_sqpoll": False,
-#     "enable_debug_log": False
-# }
 
 # Update configuration
 ayafileio.configure({
@@ -104,19 +121,6 @@ ayafileio.reset_config()
 | `io_uring_queue_depth` | 256 | io_uring queue depth (Linux) |
 | `io_uring_sqpoll` | False | Enable SQPOLL mode (Linux) |
 | `enable_debug_log` | False | Enable debug logging |
-
-## 🔍 Backend Information
-
-Check which backend is currently in use:
-
-```python
-info = ayafileio.get_backend_info()
-print(info)
-# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, ...}
-# Linux (io_uring): {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, ...}
-# Linux (fallback): {'platform': 'linux', 'backend': 'thread_pool', 'is_truly_async': False, ...}
-# macOS: {'platform': 'macos', 'backend': 'thread_pool', 'is_truly_async': False, ...}
-```
 
 ## 📚 API Reference
 
@@ -152,28 +156,25 @@ def configure(options: dict) -> None: ...      # Unified configuration
 def get_config() -> dict: ...                   # Get current configuration
 def reset_config() -> None: ...                 # Reset to defaults
 def get_backend_info() -> dict: ...             # Get backend information
-
-# Backward compatible (prefer unified configuration above)
-def set_handle_pool_limits(max_per_key: int, max_total: int) -> None: ...
-def get_handle_pool_limits() -> tuple[int, int]: ...
-def set_io_worker_count(count: int = 0) -> None: ...
 ```
 
 ## 🧪 Performance Comparison
 
-Under comparable conditions (10s runs, mixed random reads/writes), `ayafileio` demonstrates high throughput:
+Simulating Crawlee's Dataset append pattern (5,000 records, 50 concurrent):
 
-| Concurrency | ayafileio | aiofiles | Advantage |
-|------------:|----------:|---------:|:---------:|
-| 50  | 2,043 ops/s | 1,657 ops/s | **+23%** |
-| 100 | 770 ops/s   | 405 ops/s   | **+90%** |
-| 500 | 1,130 ops/s | 1,032 ops/s | **+9.5%** |
+| Platform | ayafileio | aiofiles | Speedup |
+|----------|-----------|----------|---------|
+| **Windows (NVMe SSD)** | **41,336 items/s** | 9,658 items/s | **4.28x** |
+| **Linux (NVMe SSD)** | **17,688 items/s** | 11,455 items/s | **1.54x** |
+| **macOS (NVMe SSD)** | **29,837 items/s** | 25,522 items/s | **1.17x** |
+| **Windows (6yr old HDD)** | **20,251 items/s** | 13,011 items/s | **1.56x** |
 
-**P99 latency (lower is better):**
-- 100 concurrency: ayafileio **33ms** vs aiofiles 562ms
-- 200 concurrency: ayafileio **35ms** vs aiofiles 155ms
+**Key findings:**
+- On Windows enterprise SSD, ayafileio achieves **42x lower P99 latency** (0.044ms vs 1.854ms)
+- aiofiles shows **96.7% jitter** under load; ayafileio only **16.2%**
+- Even on degraded hardware, ayafileio maintains predictable performance
 
-> Measurements performed on Windows 10 with mechanical disk — ayafileio remains fast even on degraded hardware.
+> *Test environment: Windows 10/11, Ubuntu 22.04, macOS 14; GitHub Actions enterprise NVMe SSD*
 
 ## 🤝 Contributing
 
@@ -189,13 +190,9 @@ Contributions are welcome! Please:
 
 MIT License — see [LICENSE](LICENSE) for details.
 
-## 🙏 Acknowledgments
-
-- Thanks to Windows IOCP for providing true asynchronous I/O
-- Thanks to Linux io_uring for next-generation async I/O
-- Thanks to Aya Shameimaru for the "fastest" spirit
-
 ---
 
-**"Slow is a crime, right?"**
+**"Slow is a crime, right?"**  
 *— Aya Shameimaru, editor-in-chief of Bunbunmaru News*
+
+---

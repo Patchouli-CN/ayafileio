@@ -11,13 +11,11 @@ def _check_io_uring_available():
     try:
         import platform
         release = platform.release()
-        # 解析内核版本，格式如 "5.10.0" 或 "6.1.0"
         parts = release.split('.')
         if len(parts) >= 2:
             major = int(parts[0])
             minor = int(parts[1])
             if major > 5 or (major == 5 and minor >= 1):
-                # 内核版本 >= 5.1，理论上支持
                 pass
             else:
                 return False
@@ -32,8 +30,6 @@ def _check_io_uring_available():
     if liburing_path:
         try:
             lib = ctypes.CDLL(liburing_path)
-            # 尝试调用一个简单的函数确认可用
-            # 不实际初始化，只检查符号是否存在
             if hasattr(lib, 'io_uring_queue_init'):
                 return True
         except:
@@ -51,6 +47,37 @@ def _check_io_uring_available():
     
     return False
 
+
+def _check_dispatch_io_available():
+    """检测 macOS Dispatch I/O 是否可用"""
+    if sys.platform != "darwin":
+        return False
+    
+    # 尝试导入扩展并检查后端信息
+    try:
+        from ._ayafileio import get_backend_info
+        info = get_backend_info()
+        return info.get("backend") == "dispatch_io"
+    except (ImportError, AttributeError):
+        pass
+    
+    # 如果无法导入扩展，检查系统版本（macOS 10.10+ 支持 Dispatch I/O）
+    try:
+        import platform
+        version = platform.mac_ver()[0]
+        if version:
+            parts = version.split('.')
+            if len(parts) >= 2:
+                major = int(parts[0])
+                minor = int(parts[1])
+                # macOS 10.10 (Yosemite) 及以上支持 Dispatch I/O
+                return major >= 11 or (major == 10 and minor >= 10)
+    except:
+        pass
+    
+    return False
+
+
 _WARNED = False
 """ 是否已经发出过警告 """
 
@@ -61,25 +88,38 @@ def warn_fake_async():
     if _WARNED:
         return
     _WARNED = True
+    
     if sys.platform == "win32":
         # Windows: 真异步 IOCP
         return
     elif sys.platform == "linux":
-        # Linux: 可能支持 io_uring，由 C++ 层检测
+        # Linux: 可能支持 io_uring
         if _check_io_uring_available():
-            return  # 真异步，不警告
+            return
         warnings.warn(
             "Current Linux backend uses ThreadIOBackend (fake async). "
-            "the io_uring has not support on your linux kernel! (<= 5.1)",
+            "io_uring is not available on your system (kernel < 5.1 or liburing not installed).",
             UserWarning,
             stacklevel=3
         )
     elif sys.platform == "darwin":
-        # MacOS: 只能假异步，因为系统不支持
+        # macOS: 检测 Dispatch I/O 是否可用
+        if _check_dispatch_io_available():
+            return  # 真异步，不警告
+        
+        # 尝试在导入后再次检测（可能扩展还没加载）
+        try:
+            from ._ayafileio import get_backend_info
+            info = get_backend_info()
+            if info.get("backend") == "dispatch_io":
+                return
+        except (ImportError, AttributeError):
+            pass
+        
         warnings.warn(
-            "MacOS does not support native async file I/O. "
-            "Falling back to ThreadIOBackend (fake async). "
-            "This is an OS limitation, not a library issue.",
+            "macOS is using ThreadIOBackend (fake async). "
+            "Dispatch I/O (native async) is not available. "
+            "This may be due to an older macOS version (< 10.10).",
             UserWarning,
             stacklevel=3
         )

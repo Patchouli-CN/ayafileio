@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ayafileio VERSION 0.1.5 LANGUAGES CXX)
+project(ayafileio VERSION 1.0.0 LANGUAGES CXX)
 
 # 设置 C++ 标准
 set(CMAKE_CXX_STANDARD 17)
@@ -238,7 +238,7 @@ endif()
 if(APPLE)
     target_compile_options(_ayafileio PRIVATE -stdlib=libc++)
     target_link_libraries(_ayafileio PRIVATE -stdlib=libc++)
-    message(STATUS "🍎 macOS: linked Dispatch framework for native async I/O")
+    message(STATUS "🍎 macOS: using Dispatch I/O (GCD) for native async I/O")
     
     # 输出 macOS 版本信息
     execute_process(

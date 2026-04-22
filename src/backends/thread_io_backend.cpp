@@ -12,7 +12,6 @@
 #include "./utils/error_util.hpp"
 #include "../debug_log.hpp"
 #include <thread>
-#include <globals.hpp>
 
 // ════════════════════════════════════════════════════════════════════════════
 // 全局缓存（线程安全）
