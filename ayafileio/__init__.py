@@ -28,11 +28,13 @@ from ._ayafileio import (
     reset_config as _reset_config,
     get_backend_info as _get_backend_info,
 )
+
 # 尝试导入 Windows 专用的 set_iocp_worker_count（如果扩展在该平台上提供）
 _has_native_set_iocp = False
 try:
     if sys.platform == "win32":
         from ._ayafileio import set_iocp_worker_count as _set_iocp_worker_count
+
         _has_native_set_iocp = True
 except Exception:
     _has_native_set_iocp = False
@@ -41,6 +43,7 @@ except Exception:
 _has_native_set_worker = False
 try:
     from ._ayafileio import set_worker_count as _set_worker_count
+
     _has_native_set_worker = True
 except Exception:
     _has_native_set_worker = False
@@ -58,6 +61,7 @@ _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 # 统一配置 API
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def configure(options: dict) -> None:
     """统一配置 ayafileio。
     options: 配置字典，支持以下键:
@@ -70,7 +74,7 @@ def configure(options: dict) -> None:
         - io_uring_queue_depth (int): io_uring 队列深度 (Linux, 默认 256)
         - io_uring_sqpoll (bool): 是否启用 SQPOLL 模式 (Linux, 默认 False)
         - enable_debug_log (bool): 是否启用调试日志 (默认 False)
-    
+
     Example:
     ```python
         ayafileio.configure({
@@ -85,10 +89,10 @@ def configure(options: dict) -> None:
 
 def get_config() -> dict:
     """获取当前配置。
-    
+
     Returns:
         包含所有配置项的字典。
-        
+
     Example:
         >>> config = ayafileio.get_config()
         >>> print(config["buffer_size"])
@@ -104,14 +108,14 @@ def reset_config() -> None:
 
 def get_backend_info() -> dict:
     """获取当前后端信息。
-    
+
     Returns:
         包含以下键的字典:
             - platform (str): 平台名称 ("windows", "linux", "macos", "posix")
             - backend (str): 后端类型 ("iocp", "io_uring", "thread_pool")
             - is_truly_async (bool): 是否真异步
             - description (str): 后端描述
-            
+
     Example:
         >>> info = ayafileio.get_backend_info()
         >>> print(info)
@@ -123,6 +127,7 @@ def get_backend_info() -> dict:
 # ════════════════════════════════════════════════════════════════════════════
 # 向后兼容的句柄池 API
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def set_handle_pool_limits(max_per_key: int, max_total: int) -> None:
     """设置句柄池容量限制。"""
@@ -139,6 +144,7 @@ def get_handle_pool_limits() -> tuple[int, int]:
 # ════════════════════════════════════════════════════════════════════════════
 # 向后兼容的 worker count API
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def set_io_worker_count(count: int = 0) -> None:
     """通用的设置 I/O worker 数量的接口（跨平台）。
@@ -160,7 +166,7 @@ def set_io_worker_count(count: int = 0) -> None:
         _set_iocp_worker_count(count)  # type: ignore
     else:
         # 若扩展未导出任何 setter，则记录到模块变量，供纯 Python 或后续扩展使用
-        globals()['_io_worker_count'] = count
+        globals()["_io_worker_count"] = count
 
 
 def set_iocp_worker_count(count: int = 0) -> None:
@@ -172,6 +178,7 @@ def set_iocp_worker_count(count: int = 0) -> None:
 # 清理和警告
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def _register_native_cleanup() -> None:
     """在 Python 层统一注册本机清理逻辑，避免直接在本机层注册 atexit 导致的潜在不安全行为。"""
     if _native_cleanup is None:
@@ -182,7 +189,7 @@ def _register_native_cleanup() -> None:
 
         def _cleanup_wrapper() -> None:
             try:
-                _native_cleanup() # type: ignore
+                _native_cleanup()  # type: ignore
             except Exception:
                 # 在解释器退出期间忽略异常，避免抛出
                 pass
@@ -192,12 +199,14 @@ def _register_native_cleanup() -> None:
         # 极少情况：若无法导入 atexit，则静默忽略
         pass
 
+
 # 执行注册
 _register_native_cleanup()
 
 # ════════════════════════════════════════════════════════════════════════════
 # AsyncFile 类
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class AsyncFile:
     """跨平台异步文件对象。
@@ -238,7 +247,7 @@ class AsyncFile:
         valid_chars = set("rwaxbt+")
         if any(c not in valid_chars for c in mode):
             raise ValueError(f"Invalid mode: '{mode}'")
-        
+
         clean = mode.replace("t", "")
         if "b" not in clean:
             has_plus = "+" in clean
@@ -321,7 +330,7 @@ class AsyncFile:
     async def write(self, data: str | bytes | bytearray | memoryview) -> int:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-    
+
         if self._is_text:
             if not isinstance(data, str):
                 raise TypeError("Text mode requires str input.")
@@ -349,12 +358,12 @@ class AsyncFile:
         if not self._closed:
             self._closed = True
             await self._impl.close()
-            
+
     def _close_impl(self) -> None:
-        """ 强制关闭函数 """
+        """强制关闭函数"""
         if not self._closed:
             self._closed = True
-        self._impl._close_impl() # 同步
+        self._impl._close_impl()  # 同步
 
     # ── properties ────────────────────────────────────────────────────────────
 

@@ -16,25 +16,23 @@ import platform
 from pathlib import Path
 from dataclasses import dataclass, field
 
-# Rich 美化输出
+# 设置 Windows 控制台编码
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# 尝试导入 Rich（可选）
+RICH_AVAILABLE = False
 try:
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-    from rich.layout import Layout
-    from rich.live import Live
     from rich import box
-    from rich.text import Text
-    from rich.columns import Columns
     RICH_AVAILABLE = True
+    console = Console()
 except ImportError:
     RICH_AVAILABLE = False
-    print("提示: 安装 rich 可获得更好的输出效果: pip install rich")
-
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    console = None
 
 # 检查依赖
 try:
@@ -49,9 +47,6 @@ except ImportError:
     print("错误：请先安装 ayafileio")
     sys.exit(1)
 
-# 初始化 Rich Console
-console = Console() if RICH_AVAILABLE else None
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -60,30 +55,19 @@ console = Console() if RICH_AVAILABLE else None
 @dataclass
 class Config:
     """测试配置"""
-    # KeyValueStore 场景：模拟截图/PDF 存储
-    screenshot_size: int = 512 * 1024      # 512KB
+    screenshot_size: int = 512 * 1024
     screenshot_count: int = 100
-    
-    # Dataset 场景：模拟爬取结果追加写入
-    item_size: int = 1024                  # 1KB
+    item_size: int = 1024
     item_count: int = 5000
-    
-    # 并发配置
     concurrent_limit: int = 50
-    
-    # 测试轮数
     warmup_rounds: int = 2
     test_rounds: int = 5
-    
-    # 是否启用 ayafileio 性能调优
     enable_tuning: bool = True
-    
-    # 调优模式: "auto", "aggressive", "conservative", "none"
-    tuning_mode: str = "auto"
+    tuning_mode: str = "auto"  # auto, balanced, throughput, latency, none
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 平台自适应调优
+# 智能平台自适应调优
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_platform_info() -> dict:
@@ -100,55 +84,25 @@ def get_platform_info() -> dict:
     except:
         info["cpu_count"] = 4
     
-    try:
-        if sys.platform == "linux":
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if line.startswith("MemTotal"):
-                        info["mem_kb"] = int(line.split()[1])
-                        break
-        elif sys.platform == "win32":
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-            memoryStatus = MEMORYSTATUSEX()
-            memoryStatus.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            if kernel32.GlobalMemoryStatusEx(ctypes.byref(memoryStatus)):
-                info["mem_bytes"] = memoryStatus.ullTotalPhys
-        elif sys.platform == "darwin":
-            import subprocess
-            result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
-            if result.returncode == 0:
-                info["mem_bytes"] = int(result.stdout.strip())
-    except:
-        pass
+    # 检测是否为 CI 环境
+    info["is_ci"] = os.environ.get("CI", "").lower() in ("true", "1", "yes")
+    info["is_github_actions"] = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
     
     return info
 
 
-def apply_platform_tuning(config: Config):
-    """根据平台和调优模式应用最优配置"""
+def apply_smart_tuning(config: Config):
+    """智能平台自适应调优 - 基于实际测试数据优化"""
     platform_info = get_platform_info()
     backend_info = ayafileio.get_backend_info()
     
     if console:
         console.print(Panel(
-            f"[bold cyan]平台信息[/bold cyan]\n"
-            f"  系统: {platform_info['system']}\n"
-            f"  后端: {backend_info['backend']}\n"
-            f"  CPU: {platform_info.get('cpu_count', '?')} 核心\n"
-            f"  调优模式: {config.tuning_mode}",
+            f"[cyan]系统:[/cyan] {platform_info['system']}\n"
+            f"[cyan]后端:[/cyan] {backend_info['backend']}\n"
+            f"[cyan]CPU:[/cyan] {platform_info.get('cpu_count', '?')} 核心\n"
+            f"[cyan]CI环境:[/cyan] {platform_info['is_ci']}\n"
+            f"[cyan]调优模式:[/cyan] {config.tuning_mode}",
             title="🔧 平台自适应调优",
             border_style="cyan"
         ))
@@ -163,94 +117,100 @@ def apply_platform_tuning(config: Config):
     if config.tuning_mode == "none":
         if console:
             console.print("[dim]调优模式: 无 (使用默认配置)[/dim]")
-        else:
-            print("   - 调优模式: 无 (使用默认配置)")
         return
     
-    if config.tuning_mode == "aggressive":
+    # 根据后端类型和平台选择最优配置
+    if backend_info["backend"] == "iocp":
+        # Windows IOCP - 最佳性能配置
+        tuning_config = {
+            "buffer_size": 512 * 1024,
+            "buffer_pool_max": 1024,
+            "close_timeout_ms": 3000,
+        }
         if console:
-            console.print("[bold yellow]调优模式: 激进 (追求极致性能)[/bold yellow]")
-        else:
-            print("   - 调优模式: 激进 (追求极致性能)")
-        tuning_config["buffer_size"] = 1024 * 1024
-        tuning_config["buffer_pool_max"] = 2048
-        tuning_config["close_timeout_ms"] = 5000
-        
-        if platform_info["is_linux"]:
-            tuning_config["io_uring_queue_depth"] = 1024
-            tuning_config["io_uring_sqpoll"] = True
-        
-    elif config.tuning_mode == "conservative":
-        if console:
-            console.print("[bold green]调优模式: 保守 (稳定性优先)[/bold green]")
-        else:
-            print("   - 调优模式: 保守 (稳定性优先)")
-        tuning_config["buffer_size"] = 64 * 1024
-        tuning_config["buffer_pool_max"] = 256
-        tuning_config["close_timeout_ms"] = 4000
-        
-    else:  # "auto"
-        if console:
-            console.print("[bold green]调优模式: 自动[/bold green]")
-        else:
-            print("   - 调优模式: 自动")
-        
-        if backend_info["backend"] == "iocp":
-            tuning_config["buffer_size"] = 512 * 1024
-            tuning_config["buffer_pool_max"] = 1024
-            tuning_config["close_timeout_ms"] = 3000
-            if console:
-                console.print("[dim]     - Windows IOCP: 大缓冲区模式 (512KB)[/dim]")
-            
-        elif backend_info["backend"] == "io_uring":
-            tuning_config["buffer_size"] = 256 * 1024
-            tuning_config["buffer_pool_max"] = 1024
-            tuning_config["io_uring_queue_depth"] = 512
-            tuning_config["io_uring_sqpoll"] = False
-            tuning_config["close_timeout_ms"] = 4000
-            if console:
-                console.print("[dim]     - Linux io_uring: 批量提交模式 (队列深度=512)[/dim]")
-            
-        elif backend_info["backend"] == "dispatch_io":
-            tuning_config["buffer_size"] = 256 * 1024
-            tuning_config["buffer_pool_max"] = 512
-            tuning_config["close_timeout_ms"] = 4000
-            if console:
-                console.print("[dim]     - macOS Dispatch I/O: 标准模式[/dim]")
-            
-        else:
-            cpu_count = platform_info.get("cpu_count", 4)
-            tuning_config["io_worker_count"] = min(cpu_count * 2, 16)
-            tuning_config["buffer_size"] = 128 * 1024
-            tuning_config["buffer_pool_max"] = 512
-            if console:
-                console.print(f"[dim]     - 线程池模式: worker数={tuning_config['io_worker_count']}[/dim]")
+            console.print("[green]✓ Windows IOCP: 大缓冲区模式 (512KB)[/green]")
     
+    elif backend_info["backend"] == "io_uring":
+        # Linux io_uring - 平衡配置
+        if config.tuning_mode == "throughput":
+            tuning_config = {
+                "buffer_size": 256 * 1024,
+                "buffer_pool_max": 1024,
+                "io_uring_queue_depth": 512,
+                "io_uring_sqpoll": True if not platform_info["is_ci"] else False,
+                "close_timeout_ms": 4000,
+            }
+            if console:
+                console.print("[green]✓ Linux io_uring: 吞吐优先模式[/green]")
+        elif config.tuning_mode == "latency":
+            tuning_config = {
+                "buffer_size": 64 * 1024,
+                "buffer_pool_max": 512,
+                "io_uring_queue_depth": 256,
+                "io_uring_sqpoll": False,
+                "close_timeout_ms": 2000,
+            }
+            if console:
+                console.print("[green]✓ Linux io_uring: 延迟优先模式[/green]")
+        else:  # balanced
+            tuning_config = {
+                "buffer_size": 128 * 1024,
+                "buffer_pool_max": 768,
+                "io_uring_queue_depth": 384,
+                "io_uring_sqpoll": False,
+                "close_timeout_ms": 3000,
+            }
+            if console:
+                console.print("[green]✓ Linux io_uring: 平衡模式[/green]")
+    
+    elif backend_info["backend"] == "dispatch_io":
+        # macOS Dispatch I/O - 保守配置
+        if config.tuning_mode == "throughput":
+            tuning_config = {
+                "buffer_size": 256 * 1024,
+                "buffer_pool_max": 1024,
+                "close_timeout_ms": 4000,
+            }
+        else:
+            tuning_config = {
+                "buffer_size": 128 * 1024,
+                "buffer_pool_max": 512,
+                "close_timeout_ms": 3000,
+            }
+        if console:
+            console.print("[green]✓ macOS Dispatch I/O: 标准模式[/green]")
+    
+    else:  # thread_pool
+        cpu_count = platform_info.get("cpu_count", 4)
+        tuning_config = {
+            "io_worker_count": min(cpu_count, 8),
+            "buffer_size": 128 * 1024,
+            "buffer_pool_max": 512,
+            "close_timeout_ms": 4000,
+        }
+        if console:
+            console.print(f"[green]✓ 线程池模式: worker数={tuning_config['io_worker_count']}[/green]")
+    
+    # 应用配置
     if tuning_config:
         try:
             ayafileio.configure(tuning_config)
             if console:
-                config_text = ", ".join(f"{k}={v}" for k, v in tuning_config.items())
-                console.print(f"[green]✅ 已应用配置: {config_text}[/green]")
-            else:
-                print(f"   ✅ 已应用配置: {tuning_config}")
+                config_str = ", ".join(f"{k}={v}" for k, v in tuning_config.items())
+                console.print(f"[dim]   配置: {config_str}[/dim]")
         except Exception as e:
             if console:
                 console.print(f"[red]⚠️ 配置应用失败: {e}[/red]")
-            else:
-                print(f"   ⚠️ 配置应用失败: {e}")
 
 
 def apply_ayafileio_tuning(config: Config):
-    """应用 ayafileio 性能调优配置（兼容旧接口）"""
+    """应用 ayafileio 性能调优"""
     if not config.enable_tuning:
         if console:
-            console.print("[dim]  ⚙️  ayafileio 使用默认配置[/dim]")
-        else:
-            print("  ⚙️  ayafileio 使用默认配置")
+            console.print("[dim]  ⚙️  使用默认配置[/dim]")
         return
     
-    apply_platform_tuning(config)
+    apply_smart_tuning(config)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -259,7 +219,6 @@ def apply_ayafileio_tuning(config: Config):
 
 @dataclass
 class BenchmarkStats:
-    """基准测试统计数据"""
     name: str
     values: list[float] = field(default_factory=list)
     
@@ -323,11 +282,9 @@ class BenchmarkStats:
             "max": self.max_val,
             "jitter_percent": self.jitter,
             "range_ratio": self.range_ratio,
-            "raw_values": self.values,
         }
     
     def get_color(self) -> str:
-        """根据性能返回颜色"""
         if self.mean < 0.05:
             return "green"
         elif self.mean < 0.1:
@@ -337,7 +294,6 @@ class BenchmarkStats:
 
 @dataclass
 class ComparisonResult:
-    """对比结果"""
     library: str
     stats: BenchmarkStats
     throughput: float = 0
@@ -365,7 +321,6 @@ def generate_json_item(size: int) -> dict:
 
 
 def format_duration(seconds: float) -> str:
-    """格式化时间显示"""
     if seconds < 0.001:
         return f"{seconds * 1000:.2f}ms"
     elif seconds < 1:
@@ -540,166 +495,34 @@ async def benchmark_mixed_workload(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Rich 表格渲染
-# ════════════════════════════════════════════════════════════════════════════
-
-def create_result_table(
-    info: dict,
-    aya_write: ComparisonResult,
-    aio_write: ComparisonResult,
-    aya_read: ComparisonResult,
-    aio_read: ComparisonResult,
-    aya_dataset: ComparisonResult,
-    aio_dataset: ComparisonResult,
-    aya_mixed: ComparisonResult,
-    aio_mixed: ComparisonResult,
-    write_latencies: dict,
-    speedup_write: float,
-    speedup_read: float,
-    speedup_dataset: float,
-    speedup_mixed: float,
-) -> Table:
-    """创建 Rich 结果表格"""
-    table = Table(title="📊 测试结果对比", box=box.ROUNDED, header_style="bold cyan")
-    
-    table.add_column("场景", style="cyan", no_wrap=True)
-    table.add_column("指标", style="dim")
-    table.add_column("ayafileio", justify="right")
-    table.add_column("aiofiles", justify="right")
-    table.add_column("对比", justify="center")
-    
-    # 写入测试
-    table.add_row(
-        "KeyValueStore\n写入",
-        "中位数",
-        f"[{aya_write.stats.get_color()}]{format_duration(aya_write.stats.median)}[/]",
-        format_duration(aio_write.stats.median),
-        f"[{'green' if speedup_write > 1 else 'red'}]{speedup_write:.2f}x[/]"
-    )
-    table.add_row(
-        "",
-        "抖动",
-        f"[{'green' if aya_write.stats.jitter < aio_write.stats.jitter else 'red'}]{aya_write.stats.jitter:.1f}%[/]",
-        f"{aio_write.stats.jitter:.1f}%",
-        "✅ 更稳" if aya_write.stats.jitter < aio_write.stats.jitter else "❌"
-    )
-    table.add_row(
-        "",
-        "P99",
-        format_duration(aya_write.stats.p99),
-        format_duration(aio_write.stats.p99),
-        ""
-    )
-    
-    table.add_row("", "", "", "", "")
-    
-    # 读取测试
-    table.add_row(
-        "KeyValueStore\n读取",
-        "中位数",
-        f"[{aya_read.stats.get_color()}]{format_duration(aya_read.stats.median)}[/]",
-        format_duration(aio_read.stats.median),
-        f"[{'green' if speedup_read > 1 else 'red'}]{speedup_read:.2f}x[/]"
-    )
-    table.add_row(
-        "",
-        "抖动",
-        f"[{'green' if aya_read.stats.jitter < aio_read.stats.jitter else 'red'}]{aya_read.stats.jitter:.1f}%[/]",
-        f"{aio_read.stats.jitter:.1f}%",
-        "✅ 更稳" if aya_read.stats.jitter < aio_read.stats.jitter else "❌"
-    )
-    
-    table.add_row("", "", "", "", "")
-    
-    # Dataset 追加写入
-    table.add_row(
-        "Dataset\n追加写入",
-        "中位数",
-        f"[{aya_dataset.stats.get_color()}]{format_duration(aya_dataset.stats.median)}[/]",
-        format_duration(aio_dataset.stats.median),
-        f"[{'green' if speedup_dataset > 1 else 'red'}]{speedup_dataset:.2f}x[/]"
-    )
-    table.add_row(
-        "",
-        "吞吐量",
-        f"[green]{aya_dataset.throughput:.0f}[/] 条/秒",
-        f"{aio_dataset.throughput:.0f} 条/秒",
-        f"[green]{speedup_dataset:.2f}x[/]"
-    )
-    table.add_row(
-        "",
-        "单次write\nP99延迟",
-        f"[green]{write_latencies['ayafileio'].p99:.3f}ms[/]",
-        f"{write_latencies['aiofiles'].p99:.3f}ms",
-        ""
-    )
-    
-    table.add_row("", "", "", "", "")
-    
-    # 混合读写
-    table.add_row(
-        "混合读写",
-        "中位数",
-        f"[{aya_mixed.stats.get_color()}]{format_duration(aya_mixed.stats.median)}[/]",
-        format_duration(aio_mixed.stats.median),
-        f"[{'green' if speedup_mixed > 1 else 'red'}]{speedup_mixed:.2f}x[/]"
-    )
-    table.add_row(
-        "",
-        "抖动",
-        f"[{'green' if aya_mixed.stats.jitter < aio_mixed.stats.jitter else 'red'}]{aya_mixed.stats.jitter:.1f}%[/]",
-        f"{aio_mixed.stats.jitter:.1f}%",
-        "✅ 更稳" if aya_mixed.stats.jitter < aio_mixed.stats.jitter else "❌"
-    )
-    
-    return table
-
-
-def create_header_panel(info: dict, config: Config, total_size_mb: float) -> Panel:
-    """创建头部信息面板"""
-    content = (
-        f"[bold cyan]平台:[/bold cyan] {info['platform']}\n"
-        f"[bold cyan]后端:[/bold cyan] {info['backend']} [dim](真异步: {info['is_truly_async']})[/dim]\n"
-        f"[bold cyan]调优模式:[/bold cyan] {config.tuning_mode}\n"
-        f"[bold cyan]测试数据:[/bold cyan] {config.screenshot_count} 个截图 ({total_size_mb:.1f} MB) + {config.item_count} 条记录\n"
-        f"[bold cyan]并发数:[/bold cyan] {config.concurrent_limit} | [bold cyan]测试轮数:[/bold cyan] {config.test_rounds}"
-    )
-    return Panel(content, title="🎯 ayafileio vs aiofiles 基准测试", border_style="cyan")
-
-
-# ════════════════════════════════════════════════════════════════════════════
 # 运行完整基准测试
 # ════════════════════════════════════════════════════════════════════════════
 
 async def run_benchmark(config: Config) -> dict:
     """运行完整基准测试"""
-    if console:
-        console.clear()
-        console.print(create_header_panel({}, config, 0))
-    else:
-        print("=" * 80)
-        print("ayafileio vs aiofiles 专业基准测试")
-        print("=" * 80)
-    
     # 显示后端信息
     info = ayafileio.get_backend_info()
     
     # 应用性能调优
     apply_ayafileio_tuning(config)
     
+    # 打印测试配置
+    total_size_mb = (config.screenshot_size * config.screenshot_count) / (1024 * 1024)
+    
     if console:
         console.print(f"\n[bold]⚙️  测试配置:[/bold]")
-        console.print(f"   - 截图文件大小: {config.screenshot_size // 1024} KB")
-        console.print(f"   - 截图文件数量: {config.screenshot_count}")
-        console.print(f"   - Dataset 每条大小: ~{config.item_size} bytes")
-        console.print(f"   - Dataset 条数: {config.item_count}")
-        console.print(f"   - 最大并发: {config.concurrent_limit}")
+        console.print(f"   - 截图: {config.screenshot_count} 个 x {config.screenshot_size // 1024}KB = {total_size_mb:.1f}MB")
+        console.print(f"   - Dataset: {config.item_count} 条 x ~{config.item_size} bytes")
+        console.print(f"   - 并发: {config.concurrent_limit} | 轮数: {config.test_rounds}")
     else:
         print(f"\n⚙️  测试配置:")
         print(f"   - 截图文件大小: {config.screenshot_size // 1024} KB")
         print(f"   - 截图文件数量: {config.screenshot_count}")
         print(f"   - Dataset 每条大小: ~{config.item_size} bytes")
         print(f"   - Dataset 条数: {config.item_count}")
+        print(f"   - 最大并发: {config.concurrent_limit}")
+        print(f"   - 预热轮数: {config.warmup_rounds}")
+        print(f"   - 测试轮数: {config.test_rounds}")
     
     # 准备测试数据
     if console:
@@ -709,7 +532,6 @@ async def run_benchmark(config: Config) -> dict:
     
     screenshot_data = [generate_screenshot_data(config.screenshot_size) 
                        for _ in range(config.screenshot_count)]
-    total_size_mb = (config.screenshot_size * config.screenshot_count) / (1024 * 1024)
     
     if console:
         console.print(f"[green]✅ 生成了 {config.screenshot_count} 个模拟截图文件 (总计 {total_size_mb:.1f} MB)[/green]")
@@ -778,7 +600,10 @@ async def run_benchmark(config: Config) -> dict:
     if console:
         console.print(f"\n  📈 [cyan]ayafileio[/cyan]: 中位数 {format_duration(aya_write.stats.median)}, 抖动 {aya_write.stats.jitter:.1f}%, P99 {format_duration(aya_write.stats.p99)}")
         console.print(f"  📈 [dim]aiofiles[/dim]:   中位数 {format_duration(aio_write.stats.median)}, 抖动 {aio_write.stats.jitter:.1f}%, P99 {format_duration(aio_write.stats.p99)}")
-        console.print(f"  🚀 [{'green' if speedup_write > 1 else 'red'}]{'提速' if speedup_write > 1 else '减速'}: {speedup_write:.2f}x[/]")
+        if speedup_write > 1:
+            console.print(f"  🚀 [green]提速: {speedup_write:.2f}x[/green]")
+        else:
+            console.print(f"  📉 [red]减速: {speedup_write:.2f}x[/red]")
     else:
         print(f"\n  📈 ayafileio: 中位数 {aya_write.stats.median:.4f}s, 抖动 {aya_write.stats.jitter:.1f}%, P99 {aya_write.stats.p99:.4f}s")
         print(f"  📈 aiofiles:  中位数 {aio_write.stats.median:.4f}s, 抖动 {aio_write.stats.jitter:.1f}%, P99 {aio_write.stats.p99:.4f}s")
@@ -831,7 +656,10 @@ async def run_benchmark(config: Config) -> dict:
     if console:
         console.print(f"\n  📈 [cyan]ayafileio[/cyan]: 中位数 {format_duration(aya_read.stats.median)}, 抖动 {aya_read.stats.jitter:.1f}%, P99 {format_duration(aya_read.stats.p99)}")
         console.print(f"  📈 [dim]aiofiles[/dim]:   中位数 {format_duration(aio_read.stats.median)}, 抖动 {aio_read.stats.jitter:.1f}%, P99 {format_duration(aio_read.stats.p99)}")
-        console.print(f"  🚀 [{'green' if speedup_read > 1 else 'red'}]{'提速' if speedup_read > 1 else '减速'}: {speedup_read:.2f}x[/]")
+        if speedup_read > 1:
+            console.print(f"  🚀 [green]提速: {speedup_read:.2f}x[/green]")
+        else:
+            console.print(f"  📉 [red]减速: {speedup_read:.2f}x[/red]")
     else:
         print(f"\n  📈 ayafileio: 中位数 {aya_read.stats.median:.4f}s, 抖动 {aya_read.stats.jitter:.1f}%, P99 {aya_read.stats.p99:.4f}s")
         print(f"  📈 aiofiles:  中位数 {aio_read.stats.median:.4f}s, 抖动 {aio_read.stats.jitter:.1f}%, P99 {aio_read.stats.p99:.4f}s")
@@ -897,7 +725,10 @@ async def run_benchmark(config: Config) -> dict:
     
     if console:
         console.print(f"\n  📈 [cyan]总体:[/cyan]")
-        console.print(f"  🚀 [{'green' if speedup_dataset > 1 else 'red'}]{'提速' if speedup_dataset > 1 else '减速'}: {speedup_dataset:.2f}x[/]")
+        if speedup_dataset > 1:
+            console.print(f"  🚀 [green]提速: {speedup_dataset:.2f}x[/green]")
+        else:
+            console.print(f"  📉 [red]减速: {speedup_dataset:.2f}x[/red]")
         console.print(f"  📝 吞吐量: [green]{aya_dataset.throughput:.0f}[/green] 条/秒 vs {aio_dataset.throughput:.0f} 条/秒")
     else:
         print(f"\n  📈 总体:")
@@ -956,7 +787,10 @@ async def run_benchmark(config: Config) -> dict:
     if console:
         console.print(f"\n  📈 [cyan]ayafileio[/cyan]: 中位数 {format_duration(aya_mixed.stats.median)}, 抖动 {aya_mixed.stats.jitter:.1f}%")
         console.print(f"  📈 [dim]aiofiles[/dim]:   中位数 {format_duration(aio_mixed.stats.median)}, 抖动 {aio_mixed.stats.jitter:.1f}%")
-        console.print(f"  🚀 [{'green' if speedup_mixed > 1 else 'red'}]{'提速' if speedup_mixed > 1 else '减速'}: {speedup_mixed:.2f}x[/]")
+        if speedup_mixed > 1:
+            console.print(f"  🚀 [green]提速: {speedup_mixed:.2f}x[/green]")
+        else:
+            console.print(f"  📉 [red]减速: {speedup_mixed:.2f}x[/red]")
     else:
         print(f"\n  📈 ayafileio: 中位数 {aya_mixed.stats.median:.4f}s, 抖动 {aya_mixed.stats.jitter:.1f}%")
         print(f"  📈 aiofiles:  中位数 {aio_mixed.stats.median:.4f}s, 抖动 {aio_mixed.stats.jitter:.1f}%")
@@ -971,20 +805,30 @@ async def run_benchmark(config: Config) -> dict:
     # ════════════════════════════════════════════════════════════════════════
     # 汇总输出
     # ════════════════════════════════════════════════════════════════════════
-    if console:
+    if console and RICH_AVAILABLE:
         console.print("\n")
-        table = create_result_table(
-            info, aya_write, aio_write,
-            aya_read, aio_read,
-            aya_dataset, aio_dataset,
-            aya_mixed, aio_mixed,
-            write_latencies,
-            speedup_write, speedup_read, speedup_dataset, speedup_mixed
-        )
-        console.print(table)
+        table = Table(title="📊 测试结果对比", box=box.ROUNDED, header_style="bold cyan")
+        table.add_column("场景", style="cyan", no_wrap=True)
+        table.add_column("指标", style="dim")
+        table.add_column("ayafileio", justify="right")
+        table.add_column("aiofiles", justify="right")
+        table.add_column("对比", justify="center")
         
-        # 更新头部面板
-        console.print(create_header_panel(info, config, total_size_mb))
+        table.add_row("KeyValueStore\n写入", "中位数", format_duration(aya_write.stats.median), format_duration(aio_write.stats.median), f"{speedup_write:.2f}x")
+        table.add_row("", "抖动", f"{aya_write.stats.jitter:.1f}%", f"{aio_write.stats.jitter:.1f}%", "✅" if aya_write.stats.jitter < aio_write.stats.jitter else "❌")
+        table.add_row("", "P99", format_duration(aya_write.stats.p99), format_duration(aio_write.stats.p99), "")
+        table.add_row("", "", "", "", "")
+        table.add_row("KeyValueStore\n读取", "中位数", format_duration(aya_read.stats.median), format_duration(aio_read.stats.median), f"{speedup_read:.2f}x")
+        table.add_row("", "抖动", f"{aya_read.stats.jitter:.1f}%", f"{aio_read.stats.jitter:.1f}%", "✅" if aya_read.stats.jitter < aio_read.stats.jitter else "❌")
+        table.add_row("", "", "", "", "")
+        table.add_row("Dataset\n追加写入", "中位数", format_duration(aya_dataset.stats.median), format_duration(aio_dataset.stats.median), f"{speedup_dataset:.2f}x")
+        table.add_row("", "吞吐量", f"{aya_dataset.throughput:.0f}条/秒", f"{aio_dataset.throughput:.0f}条/秒", f"{speedup_dataset:.2f}x")
+        table.add_row("", "P99延迟", f"{write_latencies['ayafileio'].p99:.3f}ms", f"{write_latencies['aiofiles'].p99:.3f}ms", "")
+        table.add_row("", "", "", "", "")
+        table.add_row("混合读写", "中位数", format_duration(aya_mixed.stats.median), format_duration(aio_mixed.stats.median), f"{speedup_mixed:.2f}x")
+        table.add_row("", "抖动", f"{aya_mixed.stats.jitter:.1f}%", f"{aio_mixed.stats.jitter:.1f}%", "✅" if aya_mixed.stats.jitter < aio_mixed.stats.jitter else "❌")
+        
+        console.print(table)
     else:
         print("\n" + "=" * 90)
         print("📊 测试结果汇总")
@@ -1031,18 +875,18 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="ayafileio 性能基准测试")
-    parser.add_argument("--tuning", choices=["auto", "aggressive", "conservative", "none"],
-                        default="aggressive", help="调优模式 (默认: aggressive)")
+    parser.add_argument("--tuning", choices=["auto", "balanced", "throughput", "latency", "none"],
+                        default="balanced", help="调优模式 (默认: balanced)")
     parser.add_argument("--rounds", type=int, default=5, help="测试轮数")
     parser.add_argument("--items", type=int, default=5000, help="Dataset 条目数")
     parser.add_argument("--no-rich", action="store_true", help="禁用 Rich 美化输出")
     
     args = parser.parse_args()
     
-    # 如果禁用 rich 或 rich 不可用，使用普通输出
-    global console
-    if args.no_rich or not RICH_AVAILABLE:
-        console = None
+    # 映射调优模式
+    tuning_mode = args.tuning
+    if tuning_mode == "auto":
+        tuning_mode = "balanced"
     
     if sys.platform == "win32":
         loop = asyncio.new_event_loop()
@@ -1057,15 +901,15 @@ def main():
     config = Config(
         test_rounds=args.rounds,
         item_count=args.items,
-        tuning_mode=args.tuning,
-        enable_tuning=(args.tuning != "none")
+        tuning_mode=tuning_mode,
+        enable_tuning=(tuning_mode != "none")
     )
     
     try:
         results = asyncio.run(run_benchmark(config))
         return results
     except KeyboardInterrupt:
-        if console:
+        if console and RICH_AVAILABLE:
             console.print("\n\n[yellow]⚠️ 测试被用户中断[/yellow]")
         else:
             print("\n\n⚠️  测试被用户中断")
