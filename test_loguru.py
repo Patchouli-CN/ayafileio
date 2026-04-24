@@ -1,11 +1,16 @@
 """真实负载测试：50 协程同时写 5 个文件"""
-
+import sys
 import asyncio
 import tempfile
 import time
 from pathlib import Path
 
 from ayafileio import open as aya_open
+
+# 设置 Windows 控制台编码
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 async def test_aya(LOG_COUNT, CONCURRENT, NUM_FILES):
