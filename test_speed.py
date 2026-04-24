@@ -12,7 +12,6 @@ import os
 import io
 import sys
 import statistics
-import platform
 from pathlib import Path
 from dataclasses import dataclass, field
 
