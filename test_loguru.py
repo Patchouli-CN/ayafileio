@@ -1,4 +1,5 @@
 """真实负载测试：50 协程同时写 5 个文件"""
+import io
 import sys
 import asyncio
 import tempfile
