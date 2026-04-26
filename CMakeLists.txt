@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ayafileio VERSION 1.0.1 LANGUAGES CXX)
+project(ayafileio VERSION 1.0.2 LANGUAGES CXX)
 
 # 设置 C++ 标准
 set(CMAKE_CXX_STANDARD 17)
