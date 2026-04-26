@@ -447,12 +447,21 @@ PyObject* MacOSGCDBackend::seek(int64_t offset, int whence) {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     
+    // 预先在 GIL 保护下获取 set_result / set_exception
+    PyObject* set_result = PyObject_GetAttr(future, g_str_set_result);
+    PyObject* set_exception = PyObject_GetAttr(future, g_str_set_exception);
+    Py_INCREF(future);  // barrier block 里还需要用
+    
     auto self = this;
     
     dispatch_io_barrier(m_channel, ^{
         UR_DEBUG_LOG0("MacOSGCDBackend::seek barrier executing");
         
         off_t new_pos;
+        bool ok = true;
+        int err = 0;
+        bool invalid_whence = false;
+        
         {
             std::lock_guard<std::mutex> lk(self->m_posMtx);
             
@@ -463,45 +472,52 @@ PyObject* MacOSGCDBackend::seek(int64_t offset, int whence) {
             } else if (whence == 2) {
                 struct stat st;
                 if (fstat(self->m_fd, &st) != 0) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        PyGILState_STATE gs = PyGILState_Ensure();
-                        resolve_exc(future, g_OSError, errno, "fstat failed");
-                        PyGILState_Release(gs);
-                    });
-                    return;
+                    ok = false;
+                    err = errno;
+                } else {
+                    new_pos = static_cast<off_t>(st.st_size) + static_cast<off_t>(offset);
                 }
-                new_pos = static_cast<off_t>(st.st_size) + static_cast<off_t>(offset);
             } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    PyGILState_STATE gs = PyGILState_Ensure();
-                    resolve_exc(future, g_ValueError, 0, "Invalid whence value");
-                    PyGILState_Release(gs);
-                });
-                return;
+                ok = false;
+                invalid_whence = true;
             }
             
-            new_pos = lseek(self->m_fd, new_pos, SEEK_SET);
-            if (new_pos == -1) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    PyGILState_STATE gs = PyGILState_Ensure();
-                    resolve_exc(future, g_OSError, errno, "lseek failed");
-                    PyGILState_Release(gs);
-                });
-                return;
+            if (ok && !invalid_whence) {
+                new_pos = lseek(self->m_fd, new_pos, SEEK_SET);
+                if (new_pos == -1) {
+                    ok = false;
+                    err = errno;
+                } else {
+                    self->m_filePos = static_cast<uint64_t>(new_pos);
+                    UR_DEBUG_LOG("MacOSGCDBackend::seek new pos=%lld", (long long)new_pos);
+                }
             }
-            
-            self->m_filePos = static_cast<uint64_t>(new_pos);
-            UR_DEBUG_LOG("MacOSGCDBackend::seek new pos=%lld", (long long)new_pos);
         }
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            PyGILState_STATE gs = PyGILState_Ensure();
+        // ★ 在 GCD 队列回调中获取 GIL，用 LoopHandle 安全投递
+        PyGILState_STATE gs = PyGILState_Ensure();
+        
+        if (ok) {
             PyObject* pos = PyLong_FromUnsignedLongLong(self->m_filePos);
-            resolve_ok(future, pos);
+            self->m_loop_handle->push(set_result, pos);
             Py_DECREF(pos);
-            PyGILState_Release(gs);
-            UR_DEBUG_LOG0("MacOSGCDBackend::seek future resolved");
-        });
+        } else if (invalid_whence) {
+            PyObject* exc = PyObject_CallFunction(g_ValueError, "s", "Invalid whence value");
+            self->m_loop_handle->push(set_exception, exc);
+            Py_DECREF(exc);
+        } else {
+            PyObject* exc_class = map_posix_error(err);
+            PyObject* exc = PyObject_CallFunction(exc_class, "is", err, "seek failed");
+            self->m_loop_handle->push(set_exception, exc);
+            Py_DECREF(exc);
+        }
+        
+        Py_DECREF(future);
+        Py_DECREF(set_result);
+        Py_DECREF(set_exception);
+        PyGILState_Release(gs);
+        
+        UR_DEBUG_LOG0("MacOSGCDBackend::seek future resolved");
     });
     
     return future;
@@ -524,6 +540,11 @@ PyObject* MacOSGCDBackend::flush() {
         return future;
     }
     
+    // 预先获取 set_result / set_exception
+    PyObject* set_result = PyObject_GetAttr(future, g_str_set_result);
+    PyObject* set_exception = PyObject_GetAttr(future, g_str_set_exception);
+    Py_INCREF(future);
+    
     auto self = this;
     
     dispatch_io_barrier(m_channel, ^{
@@ -531,17 +552,26 @@ PyObject* MacOSGCDBackend::flush() {
         
         int result = fsync(self->m_fd);
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            PyGILState_STATE gs = PyGILState_Ensure();
-            if (result == 0) {
-                resolve_ok(future, Py_None);
-                UR_DEBUG_LOG0("MacOSGCDBackend::flush success");
-            } else {
-                resolve_exc(future, g_OSError, errno, "fsync failed");
-                UR_DEBUG_LOG("MacOSGCDBackend::flush failed, errno=%d", errno);
-            }
-            PyGILState_Release(gs);
-        });
+        // ★ 用 PyGILState_Ensure + LoopHandle，不走主队列
+        PyGILState_STATE gs = PyGILState_Ensure();
+        
+        if (result == 0) {
+            Py_INCREF(Py_None);
+            self->m_loop_handle->push(set_result, Py_None);
+            UR_DEBUG_LOG0("MacOSGCDBackend::flush success");
+        } else {
+            int err = errno;
+            PyObject* exc_class = map_posix_error(err);
+            PyObject* exc = PyObject_CallFunction(exc_class, "is", err, "fsync failed");
+            self->m_loop_handle->push(set_exception, exc);
+            Py_DECREF(exc);
+            UR_DEBUG_LOG("MacOSGCDBackend::flush failed, errno=%d", err);
+        }
+        
+        Py_DECREF(future);
+        Py_DECREF(set_result);
+        Py_DECREF(set_exception);
+        PyGILState_Release(gs);
     });
     
     return future;
