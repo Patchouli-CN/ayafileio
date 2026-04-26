@@ -20,7 +20,6 @@ public:
     virtual PyObject* close() = 0;
     virtual void close_impl() = 0;
 
-    // Called from worker threads (no GIL).
     virtual void complete_ok(IORequest* req, size_t bytes) = 0;
     virtual void complete_error(IORequest* req, DWORD err) = 0;
 
@@ -32,11 +31,13 @@ protected:
     static void resolve_bytes(PyObject* future, const char* buf, Py_ssize_t n);
     static void resolve_exc(PyObject* future, PyObject* cls, DWORD err, const char* msg);
 
-    // 缓存的配置值（在构造函数中初始化，避免频繁加锁）
+    // 缓存配置
     size_t m_cached_buffer_size = 65536;
     size_t m_cached_buffer_pool_max = 512;
     unsigned m_cached_close_timeout_ms = 4000;
     unsigned m_cached_io_uring_queue_depth = 256;
     unsigned m_cached_io_uring_flags = 0;
     bool m_cached_io_uring_sqpoll = false;
+    
+    bool m_owns_fd = true;  // ← 新增：是否拥有 fd，决定 close_impl 时是否 ::close
 };

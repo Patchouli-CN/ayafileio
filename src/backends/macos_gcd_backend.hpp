@@ -13,6 +13,7 @@
 class MacOSGCDBackend : public IOBackendBase {
 public:
     MacOSGCDBackend(const std::string& path, const std::string& mode);
+    MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd = false);
     ~MacOSGCDBackend() override;
 
     PyObject* read(int64_t size = -1) override;

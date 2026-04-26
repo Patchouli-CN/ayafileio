@@ -24,7 +24,7 @@ class AsyncFile:
         "_line_buffer",
         "_closed",
         "_newline",
-        "_errors"
+        "_errors",
     )
 
     def __init__(
@@ -37,9 +37,9 @@ class AsyncFile:
     ) -> None:
         self._path = str(path)
         self._closed = False
-        
+
         self._newline = newline
-        self._errors = errors or 'strict'
+        self._errors = errors or "strict"
 
         # ── 文本 / 二进制模式判断 ──────────────────────────────────────────
         self._is_text = "b" not in mode
@@ -94,12 +94,14 @@ class AsyncFile:
         data: bytes = await self._impl.read(size)
         if not data:
             return "" if self._is_text else b""
-        return data.decode(self._encoding, errors=self._errors) if self._is_text else data  # type: ignore
+        return (
+            data.decode(self._encoding, errors=self._errors) if self._is_text else data
+        )  # type: ignore
 
     async def readline(self) -> str | bytes:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        
+
         sep = b"\n"
         while True:
             idx = self._line_buffer.find(sep)
@@ -109,10 +111,14 @@ class AsyncFile:
                     self._line_buffer[idx + 1 :],
                 )
                 if self._is_text:
-                    text = line.decode(self._encoding, errors=self._errors) # type: ignore reason: 同下
+                    text = line.decode(self._encoding, errors=self._errors)  # type: ignore reason: 同下
                     # 处理 newline 参数
-                    if self._newline is not None and self._newline != '\n':
-                        text = text.replace('\n', self._newline) if self._newline != '' else text.replace('\n', '')
+                    if self._newline is not None and self._newline != "\n":
+                        text = (
+                            text.replace("\n", self._newline)
+                            if self._newline != ""
+                            else text.replace("\n", "")
+                        )
                     return text
                 return line
 
@@ -121,9 +127,13 @@ class AsyncFile:
                 if self._line_buffer:
                     out, self._line_buffer = self._line_buffer, b""
                     if self._is_text:
-                        text = out.decode(self._encoding, errors=self._errors) # type: ignore reason: self._encoding一定是str
-                        if self._newline is not None and self._newline != '\n':
-                            text = text.replace('\n', self._newline) if self._newline != '' else text.replace('\n', '')
+                        text = out.decode(self._encoding, errors=self._errors)  # type: ignore reason: self._encoding一定是str
+                        if self._newline is not None and self._newline != "\n":
+                            text = (
+                                text.replace("\n", self._newline)
+                                if self._newline != ""
+                                else text.replace("\n", "")
+                            )
                         return text
                     return out
                 return "" if self._is_text else b""
@@ -206,7 +216,21 @@ class AsyncFile:
         mode: str = "rb",
         encoding: str | None = None,
         newline: str | None = None,
-        errors: str | None = None
+        errors: str | None = None,
     ) -> "AsyncFile":
         """类方法方式打开文件，等同 `AsyncFile(path, mode, encoding)`"""
         return cls(path, mode, encoding, newline, errors)
+
+    @classmethod
+    def _from_impl(cls, impl: _AsyncFile) -> "AsyncFile":
+        """从 C++ 层对象创建 AsyncFile（内部使用）"""
+        instance = object.__new__(cls)
+        instance._impl = impl
+        instance._path = "<fd>"
+        instance._is_text = False
+        instance._encoding = None
+        instance._line_buffer = b""
+        instance._closed = False
+        instance._newline = None
+        instance._errors = "strict"
+        return instance

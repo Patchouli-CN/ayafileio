@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-04-26
+
+### Added
+- **`wrap_fd(fd, mode, *, owns_fd)`**: Wrap an existing **file** descriptor as an
+  async I/O object backed by the optimal platform backend (io_uring / IOCP /
+  Dispatch I/O). On Windows, the fd is transparently upgraded to an
+  overlapped-capable handle. Only file descriptors are supported; sockets and
+  pipes should be managed by the event loop.
+- **`AyaIO` protocol type** (`ayafileio.types`): A unified async I/O interface
+  (`read()`, `write()`, `seek()`, `flush()`, `close()`, `closed`) that both
+  `AsyncFile` and `wrap_fd()` return values satisfy.
+
+### Changed
+- All backends (`IOUringBackend`, `MacOSGCDBackend`, `ThreadIOBackend`,
+  `WindowsIOBackend`) now support construction from a raw file descriptor via
+  `FileHandle(int fd, const std::string& mode, bool owns_fd)`.
+- `close_impl()` respects the `owns_fd` flag—externally provided file descriptors
+  are not closed by ayafileio unless `owns_fd=True`.
+- On Windows, `wrap_fd()` obtains the file path from the CRT fd via
+  `GetFinalPathNameByHandleW`, closes the original fd if `owns_fd=True`, and
+  re-opens the file with `FILE_FLAG_OVERLAPPED` to enable true async IOCP I/O.
+
+### Fixed
+- Fixed `PermissionError` on Windows when calling `read()` after `wrap_fd()` with
+  write-only mode—the reopened handle now always requests
+  `GENERIC_READ | GENERIC_WRITE`.
+
 ## [1.0.3] - 2026-04-27
 
 ### Added

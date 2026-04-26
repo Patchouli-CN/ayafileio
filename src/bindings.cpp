@@ -26,6 +26,9 @@ struct PyAsyncFile {
     explicit PyAsyncFile(const char* path, const char* mode = "rb")
         : fh(new FileHandle(std::string(path), std::string(mode))) {}
 
+    PyAsyncFile(int fd, const char* mode = "rb", bool owns_fd = false)
+        : fh(new FileHandle(fd, std::string(mode), owns_fd)) {}
+
     ~PyAsyncFile() { delete fh; }
 
     py::object read(int64_t size = -1) {
@@ -268,6 +271,9 @@ NB_MODULE(_ayafileio, m) {
     py::class_<PyAsyncFile>(m, "AsyncFile")
         .def(py::init<const char*, const char*>(),
              py::arg("path"), py::arg("mode") = "rb")
+        .def(py::init<int, const char*, bool>(), 
+             py::arg("fd"), py::arg("mode") = "rb", 
+             py::arg("owns_fd") = false)
         .def("read",  &PyAsyncFile::read,  py::arg("size") = -1)
         .def("write", &PyAsyncFile::write)
         .def("seek",  &PyAsyncFile::seek,  py::arg("offset"), py::arg("whence") = 0)

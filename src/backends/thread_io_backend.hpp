@@ -13,6 +13,7 @@
 class ThreadIOBackend : public IOBackendBase {
 public:
     ThreadIOBackend(const std::string& path, const std::string& mode);
+    ThreadIOBackend(int fd, const std::string& mode, bool owns_fd = false);
     ~ThreadIOBackend() override;
 
     PyObject* read(int64_t size = -1) override;

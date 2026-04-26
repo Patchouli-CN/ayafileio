@@ -103,6 +103,37 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     UR_DEBUG_LOG("ThreadIOBackend: constructor done, this=%p", (void*)this);
 }
 
+ThreadIOBackend::ThreadIOBackend(int fd, const std::string& mode, bool owns_fd) {
+    m_fd = fd;
+    m_owns_fd = owns_fd;
+    
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
+    m_num_workers = cfg.io_worker_count();
+    if (m_num_workers == 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0) hc = 1;
+        m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
+    }
+    
+    ModeInfo mi = parse_mode(mode);
+    m_appendMode = mi.appendMode;
+    
+    m_running.store(true, std::memory_order_release);
+    m_pending.store(0, std::memory_order_relaxed);
+    m_filePos = 0;
+    
+    if (m_appendMode) {
+        struct stat st;
+        if (fstat(m_fd, &st) == 0) {
+            m_filePos = static_cast<uint64_t>(st.st_size);
+        }
+    }
+}
+
 ThreadIOBackend::~ThreadIOBackend() {
     UR_DEBUG_LOG("ThreadIOBackend: destructor start, this=%p", (void*)this);
     close_impl();
@@ -512,7 +543,7 @@ void ThreadIOBackend::close_impl() {
                      m_pending.load());
     }
     
-    if (m_fd != -1) {
+    if (m_owns_fd && m_fd != -1) {
         UR_DEBUG_LOG("ThreadIOBackend::close_impl closing fd=%d", m_fd);
         ::close(m_fd);
         m_fd = -1;

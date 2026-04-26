@@ -5,6 +5,31 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.0.4] - 2026-04-26
+
+### 新增
+- **`wrap_fd(fd, mode, *, owns_fd)`**: 将现有**文件**描述符包装为异步 I/O 对象，
+  底层自动使用最优平台后端（io_uring / IOCP / Dispatch I/O）。
+  Windows 上会透明地将 fd 升级为支持 OVERLAPPED 的句柄。
+  仅支持文件描述符；socket 和 pipe 请交由事件循环管理。
+- **`AyaIO` 协议类型**（`ayafileio.types`）: 统一的异步 I/O 接口
+  （`read()`, `write()`, `seek()`, `flush()`, `close()`, `closed`），
+  `AsyncFile` 和 `wrap_fd()` 的返回值均符合此协议。
+
+### 变更
+- 所有后端（`IOUringBackend`、`MacOSGCDBackend`、`ThreadIOBackend`、
+  `WindowsIOBackend`）现支持通过 `FileHandle(int fd, mode, owns_fd)` 从原始
+  文件描述符构造。
+- `close_impl()` 遵循 `owns_fd` 标志——外部传入的文件描述符在 `owns_fd=False`
+  时不会被 ayafileio 关闭。
+- Windows 上 `wrap_fd()` 通过 `GetFinalPathNameByHandleW` 从 CRT fd 获取文件路径，
+  若 `owns_fd=True` 则在重开前关闭原始 fd，并用 `FILE_FLAG_OVERLAPPED` 重新打开
+  以实现真正的 IOCP 异步 I/O。
+
+### 修复
+- 修复 Windows 上 `wrap_fd()` 仅写模式调用 `read()` 时出现 `PermissionError`
+  的问题——重开的句柄现在始终请求 `GENERIC_READ | GENERIC_WRITE`。
+
 ## [1.0.3] - 2026-04-26
 
 ### 新增

@@ -111,6 +111,39 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     }
 }
 
+IOUringBackend::IOUringBackend(int fd, const std::string& mode, bool owns_fd) {
+    m_fd = fd;
+    m_owns_fd = owns_fd;
+    
+    ModeInfo mi;
+    try {
+        mi = parse_mode(mode);
+    } catch (const std::invalid_argument& e) {
+        throw py::value_error(e.what());
+    }
+    
+    m_appendMode = mi.appendMode;
+    
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
+    m_running.store(true, std::memory_order_release);
+    m_pending.store(0, std::memory_order_relaxed);
+    m_filePos = 0;
+    
+    if (m_appendMode) {
+        struct stat st;
+        if (fstat(m_fd, &st) == 0) {
+            m_filePos = static_cast<uint64_t>(st.st_size);
+        }
+    }
+    
+    UR_LOG("IOUringBackend created from fd: this=%p, fd=%d, owns_fd=%d", 
+           (void*)this, m_fd, owns_fd);
+}
+
 IOUringBackend::~IOUringBackend() {
     close_impl();
     if (m_loop_initialized) {
@@ -392,7 +425,9 @@ void IOUringBackend::close_impl() {
     }
     
     if (m_uring) m_uring.reset();
-    if (m_fd != -1) { ::close(m_fd); m_fd = -1; }
+    if (m_owns_fd && m_fd != -1) {
+        ::close(m_fd);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

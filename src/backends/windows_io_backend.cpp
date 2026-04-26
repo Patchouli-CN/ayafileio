@@ -102,6 +102,128 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     }
 }
 
+WindowsIOBackend::WindowsIOBackend(int fd, const std::string& mode, bool owns_fd) {
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
+    m_owns_fd = owns_fd;
+    
+    static bool ctrl_reg = false;
+    if (!ctrl_reg) { 
+        SetConsoleCtrlHandler(ctrl_handler, TRUE); 
+        ctrl_reg = true; 
+    }
+
+    PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
+    if (!loop) throw py::python_error();
+    refresh_loop_cache(loop);
+    m_loop          = loop;
+    m_create_future = g_cachedFutureFn; 
+    Py_INCREF(m_create_future);
+    m_loop_handle   = g_cachedLoopHandle;
+
+    { 
+        std::lock_guard<std::mutex> lk(g_openFilesMtx); 
+        g_openFiles.insert(this); 
+    }
+
+    // ── 解析 mode ──
+    ModeInfo mi;
+    try {
+        mi = parse_mode(mode);
+    } catch (const std::invalid_argument &e) {
+        throw py::value_error(e.what());
+    }
+    m_appendMode = mi.appendMode;
+
+    // ── 从 fd 获取原始 HANDLE，提取路径后重新打开 ──
+    HANDLE raw_handle = (HANDLE)_get_osfhandle(fd);
+    if (raw_handle == INVALID_HANDLE_VALUE || raw_handle == NULL) {
+        win_throw_os_error(GetLastError(), "Failed to get handle from fd");
+    }
+    
+    // 尝试获取文件名
+    std::wstring wpath(MAX_PATH, L'\0');
+    DWORD path_len = GetFinalPathNameByHandleW(raw_handle, &wpath[0], MAX_PATH, 
+                                                FILE_NAME_NORMALIZED);
+
+    // ★ 如果用户要求接管所有权，在重新打开前关闭原始 fd
+    // 这样不会有两个句柄同时存在
+    if (m_owns_fd) {
+        _close(fd);  // 关闭原始 fd（也关闭 raw_handle）
+    }
+    
+    if (path_len > 0 && path_len <= MAX_PATH) {
+        // ── 方案 A：有路径，用 CreateFileW + FILE_FLAG_OVERLAPPED ──
+        wpath.resize(path_len);
+        // 去掉 \\?\ 前缀
+        if (wpath.compare(0, 4, L"\\\\?\\") == 0) {
+            wpath = wpath.substr(4);
+        }
+        
+        // ★ 关键修复：fd 已经打开了，这里换个 OVERLAPPED 句柄
+        // 给完整读写权限，避免 ReadFile 报 ERROR_ACCESS_DENIED
+        DWORD access = GENERIC_READ | GENERIC_WRITE;
+        
+        DWORD disp = OPEN_EXISTING;
+        if (mi.hasW)      disp = CREATE_ALWAYS;
+        else if (mi.hasA) disp = OPEN_ALWAYS;
+        else if (mi.hasX) disp = CREATE_NEW;
+        
+        m_handle = CreateFileW(
+            wpath.c_str(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL,
+            disp,
+            FILE_FLAG_OVERLAPPED,
+            NULL
+        );
+        
+        if (m_handle == INVALID_HANDLE_VALUE) {
+            win_throw_os_error(GetLastError(), 
+                "Failed to reopen fd with OVERLAPPED flag");
+        }
+    } else {
+        // ── 方案 B：没有路径（socket/pipe），复制句柄 ──
+        HANDLE proc = GetCurrentProcess();
+        // ★ 显式要求读写权限
+        if (!DuplicateHandle(proc, raw_handle, proc, &m_handle,
+                             GENERIC_READ | GENERIC_WRITE,
+                             FALSE, 0)) {
+            // 回退：继承源句柄权限
+            if (!DuplicateHandle(proc, raw_handle, proc, &m_handle,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                win_throw_os_error(GetLastError(), 
+                    "Failed to duplicate handle from fd");
+            }
+        }
+    }
+
+    // ── 关联 IOCP ──
+    if (!CreateIoCompletionPort(m_handle, g_iocp, (ULONG_PTR)this, 0)) {
+        if (m_owns_fd) CloseHandle(m_handle);
+        win_throw_os_error(GetLastError(), "Failed to associate fd to IOCP");
+    }
+    
+    SetFileCompletionNotificationModes(m_handle,
+        FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE);
+
+    // ── 初始化状态 ──
+    m_running.store(true, std::memory_order_release);
+    m_pending.store(0, std::memory_order_relaxed);
+    m_filePos = 0;
+    
+    if (m_appendMode) {
+        LARGE_INTEGER li{}; 
+        if (GetFileSizeEx(m_handle, &li)) {
+            m_filePos = (uint64_t)li.QuadPart;
+        }
+    }
+}
+
 WindowsIOBackend::~WindowsIOBackend() {
     close_impl();
     { std::lock_guard<std::mutex> lk(g_openFilesMtx); g_openFiles.erase(this); }
@@ -273,10 +395,10 @@ PyObject *WindowsIOBackend::close() {
 void WindowsIOBackend::close_impl() {
     bool expected = true;
     if (!m_running.compare_exchange_strong(expected, false)) return;
+    
     if (m_handle != INVALID_HANDLE_VALUE) {
         CancelIoEx(m_handle, NULL);
         
-        // 使用配置的超时时间
         unsigned timeout_ms = ayafileio::config().close_timeout_ms();
         int w = 1;
         int elapsed = 0;
@@ -288,10 +410,18 @@ void WindowsIOBackend::close_impl() {
         
         LARGE_INTEGER zero{};
         SetFilePointerEx(m_handle, zero, nullptr, FILE_BEGIN);
-        handle_pool_release(m_poolKey, m_handle);
+        
+        // ← 关键：只有自己打开的才放回池或关闭
+        if (m_owns_fd) {
+            handle_pool_release(m_poolKey, m_handle);  // 正常文件走池
+        }
+        // 外部传入的 fd：不关，不缓存，只置空
         m_handle = INVALID_HANDLE_VALUE;
     }
-    { std::lock_guard<std::mutex> lk(g_openFilesMtx); g_openFiles.erase(this); }
+    { 
+        std::lock_guard<std::mutex> lk(g_openFilesMtx); 
+        g_openFiles.erase(this); 
+    }
 }
 
 void WindowsIOBackend::complete_ok(IORequest *req, size_t bytes) {

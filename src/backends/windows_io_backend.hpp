@@ -14,6 +14,7 @@
 class WindowsIOBackend : public IOBackendBase {
 public:
     WindowsIOBackend(const std::string& path, const std::string& mode);
+    WindowsIOBackend(int fd, const std::string& mode, bool owns_fd = false);
     ~WindowsIOBackend() override;
 
     PyObject* read(int64_t size = -1) override;

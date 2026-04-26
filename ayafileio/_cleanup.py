@@ -1,4 +1,5 @@
-""" 注册清理包副作用 """
+"""注册清理包副作用"""
+
 try:
     from ._ayafileio import cleanup as _native_cleanup
 except Exception:

@@ -12,6 +12,7 @@
 class IOUringBackend : public IOBackendBase {
 public:
     IOUringBackend(const std::string& path, const std::string& mode);
+    IOUringBackend(int fd, const std::string& mode, bool owns_fd = false);
     ~IOUringBackend() override;
 
     PyObject* read(int64_t size = -1) override;

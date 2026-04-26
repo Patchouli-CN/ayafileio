@@ -11,6 +11,7 @@
 #include "backends/thread_io_backend.hpp"
 #endif
 
+// 从路径文件打开
 FileHandle::FileHandle(const std::string &path, const std::string &mode) {
 #ifdef _WIN32
     m_backend = new WindowsIOBackend(path, mode);
@@ -51,4 +52,37 @@ FileHandle::FileHandle(const std::string &path, const std::string &mode) {
 
 FileHandle::~FileHandle() {
     delete m_backend;
+}
+
+// 从 fd 打开
+FileHandle::FileHandle(int fd, const std::string& mode, bool owns_fd) {
+#ifdef _WIN32
+    m_backend = new WindowsIOBackend(fd, mode, owns_fd);
+#elif defined(__APPLE__)
+    try {
+        m_backend = new MacOSGCDBackend(fd, mode, owns_fd);
+    } catch (const std::exception&) {
+        m_backend = new ThreadIOBackend(fd, mode, owns_fd);
+    }
+#else
+#ifdef HAVE_IO_URING
+    static bool has_io_uring = []() {
+        struct io_uring ring;
+        int ret = io_uring_queue_init(8, &ring, 0);
+        if (ret == 0) {
+            io_uring_queue_exit(&ring);
+            return true;
+        }
+        return false;
+    }();
+    
+    if (has_io_uring) {
+        try {
+            m_backend = new IOUringBackend(fd, mode, owns_fd);
+            return;
+        } catch (const std::exception&) {}
+    }
+#endif
+    m_backend = new ThreadIOBackend(fd, mode, owns_fd);
+#endif
 }

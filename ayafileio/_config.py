@@ -1,4 +1,5 @@
 """统一配置 API"""
+
 import sys
 
 if sys.version_info >= (3, 11):

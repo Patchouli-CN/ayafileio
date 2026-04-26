@@ -131,6 +131,64 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
     UR_DEBUG_LOG("MacOSGCDBackend: constructor done, this=%p", (void*)this);
 }
 
+MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd) 
+    : m_path("<fd>") {
+    
+    UR_DEBUG_LOG("MacOSGCDBackend: fd constructor start, fd=%d", fd);
+    
+    m_fd = fd;
+    m_owns_fd = owns_fd;
+    
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
+    ModeInfo mi;
+    try {
+        mi = parse_mode(mode);
+    } catch (const std::invalid_argument& e) {
+        throw py::value_error(e.what());
+    }
+    
+    m_appendMode = mi.appendMode;
+    
+    // 创建 GCD 串行队列
+    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
+    m_queue = dispatch_queue_create("com.ayafileio.gcd", attr);
+    
+    // 创建 Dispatch I/O 通道（用现有 fd）
+    m_channel = dispatch_io_create(
+        DISPATCH_IO_RANDOM,
+        m_fd,
+        m_queue,
+        ^(int error) {
+            UR_DEBUG_LOG("MacOSGCDBackend: fd channel cleanup, error=%d", error);
+        }
+    );
+    
+    if (!m_channel) {
+        throw std::runtime_error("Failed to create dispatch I/O channel from fd");
+    }
+    
+    dispatch_io_set_high_water(m_channel, m_cached_buffer_size);
+    dispatch_io_set_low_water(m_channel, m_cached_buffer_size / 4);
+    
+    m_running.store(true, std::memory_order_release);
+    m_pending.store(0, std::memory_order_relaxed);
+    m_filePos = 0;
+    
+    if (m_appendMode) {
+        struct stat st;
+        if (fstat(m_fd, &st) == 0) {
+            m_filePos = static_cast<uint64_t>(st.st_size);
+        }
+    }
+    
+    UR_DEBUG_LOG("MacOSGCDBackend: fd constructor done, this=%p", (void*)this);
+}
+
 MacOSGCDBackend::~MacOSGCDBackend() {
     UR_DEBUG_LOG("MacOSGCDBackend: destructor start, this=%p", (void*)this);
     close_impl();
@@ -556,6 +614,10 @@ void MacOSGCDBackend::close_impl() {
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl releasing queue");
         dispatch_release(m_queue);
         m_queue = nullptr;
+    }
+
+    if (m_owns_fd && m_fd != -1) {
+        ::close(m_fd);
     }
     
     m_fd = -1;

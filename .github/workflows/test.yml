@@ -61,6 +61,7 @@ jobs:
         ulimit -c unlimited
         set +e
         python test_base.py
+        python test_wrap_fd.py
         EXIT_CODE=$?
         set -e
         echo "Test exit code: $EXIT_CODE"
@@ -148,6 +149,7 @@ jobs:
       id: run_tests_windows
       run: |
         python test_base.py
+        python test_wrap_fd.py
         echo "EXIT_CODE=$LASTEXITCODE" >> $env:GITHUB_ENV
         if ($LASTEXITCODE -ne 0) {
           exit $LASTEXITCODE
@@ -205,6 +207,7 @@ jobs:
       run: |
         ulimit -c unlimited
         python test_base.py
+        python test_wrap_fd.py
         EXIT_CODE=$?
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
