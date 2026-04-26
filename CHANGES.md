@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-04-27
+
+### Added
+- `open()` now accepts a `newline` parameter for custom line ending conversion (`None`, `''`, `'\n'`, `'\r\n'`, etc.)
+- `open()` now accepts an `errors` parameter for non-strict encoding error handling (e.g., `'ignore'`, `'replace'`, `'strict'`)
+
+### Changed
+- `AsyncFile.__slots__` updated to include `_newline` and `_errors` attributes
+
 ## [1.0.2 & 1.0.2.post1] - 2026-04-26
 
 ### Added

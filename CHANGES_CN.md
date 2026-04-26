@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.0.3] - 2026-04-26
+
+### 新增
+- `open()` 新增 `newline` 参数，支持自定义行尾符转换
+- `open()` 新增 `errors` 参数，支持非严格编码错误处理
+
+### 变更
+- `AsyncFile.__slots__` 中包含 `_newline` 和 `_errors` 属性
+
 ## [1.0.2 & 1.0.2.post1] - 2026-04-26
 
 ### 新增

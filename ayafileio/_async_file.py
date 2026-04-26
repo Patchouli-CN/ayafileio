@@ -23,6 +23,8 @@ class AsyncFile:
         "_encoding",
         "_line_buffer",
         "_closed",
+        "_newline",
+        "_errors"
     )
 
     def __init__(
@@ -30,9 +32,14 @@ class AsyncFile:
         path: str | Path,
         mode: str = "rb",
         encoding: str | None = None,
+        newline: str | None = None,
+        errors: str | None = None,
     ) -> None:
         self._path = str(path)
         self._closed = False
+        
+        self._newline = newline
+        self._errors = errors or 'strict'
 
         # ── 文本 / 二进制模式判断 ──────────────────────────────────────────
         self._is_text = "b" not in mode
@@ -87,11 +94,12 @@ class AsyncFile:
         data: bytes = await self._impl.read(size)
         if not data:
             return "" if self._is_text else b""
-        return data.decode(self._encoding) if self._is_text else data  # type: ignore
+        return data.decode(self._encoding, errors=self._errors) if self._is_text else data  # type: ignore
 
     async def readline(self) -> str | bytes:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        
         sep = b"\n"
         while True:
             idx = self._line_buffer.find(sep)
@@ -100,13 +108,24 @@ class AsyncFile:
                     self._line_buffer[: idx + 1],
                     self._line_buffer[idx + 1 :],
                 )
-                return line.decode(self._encoding) if self._is_text else line  # type: ignore
+                if self._is_text:
+                    text = line.decode(self._encoding, errors=self._errors) # type: ignore reason: 同下
+                    # 处理 newline 参数
+                    if self._newline is not None and self._newline != '\n':
+                        text = text.replace('\n', self._newline) if self._newline != '' else text.replace('\n', '')
+                    return text
+                return line
 
             chunk: bytes = await self._impl.read(_DEFAULT_READLINE_BUF)
             if not chunk:
                 if self._line_buffer:
                     out, self._line_buffer = self._line_buffer, b""
-                    return out.decode(self._encoding) if self._is_text else out  # type: ignore
+                    if self._is_text:
+                        text = out.decode(self._encoding, errors=self._errors) # type: ignore reason: self._encoding一定是str
+                        if self._newline is not None and self._newline != '\n':
+                            text = text.replace('\n', self._newline) if self._newline != '' else text.replace('\n', '')
+                        return text
+                    return out
                 return "" if self._is_text else b""
             self._line_buffer += chunk
 
@@ -135,7 +154,7 @@ class AsyncFile:
         if self._is_text:
             if not isinstance(data, str):
                 raise TypeError("Text mode requires str input.")
-            raw: bytes = data.encode(self._encoding)  # type: ignore
+            raw: bytes = data.encode(self._encoding, errors=self._errors)  # type: ignore
         else:
             if isinstance(data, str):
                 raise TypeError("Binary mode requires bytes-like input, not str.")
@@ -186,6 +205,8 @@ class AsyncFile:
         path: str | Path,
         mode: str = "rb",
         encoding: str | None = None,
+        newline: str | None = None,
+        errors: str | None = None
     ) -> "AsyncFile":
         """类方法方式打开文件，等同 `AsyncFile(path, mode, encoding)`"""
-        return cls(path, mode, encoding)
+        return cls(path, mode, encoding, newline, errors)

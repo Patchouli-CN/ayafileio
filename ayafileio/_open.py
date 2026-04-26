@@ -12,6 +12,8 @@ def open(
     path: str | Path,
     mode: str = "rb",
     encoding: str | None = None,
+    newline: str | None = None,
+    errors: str | None = None,
 ) -> AsyncFile:
     """打开一个 AsyncFile 实例，自动复用已缓存的句柄。
 
@@ -26,4 +28,4 @@ def open(
     💡 性能提示：尽量复用同一个句柄，避免在循环中反复 open/close。
     """
 
-    return AsyncFile(path, mode, encoding)
+    return AsyncFile(path, mode, encoding, newline, errors)

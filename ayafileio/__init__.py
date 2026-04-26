@@ -10,7 +10,7 @@ ayafileio - 跨平台异步文件 I/O 库
 提供与 aiofiles 兼容的 API, 但性能更优。
 """
 
-__version__ = "1.0.2.post1"
+__version__ = "1.0.3"
 
 from .util import warn_fake_async
 
