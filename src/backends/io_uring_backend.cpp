@@ -65,19 +65,55 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     
     m_appendMode = mi.appendMode;
     
-    m_fd = open(path.c_str(), flags, 0644);
+    // ── 缓存配置 ──
+    auto& cfg = ayafileio::config();
+    m_cached_buffer_size = cfg.buffer_size();
+    m_cached_buffer_pool_max = cfg.buffer_pool_max();
+    m_cached_close_timeout_ms = cfg.close_timeout_ms();
+    
+    // ── 打开文件：优先异步 ──
+    m_fd = -1;
+    
+    try {
+        ensure_loop_initialized();
+        
+        if (m_uring) {
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&m_uring->ring);
+            if (sqe) {
+                io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, 0644);
+                int ret = io_uring_submit(&m_uring->ring);
+                if (ret >= 0) {
+                    struct io_uring_cqe* cqe = nullptr;
+                    ret = io_uring_wait_cqe(&m_uring->ring, &cqe);
+                    if (ret >= 0) {
+                        m_fd = cqe->res;
+                        io_uring_cqe_seen(&m_uring->ring, cqe);
+                        if (m_fd >= 0) {
+                            UR_LOG("IOUringBackend: async open success via io_uring, fd=%d", m_fd);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (...) {
+        // ensure_loop_initialized 可能因为"没有运行中 event loop"而抛异常
+        // 静默处理，下面会走同步 open
+    }
+    
+    // ── 异步打开失败 → 回退同步 ──
+    if (m_fd < 0) {
+        m_fd = open(path.c_str(), flags, 0644);
+        UR_LOG("IOUringBackend: sync open fallback, fd=%d", m_fd);
+    }
+    
     if (m_fd == -1) {
         UR_LOG("IOUringBackend open failed: path=%s, mode=%s, errno=%d", 
                path.c_str(), mode.c_str(), errno);
         throw_os_error("Failed to open file", path.c_str());
     }
+    
     UR_LOG("IOUringBackend created: this=%p, fd=%d, path=%s, mode=%s", 
            (void*)this, m_fd, path.c_str(), mode.c_str());
-    
-    auto& cfg = ayafileio::config();
-    m_cached_buffer_size = cfg.buffer_size();
-    m_cached_buffer_pool_max = cfg.buffer_pool_max();
-    m_cached_close_timeout_ms = cfg.close_timeout_ms();
     
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);

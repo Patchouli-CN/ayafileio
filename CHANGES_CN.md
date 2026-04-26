@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.0.2] - 2026-04-26
+
+### 变更
+- `IOUringBackend` 构造函数重构：打开文件时优先使用 `io_uring` 异步打开，失败时自动回退到同步 `open()`。
+
 ## [1.0.1.post2] - 2026-04-26
 
 ### 修复
