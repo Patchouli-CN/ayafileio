@@ -1,4 +1,5 @@
 # MANIFEST.in
 include README.md
+include README_CN.md
 include LICENSE
 recursive-include ayafileio *.py *.pyd *.pyi
