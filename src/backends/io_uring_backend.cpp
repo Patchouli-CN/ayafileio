@@ -73,31 +73,41 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     
     // ── 打开文件：优先异步 ──
     m_fd = -1;
-    
+
     try {
         ensure_loop_initialized();
         
         if (m_uring) {
             struct io_uring_sqe* sqe = io_uring_get_sqe(&m_uring->ring);
             if (sqe) {
-                io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, 0644);
-                int ret = io_uring_submit(&m_uring->ring);
-                if (ret >= 0) {
-                    struct io_uring_cqe* cqe = nullptr;
-                    ret = io_uring_wait_cqe(&m_uring->ring, &cqe);
+                // 把 path 复制到堆上，保证内核读取 SQE 时字符串还活着
+                char* path_copy = strdup(path.c_str());
+                if (path_copy) {
+                    io_uring_prep_openat(sqe, AT_FDCWD, path_copy, flags, 0644);
+                    // 用 path_copy 作为 user_data，CQE 回来后释放
+                    io_uring_sqe_set_data(sqe, path_copy);
+                    
+                    int ret = io_uring_submit(&m_uring->ring);
                     if (ret >= 0) {
-                        m_fd = cqe->res;
-                        io_uring_cqe_seen(&m_uring->ring, cqe);
-                        if (m_fd >= 0) {
-                            UR_LOG("IOUringBackend: async open success via io_uring, fd=%d", m_fd);
+                        struct io_uring_cqe* cqe = nullptr;
+                        ret = io_uring_wait_cqe(&m_uring->ring, &cqe);
+                        if (ret >= 0) {
+                            m_fd = cqe->res;
+                            // 释放 path_copy
+                            free(io_uring_cqe_get_data(cqe));
+                            io_uring_cqe_seen(&m_uring->ring, cqe);
+                            if (m_fd >= 0) {
+                                UR_LOG("IOUringBackend: async open success via io_uring, fd=%d", m_fd);
+                            }
                         }
+                    } else {
+                        free(path_copy);
                     }
                 }
             }
         }
     } catch (...) {
-        // ensure_loop_initialized 可能因为"没有运行中 event loop"而抛异常
-        // 静默处理，下面会走同步 open
+        // 静默处理，下面走同步 open
     }
     
     // ── 异步打开失败 → 回退同步 ──
