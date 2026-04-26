@@ -328,7 +328,7 @@ jobs:
     - name: Build ayafileio (Release mode)
 
       env:
-        CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_VERBOSE_LOGGING=ON"
+        CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_VERBOSE_LOGGING=OFF"
 
       run: |
         pip install -e . -v
