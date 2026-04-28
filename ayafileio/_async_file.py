@@ -4,12 +4,14 @@
 
 import locale
 from pathlib import Path
+from typing import Generic, TypeVar
 from ._ayafileio import AsyncFile as _AsyncFile
 
 _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 
+T = TypeVar("T", str, bytes)
 
-class AsyncFile:
+class AsyncFile(Generic[T]):
     """跨平台异步文件对象。
 
     支持模式: r/rb/w/wb/a/ab/x/xb 及 + 组合。
@@ -69,7 +71,7 @@ class AsyncFile:
 
     # ── context manager ───────────────────────────────────────────────────────
 
-    async def __aenter__(self) -> "AsyncFile":
+    async def __aenter__(self) -> "AsyncFile[T]":
         return self
 
     async def __aexit__(self, *_) -> None:
@@ -77,26 +79,26 @@ class AsyncFile:
 
     # ── async iterator ────────────────────────────────────────────────────────
 
-    def __aiter__(self) -> "AsyncFile":
+    def __aiter__(self) -> "AsyncFile[T]":
         return self
 
-    async def __anext__(self) -> str | bytes:
+    async def __anext__(self) -> T:
         line = await self.readline()
         if not line:
             raise StopAsyncIteration
-        return line
+        return line # type: ignore
 
     # ── read ──────────────────────────────────────────────────────────────────
 
-    async def read(self, size: int = -1) -> str | bytes:
+    async def read(self, size: int = -1) -> T:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
         data: bytes = await self._impl.read(size)
         if not data:
-            return "" if self._is_text else b""
-        return (
-            data.decode(self._encoding, errors=self._errors) if self._is_text else data
-        )  # type: ignore
+            return "" if self._is_text else b""  # type: ignore[return-value]
+        if self._is_text:
+            return data.decode(self._encoding, errors=self._errors)  # type: ignore[return-value]
+        return data  # type: ignore[return-value]
 
     async def readline(self) -> str | bytes:
         if self._closed:
@@ -222,7 +224,7 @@ class AsyncFile:
         return cls(path, mode, encoding, newline, errors)
 
     @classmethod
-    def _from_impl(cls, impl: _AsyncFile) -> "AsyncFile":
+    def _from_impl(cls, impl: _AsyncFile) -> "AsyncFile[T]":
         """从 C++ 层对象创建 AsyncFile（内部使用）"""
         instance = object.__new__(cls)
         instance._impl = impl

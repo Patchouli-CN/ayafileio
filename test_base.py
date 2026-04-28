@@ -505,7 +505,7 @@ async def test_invalid_mode_async():
     """无效模式（需要事件循环）"""
     path = Path("test.txt")
     try:
-        ayafileio.open(path, "invalid")
+        ayafileio.open(path, "invalid") # type: ignore
         assert False, "应该抛出 ValueError"
     except ValueError:
         pass
@@ -516,7 +516,7 @@ async def test_invalid_mode_async():
 async def test_binary_with_encoding_async():
     """二进制模式不能指定编码（需要事件循环）"""
     try:
-        ayafileio.open("test.bin", "rb", encoding="utf-8")
+        ayafileio.open("test.bin", "rb", encoding="utf-8") # type: ignore
         assert False, "应该抛出 ValueError"
     except ValueError:
         pass
@@ -986,7 +986,7 @@ def main():
     )
     print(f"Test timeout: {runner.timeout_seconds}s")
 
-    runner.start_time = time.time()
+    runner.start_time = time.time() # type: ignore
 
     # 异步测试 - 需要事件循环
     print("\n📋 模式验证测试:")

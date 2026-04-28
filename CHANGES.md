@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-04-28
+
+### Added
+- `AsyncFile` is now generic: `AsyncFile[str]` for text mode, `AsyncFile[bytes]`
+  for binary mode. IDE autocompletion and mypy now know the exact return type
+  of `read()` at compile time.
+- `open()` now uses `@overload` to return `AsyncFile[str]` or `AsyncFile[bytes]`
+  based on the mode argument.
+
+### Changed
+- `wrap_fd()` return type changed from `AyaFileIO[bytes]` to `AsyncFile[bytes]`
+  for improved type inference.
+- `AyaFileIO` protocol type is now generic (`AyaFileIO[T]`) and kept as an
+  internal type in `ayafileio.types` rather than exported in `__init__.py`.
+  Users should type-annotate with `AsyncFile[str]` or `AsyncFile[bytes]`
+  directly.
+- Simplified public API surface: `ayafileio` now exports only `AsyncFile` as
+  the main type, removing the redundant `AyaFileIO` from `__all__`.
+
+### Fixed
+- `wrap_fd()` now raises `ValueError` at runtime if given a non-binary mode,
+  matching the documented restriction.
+
 ## [1.0.4] - 2026-04-26
 
 ### Added

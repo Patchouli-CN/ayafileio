@@ -2,10 +2,8 @@
 
 from ._ayafileio import AsyncFile as _AsyncFile
 from ._async_file import AsyncFile
-from .types import AyaFileIO
 
-
-def wrap_fd(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AyaFileIO:
+def wrap_fd(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]:
     """将现有**文件**描述符包装为异步 I/O 对象。
 
     底层自动选择最优平台后端（io_uring / IOCP / Dispatch I/O），
@@ -73,5 +71,8 @@ def wrap_fd(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AyaFileIO:
         - :func:`ayafileio.open`: 从路径直接打开文件的推荐方式。
         - :class:`AyaIO`: 异步 I/O 对象协议。
     """
+    if "b" not in mode:
+        raise ValueError("wrap_fd() only supports binary mode (e.g., 'rb', 'wb')")
+    
     impl = _AsyncFile(fd, mode, owns_fd)
     return AsyncFile._from_impl(impl)

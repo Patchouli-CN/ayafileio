@@ -5,6 +5,26 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.0.5] - 2026-04-28
+
+### 新增
+- `AsyncFile` 现为泛型类：`AsyncFile[str]` 表示文本模式，`AsyncFile[bytes]`
+  表示二进制模式。IDE 自动补全和 mypy 可在编译时确定 `read()` 的返回类型。
+- `open()` 使用 `@overload` 根据 mode 参数自动返回 `AsyncFile[str]` 或
+  `AsyncFile[bytes]`。
+
+### 变更
+- `wrap_fd()` 返回类型从 `AyaFileIO[bytes]` 改为 `AsyncFile[bytes]`，增强类型推断。
+- `AyaFileIO` 协议现为泛型版本 (`AyaFileIO[T]`)，保留在 `ayafileio.types` 作为
+  内部类型，不再从 `__init__.py` 导出。用户应直接使用 `AsyncFile[str]` 或
+  `AsyncFile[bytes]` 进行类型标注。
+- 精简公开 API：`ayafileio` 现仅导出 `AsyncFile` 作为主要类型，从 `__all__`
+  移除冗余的 `AyaFileIO`。
+
+### 修复
+- `wrap_fd()` 现在在传入非二进制模式时会在运行时抛出 `ValueError`，与文档说明
+  保持一致。
+
 ## [1.0.4] - 2026-04-26
 
 ### 新增
