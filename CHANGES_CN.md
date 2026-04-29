@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.0.5.post1] - 2026-04-29
+
+### 修复
+- **MacOSGCDBackend**: 修复了 macOS 上调用 `seek()` 或 `flush()` 时出现的严重
+  `ContextVar` 重入错误和偶发性 `Segmentation fault`。这两个方法之前使用了
+  `dispatch_io_barrier`，其回调可能在任意 GCD 线程上执行，并通过
+  `PyGILState_Ensure` 尝试获取 Python GIL，与 `asyncio` 的内部上下文管理器
+  状态发生冲突。在并发场景下（如快速 `open()` / `close()` 同一文件），还导致
+  了文件描述符的 use-after-free。`seek()` 和 `flush()` 现在改为在主线
+  程同步执行，完全消除了跨线程 GIL 竞争和对象生命周期问题。
+
+### 变更
+- **MacOSGCDBackend**: `seek()` 和 `flush()` 不再使用 `dispatch_io_barrier`。
+  现在直接在调用线程上执行 `lseek` 和 `fsync`。由于这两个操作都在微秒级完成，
+  同步方式避免了 GCD 调度开销，实际上更快且完全安全。
+- `MacOSGCDBackend` 不再需要未使用的 `m_barrierMtx` 和 `m_barrierCv` 同步原语
+  （可从头文件中移除）。
+
 ## [1.0.5] - 2026-04-28
 
 ### 新增

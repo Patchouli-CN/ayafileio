@@ -447,78 +447,39 @@ PyObject* MacOSGCDBackend::seek(int64_t offset, int whence) {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     
-    // 预先在 GIL 保护下获取 set_result / set_exception
-    PyObject* set_result = PyObject_GetAttr(future, g_str_set_result);
-    PyObject* set_exception = PyObject_GetAttr(future, g_str_set_exception);
-    Py_INCREF(future);  // barrier block 里还需要用
-    
-    auto self = this;
-    
-    dispatch_io_barrier(m_channel, ^{
-        UR_DEBUG_LOG0("MacOSGCDBackend::seek barrier executing");
+    // ✅ 直接在主线程执行 lseek，不使用 GCD barrier
+    off_t new_pos;
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
         
-        off_t new_pos;
-        bool ok = true;
-        int err = 0;
-        bool invalid_whence = false;
-        
-        {
-            std::lock_guard<std::mutex> lk(self->m_posMtx);
-            
-            if (whence == 0) {
-                new_pos = static_cast<off_t>(offset);
-            } else if (whence == 1) {
-                new_pos = static_cast<off_t>(self->m_filePos) + static_cast<off_t>(offset);
-            } else if (whence == 2) {
-                struct stat st;
-                if (fstat(self->m_fd, &st) != 0) {
-                    ok = false;
-                    err = errno;
-                } else {
-                    new_pos = static_cast<off_t>(st.st_size) + static_cast<off_t>(offset);
-                }
-            } else {
-                ok = false;
-                invalid_whence = true;
+        if (whence == 0) {
+            new_pos = lseek(m_fd, offset, SEEK_SET);
+        } else if (whence == 1) {
+            new_pos = lseek(m_fd, m_filePos + offset, SEEK_SET);
+        } else if (whence == 2) {
+            struct stat st;
+            if (fstat(m_fd, &st) != 0) {
+                resolve_exc(future, g_OSError, errno, "fstat failed");
+                return future;
             }
-            
-            if (ok && !invalid_whence) {
-                new_pos = lseek(self->m_fd, new_pos, SEEK_SET);
-                if (new_pos == -1) {
-                    ok = false;
-                    err = errno;
-                } else {
-                    self->m_filePos = static_cast<uint64_t>(new_pos);
-                    UR_DEBUG_LOG("MacOSGCDBackend::seek new pos=%lld", (long long)new_pos);
-                }
-            }
-        }
-        
-        // ★ 在 GCD 队列回调中获取 GIL，用 LoopHandle 安全投递
-        PyGILState_STATE gs = PyGILState_Ensure();
-        
-        if (ok) {
-            PyObject* pos = PyLong_FromUnsignedLongLong(self->m_filePos);
-            self->m_loop_handle->push(set_result, pos);
-            Py_DECREF(pos);
-        } else if (invalid_whence) {
-            PyObject* exc = PyObject_CallFunction(g_ValueError, "s", "Invalid whence value");
-            self->m_loop_handle->push(set_exception, exc);
-            Py_DECREF(exc);
+            new_pos = lseek(m_fd, st.st_size + offset, SEEK_SET);
         } else {
-            PyObject* exc_class = map_posix_error(err);
-            PyObject* exc = PyObject_CallFunction(exc_class, "is", err, "seek failed");
-            self->m_loop_handle->push(set_exception, exc);
-            Py_DECREF(exc);
+            resolve_exc(future, g_ValueError, 0, "Invalid whence value");
+            return future;
         }
         
-        Py_DECREF(future);
-        Py_DECREF(set_result);
-        Py_DECREF(set_exception);
-        PyGILState_Release(gs);
+        if (new_pos == -1) {
+            resolve_exc(future, g_OSError, errno, "lseek failed");
+            return future;
+        }
         
-        UR_DEBUG_LOG0("MacOSGCDBackend::seek future resolved");
-    });
+        m_filePos = static_cast<uint64_t>(new_pos);
+        UR_DEBUG_LOG("MacOSGCDBackend::seek new pos=%lld", (long long)new_pos);
+    }
+    
+    PyObject* pos = PyLong_FromUnsignedLongLong(m_filePos);
+    resolve_ok(future, pos);
+    Py_DECREF(pos);
     
     return future;
 }
@@ -540,40 +501,16 @@ PyObject* MacOSGCDBackend::flush() {
         return future;
     }
     
-    // 预先获取 set_result / set_exception
-    PyObject* set_result = PyObject_GetAttr(future, g_str_set_result);
-    PyObject* set_exception = PyObject_GetAttr(future, g_str_set_exception);
-    Py_INCREF(future);
+    // ✅ 同步执行 fsync，不走 GCD barrier
+    if (fsync(m_fd) != 0) {
+        UR_DEBUG_LOG("MacOSGCDBackend::flush fsync failed, errno=%d", errno);
+        set_os_error("fsync failed");
+        resolve_exc(future, g_OSError, errno, "fsync failed");
+        return future;
+    }
     
-    auto self = this;
-    
-    dispatch_io_barrier(m_channel, ^{
-        UR_DEBUG_LOG0("MacOSGCDBackend::flush barrier executing");
-        
-        int result = fsync(self->m_fd);
-        
-        // ★ 用 PyGILState_Ensure + LoopHandle，不走主队列
-        PyGILState_STATE gs = PyGILState_Ensure();
-        
-        if (result == 0) {
-            Py_INCREF(Py_None);
-            self->m_loop_handle->push(set_result, Py_None);
-            UR_DEBUG_LOG0("MacOSGCDBackend::flush success");
-        } else {
-            int err = errno;
-            PyObject* exc_class = map_posix_error(err);
-            PyObject* exc = PyObject_CallFunction(exc_class, "is", err, "fsync failed");
-            self->m_loop_handle->push(set_exception, exc);
-            Py_DECREF(exc);
-            UR_DEBUG_LOG("MacOSGCDBackend::flush failed, errno=%d", err);
-        }
-        
-        Py_DECREF(future);
-        Py_DECREF(set_result);
-        Py_DECREF(set_exception);
-        PyGILState_Release(gs);
-    });
-    
+    UR_DEBUG_LOG0("MacOSGCDBackend::flush done");
+    resolve_ok(future, Py_None);
     return future;
 }
 
