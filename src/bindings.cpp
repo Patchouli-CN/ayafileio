@@ -64,7 +64,27 @@ struct PyAsyncFile {
         if (!r) throw py::python_error();
         return py::steal<py::object>(py::handle(r));
     }
+
+    py::object tell() {
+        PyObject *r = fh->tell();
+        if (!r) throw py::python_error();
+        return py::steal<py::object>(py::handle(r));
+    }
+
+    py::object truncate(int64_t size) {
+        PyObject* r = fh->truncate(size);
+        if (!r) throw py::python_error();
+        return py::steal<py::object>(py::handle(r));
+    }
+
+    py::object readinto(py::object buf) {
+        PyObject* r = fh->readinto(buf.ptr());
+        if (!r) throw py::python_error();
+        return py::steal<py::object>(py::handle(r));
+    }
+
     void close_impl() { fh->close_impl(); }
+    int fileno() { return fh->fileno(); }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -279,6 +299,10 @@ NB_MODULE(_ayafileio, m) {
         .def("seek",  &PyAsyncFile::seek,  py::arg("offset"), py::arg("whence") = 0)
         .def("flush", &PyAsyncFile::flush)
         .def("close", &PyAsyncFile::close)
+        .def("tell", &PyAsyncFile::tell)
+        .def("truncate", &PyAsyncFile::truncate, py::arg("size"))
+        .def("readinto", &PyAsyncFile::readinto, py::arg("buf"))
+        .def("fileno", &PyAsyncFile::fileno)
         .def("_close_impl", &PyAsyncFile::close_impl);
 
     // 向后兼容的句柄池 API

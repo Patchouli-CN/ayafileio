@@ -424,68 +424,134 @@ void WindowsIOBackend::close_impl() {
     }
 }
 
-void WindowsIOBackend::complete_ok(IORequest *req, size_t bytes) {
-    m_pending.fetch_sub(1, std::memory_order_release);
-    PyGILState_STATE gs = PyGILState_Ensure();
-
-    PyObject *val = nullptr;
-    if      (req->type == ReqType::Read)  val = PyBytes_FromStringAndSize(req->buf(), bytes);
-    else if (req->type == ReqType::Write) val = PyLong_FromSsize_t((Py_ssize_t)bytes);
-    else                                  { val = Py_None; Py_INCREF(Py_None); }
-
-    PyObject *set_fn = req->set_result; req->set_result = nullptr;
-    Py_DECREF(req->future); req->future = nullptr;
-    Py_XDECREF(req->set_exception); req->set_exception = nullptr;
-
-    req->loop_handle->push(set_fn, val);
-    delete req;
-
-    PyGILState_Release(gs);
-}
-
-void WindowsIOBackend::complete_error(IORequest *req, DWORD err) {
-    m_pending.fetch_sub(1, std::memory_order_release);
-    PyGILState_STATE gs = PyGILState_Ensure();
-
-    PyObject *exc_class = map_win_error(err);
-    PyObject *exc = PyObject_CallFunction(exc_class, "is", (int)err, "I/O operation failed");
-
-    PyObject *set_fn = req->set_exception; req->set_exception = nullptr;
-    Py_DECREF(req->future); req->future = nullptr;
-    Py_XDECREF(req->set_result); req->set_result = nullptr;
-
-    req->loop_handle->push(set_fn, exc);
-    delete req;
-
-    PyGILState_Release(gs);
-}
-
-IORequest *WindowsIOBackend::make_req(size_t size, PyObject *future, ReqType type) {
-    auto *req = new IORequest();
-    req->file = this;
-    req->loop_handle = m_loop_handle;
-    req->future = future; 
-    Py_INCREF(future);
-    req->set_result = PyObject_GetAttr(future, g_str_set_result);
-    req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
-    req->reqSize = size;
-    req->type = type;
+PyObject* WindowsIOBackend::tell() {
+    PyObject* future = check_closed_or_raise();
+    if (future) return future;
     
-    // 使用按需分配的缓冲区池
-    if (size <= m_cached_buffer_size) {
-        req->poolBuf = pool_acquire_with_size(size);
-    } else {
-        req->heapBuf = new char[size];
+    future = PyObject_CallNoArgs(m_create_future);
+    if (!future) return nullptr;
+    
+    uint64_t pos;
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        pos = m_filePos;
     }
-    return req;
+    
+    PyObject* py_pos = PyLong_FromUnsignedLongLong(pos);
+    resolve_ok(future, py_pos);
+    Py_DECREF(py_pos);
+    return future;
 }
 
-void WindowsIOBackend::complete_error_inline(IORequest *req, DWORD err) {
-    m_pending.fetch_sub(1, std::memory_order_relaxed);
-    PyObject *exc_class = map_win_error(err);
-    PyObject *exc = PyObject_CallFunction(exc_class, "is", (int)err, "I/O operation failed");
-    PyObject *set_fn = req->set_exception; req->set_exception = nullptr;
-    PyObject *r = PyObject_CallFunctionObjArgs(set_fn, exc, nullptr);
-    Py_XDECREF(r); Py_DECREF(set_fn); Py_DECREF(exc);
-    delete req;
+PyObject* WindowsIOBackend::truncate(int64_t size) {
+    PyObject* future = check_closed_or_raise();
+    if (future) return future;
+    
+    future = PyObject_CallNoArgs(m_create_future);
+    if (!future) return nullptr;
+    
+    if (size < 0) {
+        resolve_exc(future, g_ValueError, 0, "negative size not allowed");
+        return future;
+    }
+    
+    // 保存当前文件指针位置
+    LARGE_INTEGER prev_pos;
+    if (!SetFilePointerEx(m_handle, {0}, &prev_pos, FILE_CURRENT)) {
+        resolve_exc(future, g_OSError, GetLastError(), "SetFilePointerEx failed");
+        return future;
+    }
+    
+    // 移动到截断位置
+    LARGE_INTEGER li;
+    li.QuadPart = size;
+    if (!SetFilePointerEx(m_handle, li, NULL, FILE_BEGIN)) {
+        resolve_exc(future, g_OSError, GetLastError(), "SetFilePointerEx failed");
+        return future;
+    }
+    
+    // 设置文件结尾
+    if (!SetEndOfFile(m_handle)) {
+        // 恢复原位置
+        SetFilePointerEx(m_handle, prev_pos, NULL, FILE_BEGIN);
+        resolve_exc(future, g_OSError, GetLastError(), "SetEndOfFile failed");
+        return future;
+    }
+    
+    // 恢复原位置
+    SetFilePointerEx(m_handle, prev_pos, NULL, FILE_BEGIN);
+    
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        if (static_cast<uint64_t>(size) < m_filePos) {
+            m_filePos = static_cast<uint64_t>(size);
+        }
+    }
+    
+    resolve_ok(future, Py_None);
+    return future;
+}
+
+PyObject* WindowsIOBackend::readinto(PyObject* buf) {
+    PyObject* future = check_closed_or_raise();
+    if (future) return future;
+    
+    future = PyObject_CallNoArgs(m_create_future);
+    if (!future) return nullptr;
+    
+    Py_buffer view;
+    if (PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) < 0) {
+        resolve_exc(future, g_ValueError, 0, "readinto() requires a writable buffer");
+        return future;
+    }
+    
+    if (view.len == 0) {
+        PyBuffer_Release(&view);
+        PyObject* z = PyLong_FromLong(0);
+        resolve_ok(future, z); Py_DECREF(z);
+        return future;
+    }
+    
+    uint64_t offset;
+    size_t readSize;
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        LARGE_INTEGER fs{};
+        if (!GetFileSizeEx(m_handle, &fs)) {
+            PyBuffer_Release(&view);
+            resolve_exc(future, g_OSError, GetLastError(), "GetFileSizeEx failed");
+            return future;
+        }
+        int64_t rem = static_cast<int64_t>(fs.QuadPart) - static_cast<int64_t>(m_filePos);
+        if (rem <= 0) {
+            PyBuffer_Release(&view);
+            PyObject* z = PyLong_FromLong(0);
+            resolve_ok(future, z); Py_DECREF(z);
+            return future;
+        }
+        readSize = std::min(static_cast<size_t>(view.len), static_cast<size_t>(rem));
+        offset = m_filePos;
+        m_filePos += readSize;
+    }
+    
+    IORequest* req = make_req_readinto(buf, &view, readSize, future);
+    req->ov.Offset     = static_cast<DWORD>(offset & 0xFFFFFFFF);
+    req->ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+    
+    m_pending.fetch_add(1, std::memory_order_relaxed);
+    DWORD got = 0;
+    BOOL ok = ReadFile(m_handle, view.buf, static_cast<DWORD>(readSize), &got, &req->ov);
+    if (ok) {
+        m_pending.fetch_sub(1, std::memory_order_relaxed);
+        PyObject* val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(got));
+        resolve_ok(future, val); Py_DECREF(val);
+        delete req;
+    } else {
+        DWORD err = GetLastError();
+        if (err != ERROR_IO_PENDING) {
+            m_pending.fetch_sub(1, std::memory_order_relaxed);
+            complete_error_inline(req, err);
+        }
+    }
+    return future;
 }

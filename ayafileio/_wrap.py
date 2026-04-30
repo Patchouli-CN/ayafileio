@@ -3,6 +3,7 @@
 from ._ayafileio import AsyncFile as _AsyncFile
 from ._async_file import AsyncFile
 
+
 def wrap_fd(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]:
     """将现有**文件**描述符包装为异步 I/O 对象。
 
@@ -73,6 +74,6 @@ def wrap_fd(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[by
     """
     if "b" not in mode:
         raise ValueError("wrap_fd() only supports binary mode (e.g., 'rb', 'wb')")
-    
+
     impl = _AsyncFile(fd, mode, owns_fd)
     return AsyncFile._from_impl(impl)

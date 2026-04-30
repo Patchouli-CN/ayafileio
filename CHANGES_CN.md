@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.1.0] - 2026-04-30
+
+### 新增
+- **`tell()`**: 返回当前文件位置。纯内存操作，四个后端全部实现。
+- **`truncate(size)`**: 截断/扩展文件到指定大小。
+- **`fileno()`**: 返回底层文件描述符（POSIX）或 CRT fd（Windows）。
+- **`readinto(buf)`**: 零拷贝直接读到预分配的 `bytearray` 或 `memoryview`，
+  返回读取字节数而非新 `bytes` 对象。仅二进制模式可用。
+- **`readable()` / `writable()` / `seekable()`**: 查询文件访问模式。
+- **`writelines(lines)`**: 批量写入多行。
+- **`readall()`**: `read(-1)` 别名。
+- **`isatty()`**: 检查文件是否为 TTY。
+- **`mode` 属性**: 返回原始模式字符串（如 `"rb"`, `"w+"`）。
+
+### 变更
+- **重构 `IOBackendBase`**: 四个公共方法（`complete_ok`, `complete_error`, `make_req`,
+  `complete_error_inline`）提取到基类统一实现，消除四个后端共 ~240 行重复代码。
+- **`IORequest` 扩展**: 新增 `isReadinto`, `userBuf`, `userBufView` 字段，支持
+  零拷贝 `readinto()`。`buf()` 和析构函数自动处理 readinto 路径。
+- **`io_backend.cpp` 的 `complete_ok`**: 使用 `switch-case` 分派，readinto
+  请求返回 `int` 而非 `bytes`。
+- **后端 `.hpp` 文件清理**: 删除 `m_pending`, `m_loop_handle` 等冗余声明，
+  全部从 `IOBackendBase`（protected）继承。
+
 ## [1.0.5.post1] - 2026-04-29
 
 ### 修复

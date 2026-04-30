@@ -10,6 +10,7 @@ else:
 
 T = TypeVar("T", str, bytes, covariant=True)
 
+
 @runtime_checkable
 class AyaFileIO(Protocol[T]):
     """AyaFileIO 异步 I/O 文件协议

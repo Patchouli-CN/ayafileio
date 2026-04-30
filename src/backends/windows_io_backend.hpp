@@ -1,3 +1,4 @@
+// windows_io_backend.hpp
 #pragma once
 #include "../io_backend.hpp"
 #include "../iocp.hpp"
@@ -22,25 +23,24 @@ public:
     PyObject* seek(int64_t offset, int whence = 0) override;
     PyObject* flush() override;
     PyObject* close() override;
+    PyObject* tell() override;
+    PyObject* truncate(int64_t size) override;
+    PyObject* readinto(PyObject* buf) override;
+    int fileno() const override {
+        // Windows: 把 HANDLE 转回 CRT fd
+        return _open_osfhandle((intptr_t)m_handle, 0);
+    }
     void close_impl() override;
-
-    void complete_ok(IORequest* req, size_t bytes) override;
-    void complete_error(IORequest* req, DWORD err) override;
 
 private:
     HANDLE m_handle = INVALID_HANDLE_VALUE;
     PoolKey m_poolKey;
     std::atomic<bool> m_running{false};
-    std::atomic<long> m_pending{0};
     std::mutex m_posMtx;
     uint64_t m_filePos = 0;
     bool m_appendMode = false;
     PyObject* m_loop = nullptr;
     PyObject* m_create_future = nullptr;
-    LoopHandle* m_loop_handle = nullptr;
-
-    IORequest* make_req(size_t size, PyObject* future, ReqType type) override;
-    void complete_error_inline(IORequest* req, DWORD err) override;
 
     PyObject* check_closed_or_raise() {
         if (!m_running.load(std::memory_order_relaxed) || m_handle == INVALID_HANDLE_VALUE) {

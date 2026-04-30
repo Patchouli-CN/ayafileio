@@ -9,6 +9,7 @@ from ._async_file import AsyncFile
 # 类型重载：文本模式 → str，二进制模式 → bytes
 # ════════════════════════════════════════════════════════════════════════════
 
+
 @overload
 def open(
     path: str | Path,
@@ -16,9 +17,10 @@ def open(
     encoding: str | None = None,
     newline: str | None = None,
     errors: str | None = None,
-) -> AsyncFile[str]: 
+) -> AsyncFile[str]:
     """文本模式：read() 返回 str"""
     ...
+
 
 @overload
 def open(
@@ -27,7 +29,7 @@ def open(
     encoding: None = None,
     newline: str | None = None,
     errors: str | None = None,
-) -> AsyncFile[bytes]: 
+) -> AsyncFile[bytes]:
     """二进制模式：read() 返回 bytes"""
     ...
 

@@ -505,7 +505,7 @@ async def test_invalid_mode_async():
     """无效模式（需要事件循环）"""
     path = Path("test.txt")
     try:
-        ayafileio.open(path, "invalid") # type: ignore
+        ayafileio.open(path, "invalid")  # type: ignore
         assert False, "应该抛出 ValueError"
     except ValueError:
         pass
@@ -516,7 +516,7 @@ async def test_invalid_mode_async():
 async def test_binary_with_encoding_async():
     """二进制模式不能指定编码（需要事件循环）"""
     try:
-        ayafileio.open("test.bin", "rb", encoding="utf-8") # type: ignore
+        ayafileio.open("test.bin", "rb", encoding="utf-8")  # type: ignore
         assert False, "应该抛出 ValueError"
     except ValueError:
         pass
@@ -966,6 +966,307 @@ async def test_w_plus_mode():
         path.unlink(missing_ok=True)
 
 
+# ── tell / truncate / fileno ──────────────────────────────────────────
+
+
+async def test_tell():
+    """tell() 返回当前文件位置"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "rb") as f:
+            assert await f.tell() == 0
+            await f.read(3)
+            assert await f.tell() == 3
+            await f.read(4)
+            assert await f.tell() == 7
+            await f.read()
+            assert await f.tell() == 10
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_tell_after_write():
+    """write 后 tell() 正确反映位置"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            assert await f.tell() == 0
+            await f.write(b"hello")
+            assert await f.tell() == 5
+            await f.write(b"world")
+            assert await f.tell() == 10
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_tell_after_seek():
+    """seek 后 tell() 正确"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "rb") as f:
+            await f.seek(5)
+            assert await f.tell() == 5
+            await f.seek(2, 1)
+            assert await f.tell() == 7
+            await f.seek(-2, 2)
+            assert await f.tell() == 8
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_truncate_shrink():
+    """truncate 缩小文件"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "rb+") as f:
+            await f.truncate(5)
+            data = await f.read()
+            assert data == b"01234"
+            assert len(data) == 5
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_truncate_extend():
+    """truncate 扩展文件（用 \x00 填充）"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"hello"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "rb+") as f:
+            await f.truncate(10)
+            data = await f.read()
+            assert len(data) == 10
+            assert data[:5] == b"hello"
+            assert data[5:] == b"\x00" * 5
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_truncate_negative():
+    """truncate 负数抛出 ValueError"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(b"test")
+
+        async with ayafileio.open(path, "rb+") as f:
+            try:
+                await f.truncate(-1)
+                assert False, "应该抛出 ValueError"
+            except ValueError:
+                pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_fileno():
+    """fileno() 返回有效的文件描述符"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            fd = f.fileno()
+            assert isinstance(fd, int)
+            assert fd >= 0  # 有效 fd 一定是非负数
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ── readable / writable / seekable ────────────────────────────────────
+
+
+async def test_readable():
+    """可读模式返回 True"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(b"test")
+
+        f_r = ayafileio.open(path, "rb")
+        assert f_r.readable() == True
+        assert f_r.writable() == False
+        await f_r.close()
+
+        f_w = ayafileio.open(path, "wb")
+        assert f_w.readable() == False
+        assert f_w.writable() == True
+        await f_w.close()
+
+        f_rw = ayafileio.open(path, "rb+")
+        assert f_rw.readable() == True
+        assert f_rw.writable() == True
+        await f_rw.close()
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_seekable():
+    """所有文件都支持 seek"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            assert f.seekable() == True
+            await f.write(b"test")
+
+        async with ayafileio.open(path, "rb") as f:
+            assert f.seekable() == True
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ── writelines / readall ──────────────────────────────────────────────
+
+
+async def test_writelines():
+    """批量写入多行"""
+    path = get_temp_path(".txt")
+    try:
+        lines = ["line1\n", "line2\n", "line3\n"]
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.writelines(lines)
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            content = await f.read()
+            assert content == "line1\nline2\nline3\n"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readall():
+    """readall() 等同 read(-1)"""
+    path = get_temp_path(".txt")
+    try:
+        content = "Hello, World!"
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            data = await f.readall()
+            assert data == content
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ── readinto ──────────────────────────────────────────────────────────
+
+
+async def test_readinto():
+    """readinto 零拷贝到预分配缓冲区"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        buf = bytearray(15)
+        async with ayafileio.open(path, "rb") as f:
+            n = await f.readinto(buf)
+            assert n == 10
+            assert bytes(buf[:10]) == content
+            # 剩余部分不变
+            assert buf[10:] == b"\x00" * 5
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readinto_partial():
+    """readinto 部分读取（缓冲区小于文件）"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        buf = bytearray(3)
+        async with ayafileio.open(path, "rb") as f:
+            n = await f.readinto(buf)
+            assert n == 3
+            assert bytes(buf) == b"012"
+
+            # 继续读
+            n2 = await f.readinto(buf)
+            assert n2 == 3
+            assert bytes(buf) == b"345"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readinto_empty_file():
+    """空文件 readinto 返回 0"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(b"")
+
+        buf = bytearray(10)
+        async with ayafileio.open(path, "rb") as f:
+            n = await f.readinto(buf)
+            assert n == 0
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readinto_text_mode_raises():
+    """文本模式 readinto 抛出异常"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write("test")
+
+        buf = bytearray(10)
+        try:
+            async with ayafileio.open(path, "r", encoding="utf-8") as f:
+                await f.readinto(buf)
+            assert False, "应该抛出 ValueError"
+        except ValueError:
+            pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ── isatty ────────────────────────────────────────────────────────────
+
+
+async def test_isatty():
+    """普通文件不是 tty"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w") as f:
+            assert f.isatty() == False
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ── mode 属性 ─────────────────────────────────────────────────────────
+
+
+async def test_mode_property():
+    """mode 属性返回打开模式"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "rb") as f:
+            assert f.mode == "rb"
+
+        async with ayafileio.open(path, "wb+") as f:
+            assert f.mode == "wb+"
+    finally:
+        path.unlink(missing_ok=True)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 主函数
 # ════════════════════════════════════════════════════════════════════════════
@@ -986,7 +1287,7 @@ def main():
     )
     print(f"Test timeout: {runner.timeout_seconds}s")
 
-    runner.start_time = time.time() # type: ignore
+    runner.start_time = time.time()  # type: ignore
 
     # 异步测试 - 需要事件循环
     print("\n📋 模式验证测试:")
@@ -1040,6 +1341,33 @@ def main():
     runner.run_async("排他创建 (x 模式)", test_exclusive_create)
     runner.run_async("r+ 读写模式", test_read_write_mode)
     runner.run_async("w+ 读写模式", test_w_plus_mode)
+
+    print("\n📋 tell / truncate / fileno 测试:")
+    runner.run_async("tell 基本", test_tell)
+    runner.run_async("tell 写后位置", test_tell_after_write)
+    runner.run_async("tell seek 后位置", test_tell_after_seek)
+    runner.run_async("truncate 缩小", test_truncate_shrink)
+    runner.run_async("truncate 扩展", test_truncate_extend)
+    runner.run_async("truncate 负数报错", test_truncate_negative)
+    runner.run_async("fileno 有效", test_fileno)
+
+    print("\n📋 readable / writable / seekable 测试:")
+    runner.run_async("可读可写判断", test_readable)
+    runner.run_async("seekable", test_seekable)
+
+    print("\n📋 writelines / readall 测试:")
+    runner.run_async("批量写入", test_writelines)
+    runner.run_async("readall", test_readall)
+
+    print("\n📋 readinto 测试:")
+    runner.run_async("readinto 基本", test_readinto)
+    runner.run_async("readinto 部分读取", test_readinto_partial)
+    runner.run_async("readinto 空文件", test_readinto_empty_file)
+    runner.run_async("readinto 文本模式报错", test_readinto_text_mode_raises)
+
+    print("\n📋 isatty / mode 测试:")
+    runner.run_async("isatty", test_isatty)
+    runner.run_async("mode 属性", test_mode_property)
 
     runner.print_summary()
 

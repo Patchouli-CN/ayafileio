@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-30
+
+### Added
+- **`tell()`**: Return the current file position. Implemented in all four backends
+  as a pure in-memory operation (no syscall needed).
+- **`truncate(size)`**: Truncate/expand the file to the given size.
+- **`fileno()`**: Return the underlying file descriptor (POSIX) or CRT fd (Windows).
+- **`readinto(buf)`**: Zero-copy read directly into a pre-allocated `bytearray` or
+  `memoryview`. Returns the number of bytes read instead of a new `bytes` object.
+  Only available in binary mode.
+- **`readable()` / `writable()` / `seekable()`**: Query file access modes.
+- **`writelines(lines)`**: Write multiple lines in batch.
+- **`readall()`**: Alias for `read(-1)`.
+- **`isatty()`**: Check if the file is a TTY.
+- **`mode` property**: Now returns the original mode string (e.g., `"rb"`, `"w+"`).
+
+### Changed
+- **Refactored `IOBackendBase`**: Four shared methods (`complete_ok`, `complete_error`,
+  `make_req`, `complete_error_inline`) are now implemented once in the base class,
+  eliminating ~240 lines of duplicate code across the four backends.
+- **`IORequest` extended**: Added `isReadinto`, `userBuf`, and `userBufView` fields
+  to support zero-copy `readinto()`. `buf()` and destructor automatically handle
+  the new readinto path.
+- **`complete_ok` in `io_backend.cpp`**: Now uses `switch-case` on `ReqType` for
+  cleaner dispatch. `readinto` requests return `int` instead of `bytes`.
+- **Backend `.hpp` files cleaned up**: Removed redundant declarations of `m_pending`,
+  `m_loop_handle`, `m_cached_buffer_size`, `m_cached_buffer_pool_max`,
+  `m_cached_close_timeout_ms`, and unused `m_barrierMtx`/`m_barrierCv`.
+  All now inherited from `IOBackendBase` (protected).
+
 ## [1.0.5.post1] - 2026-04-29
 
 ### Fixed

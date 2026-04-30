@@ -430,74 +430,113 @@ void IOUringBackend::close_impl() {
     }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// 完成处理
-// ════════════════════════════════════════════════════════════════════════════
-
-void IOUringBackend::complete_ok(IORequest* req, size_t bytes) {
-    m_pending.fetch_sub(1, std::memory_order_release);
-    PyGILState_STATE gs = PyGILState_Ensure();
+PyObject* IOUringBackend::tell() {
+    try { ensure_loop_initialized(); }
+    catch (const std::runtime_error&) {
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
+    }
     
-    PyObject* val;
-    if (req->type == ReqType::Read)
-        val = PyBytes_FromStringAndSize(req->buf(), static_cast<Py_ssize_t>(bytes));
-    else if (req->type == ReqType::Write)
-        val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
-    else { val = Py_None; Py_INCREF(val); }
+    PyObject* future = PyObject_CallNoArgs(m_create_future);
+    if (!future) return nullptr;
     
-    PyObject* set_fn = req->set_result; req->set_result = nullptr;
-    Py_DECREF(req->future); req->future = nullptr;
-    Py_XDECREF(req->set_exception); req->set_exception = nullptr;
+    uint64_t pos;
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        pos = m_filePos;
+    }
     
-    if (set_fn && val) req->loop_handle->push(set_fn, val);
-    else { Py_XDECREF(set_fn); Py_XDECREF(val); }
-    delete req;
-    PyGILState_Release(gs);
+    PyObject* py_pos = PyLong_FromUnsignedLongLong(pos);
+    resolve_ok(future, py_pos);
+    Py_DECREF(py_pos);
+    return future;
 }
 
-void IOUringBackend::complete_error(IORequest* req, DWORD err) {
-    m_pending.fetch_sub(1, std::memory_order_release);
-    PyGILState_STATE gs = PyGILState_Ensure();
+PyObject* IOUringBackend::truncate(int64_t size) {
+    try { ensure_loop_initialized(); }
+    catch (const std::runtime_error&) {
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
+    }
     
-    PyObject* exc_class = map_posix_error(static_cast<int>(err));
-    PyObject* exc = PyObject_CallFunction(exc_class, "is", static_cast<int>(err), "I/O operation failed");
+    PyObject* future = PyObject_CallNoArgs(m_create_future);
+    if (!future) return nullptr;
     
-    PyObject* set_fn = req->set_exception; req->set_exception = nullptr;
-    Py_DECREF(req->future); req->future = nullptr;
-    Py_XDECREF(req->set_result); req->set_result = nullptr;
+    if (size < 0) {
+        resolve_exc(future, g_ValueError, 0, "negative size not allowed");
+        return future;
+    }
     
-    if (set_fn && exc) req->loop_handle->push(set_fn, exc);
-    else { Py_XDECREF(set_fn); Py_XDECREF(exc); }
-    delete req;
-    PyGILState_Release(gs);
+    if (ftruncate(m_fd, static_cast<off_t>(size)) != 0) {
+        resolve_exc(future, g_OSError, errno, "truncate failed");
+        return future;
+    }
+    
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        if (static_cast<uint64_t>(size) < m_filePos) {
+            m_filePos = static_cast<uint64_t>(size);
+        }
+    }
+    
+    resolve_ok(future, Py_None);
+    return future;
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// 辅助方法
-// ════════════════════════════════════════════════════════════════════════════
-
-IORequest* IOUringBackend::make_req(size_t size, PyObject* future, ReqType type) {
-    auto* req = new IORequest();
-    req->file = this;
-    req->loop_handle = m_loop_handle;
-    req->future = future; Py_INCREF(future);
-    req->set_result = PyObject_GetAttr(future, g_str_set_result);
-    req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
-    req->reqSize = size;
-    req->type = type;
-    if (size <= m_cached_buffer_size) req->poolBuf = pool_acquire_with_size(size);
-    else req->heapBuf = new char[size];
-    return req;
-}
-
-void IOUringBackend::complete_error_inline(IORequest* req, DWORD err) {
-    m_pending.fetch_sub(1, std::memory_order_relaxed);
-    PyObject* exc_class = map_posix_error(static_cast<int>(err));
-    PyObject* exc = PyObject_CallFunction(exc_class, "is", static_cast<int>(err), "I/O operation failed");
-    PyObject* set_fn = req->set_exception; req->set_exception = nullptr;
-    if (set_fn && exc) { PyObject* r = PyObject_CallFunctionObjArgs(set_fn, exc, nullptr); Py_XDECREF(r); }
-    Py_XDECREF(set_fn); Py_DECREF(exc);
-    delete req;
+PyObject* IOUringBackend::readinto(PyObject* buf) {
+    try { ensure_loop_initialized(); }
+    catch (const std::runtime_error&) {
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
+    }
+    
+    PyObject* future = PyObject_CallNoArgs(m_create_future);
+    if (!future) return nullptr;
+    
+    PyObject* closed_future = check_closed_and_return_future(
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+    if (closed_future) { Py_DECREF(future); return closed_future; }
+    
+    // 获取用户缓冲区
+    Py_buffer view;
+    if (PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) < 0) {
+        resolve_exc(future, g_ValueError, 0, "readinto() requires a writable buffer");
+        return future;
+    }
+    
+    if (view.len == 0) {
+        PyBuffer_Release(&view);
+        PyObject* z = PyLong_FromLong(0);
+        resolve_ok(future, z); Py_DECREF(z);
+        return future;
+    }
+    
+    // 计算偏移和读取大小
+    uint64_t offset;
+    size_t readSize;
+    {
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        struct stat st;
+        if (fstat(m_fd, &st) != 0) {
+            PyBuffer_Release(&view);
+            resolve_exc(future, g_OSError, errno, "fstat failed");
+            return future;
+        }
+        int64_t rem = static_cast<int64_t>(st.st_size) - static_cast<int64_t>(m_filePos);
+        if (rem <= 0) {
+            PyBuffer_Release(&view);
+            PyObject* z = PyLong_FromLong(0);
+            resolve_ok(future, z); Py_DECREF(z);
+            return future;
+        }
+        readSize = std::min(static_cast<size_t>(view.len), static_cast<size_t>(rem));
+        offset = m_filePos;
+        m_filePos += readSize;
+    }
+    
+    // ✅ 一行搞定请求构造
+    IORequest* req = make_req_readinto(buf, &view, readSize, future);
+    
+    m_pending.fetch_add(1, std::memory_order_relaxed);
+    submit_io(req, IORING_OP_READ, m_fd, view.buf, readSize, static_cast<off_t>(offset));
+    return future;
 }
 
 #endif // HAVE_IO_URING

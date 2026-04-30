@@ -18,6 +18,10 @@ public:
     PyObject* seek(int64_t offset, int whence = 0) { return m_backend->seek(offset, whence); }
     PyObject* flush() { return m_backend->flush(); }
     PyObject* close() { return m_backend->close(); }
+    PyObject* tell() { return m_backend->tell(); }
+    PyObject* truncate(int64_t size) { return m_backend->truncate(size); }
+    PyObject* readinto(PyObject* buf) { return m_backend->readinto(buf); }
+    int fileno() const { return m_backend->fileno(); }
     void      close_impl() { m_backend->close_impl(); }
 
     void complete_ok(IORequest* req, DWORD bytes) { m_backend->complete_ok(req, bytes); }

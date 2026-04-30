@@ -1,7 +1,6 @@
-"""异步文件IO"""
-
 """异步文件对象"""
 
+import os
 import locale
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -10,6 +9,7 @@ from ._ayafileio import AsyncFile as _AsyncFile
 _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 
 T = TypeVar("T", str, bytes)
+
 
 class AsyncFile(Generic[T]):
     """跨平台异步文件对象。
@@ -27,6 +27,7 @@ class AsyncFile(Generic[T]):
         "_closed",
         "_newline",
         "_errors",
+        "_mode",
     )
 
     def __init__(
@@ -37,6 +38,7 @@ class AsyncFile(Generic[T]):
         newline: str | None = None,
         errors: str | None = None,
     ) -> None:
+
         self._path = str(path)
         self._closed = False
 
@@ -44,6 +46,8 @@ class AsyncFile(Generic[T]):
         self._errors = errors or "strict"
 
         # ── 文本 / 二进制模式判断 ──────────────────────────────────────────
+        self._mode = ""
+
         self._is_text = "b" not in mode
 
         if self._is_text:
@@ -58,15 +62,16 @@ class AsyncFile(Generic[T]):
         if any(c not in valid_chars for c in mode):
             raise ValueError(f"Invalid mode: '{mode}'")
 
-        clean = mode.replace("t", "")
-        if "b" not in clean:
-            has_plus = "+" in clean
-            base_char = next((c for c in clean if c in "rwax"), None)
+        clean_mode = mode.replace("t", "")
+        if "b" not in clean_mode:
+            has_plus = "+" in clean_mode
+            base_char = next((c for c in clean_mode if c in "rwax"), None)
             if not base_char:
                 raise ValueError(f"Invalid mode: '{mode}'")
-            clean = base_char + ("+" if has_plus else "") + "b"
+            clean_mode = base_char + ("+" if has_plus else "") + "b"
 
-        self._impl = _AsyncFile(self._path, clean)
+        self._mode = clean_mode
+        self._impl = _AsyncFile(self._path, clean_mode)
         self._line_buffer = b""
 
     # ── context manager ───────────────────────────────────────────────────────
@@ -86,7 +91,7 @@ class AsyncFile(Generic[T]):
         line = await self.readline()
         if not line:
             raise StopAsyncIteration
-        return line # type: ignore
+        return line  # type: ignore
 
     # ── read ──────────────────────────────────────────────────────────────────
 
@@ -157,6 +162,23 @@ class AsyncFile(Generic[T]):
                     break
         return lines
 
+    async def writelines(self, lines) -> None:
+        """批量写入多行。"""
+        for line in lines:
+            await self.write(line)
+
+    async def readall(self) -> str | bytes:
+        """读取整个文件。"""
+        return await self.read(-1)
+
+    async def readinto(self, buf: bytearray | memoryview) -> int:
+        """零拷贝读取到预分配缓冲区，返回读取字节数。"""
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        if self._is_text:
+            raise ValueError("readinto() only supports binary mode")
+        return await self._impl.readinto(buf)
+
     # ── write ─────────────────────────────────────────────────────────────────
 
     async def write(self, data: str | bytes | bytearray | memoryview) -> int:
@@ -174,11 +196,9 @@ class AsyncFile(Generic[T]):
             raw = data  # type: ignore[assignment]
         return await self._impl.write(raw)
 
-    # ── seek / flush / close ──────────────────────────────────────────────────
+    # ── seek / flush / close / tell 等 ──────────────────────────────────────────────────
 
     async def seek(self, offset: int, whence: int = 0) -> int:
-        if self._closed:
-            raise ValueError("I/O operation on closed file.")
         return await self._impl.seek(offset, whence)
 
     async def flush(self) -> None:
@@ -191,11 +211,55 @@ class AsyncFile(Generic[T]):
             self._closed = True
             await self._impl.close()
 
+    async def tell(self) -> int:
+        """返回当前文件位置。"""
+        return await self._impl.tell()
+
+    async def truncate(self, size: int) -> None:
+        """截断文件到指定大小。"""
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        if size < 0:
+            raise ValueError("negative size not allowed")
+        await self._impl.truncate(size)
+
     def _close_impl(self) -> None:
         """强制关闭函数（同步，供 atexit 等使用）"""
         if not self._closed:
             self._closed = True
         self._impl._close_impl()
+
+    # ── readable / writeable / seekable ──────────────────────────────────────────────────
+
+    def readable(self) -> bool:
+        """文件是否可读。"""
+        return "r" in self._mode or "+" in self._mode
+
+    def writable(self) -> bool:
+        """文件是否可写。"""
+        return (
+            "w" in self._mode
+            or "a" in self._mode
+            or "+" in self._mode
+            or "x" in self._mode
+        )
+
+    def seekable(self) -> bool:
+        """文件是否可随机访问。"""
+        return True  # 所有常规文件都支持 seek
+
+    # ── fileno / isatty ──────────────────────────────────────────────────
+
+    def fileno(self) -> int:
+        """返回底层文件描述符。"""
+        return self._impl.fileno()
+
+    def isatty(self) -> bool:
+        """文件是否为 tty。"""
+        try:
+            return os.isatty(self.fileno())
+        except OSError:
+            return False
 
     # ── properties ────────────────────────────────────────────────────────────
 
@@ -209,7 +273,7 @@ class AsyncFile(Generic[T]):
 
     @property
     def mode(self) -> str:
-        return "t" if self._is_text else "b"
+        return self._mode
 
     @classmethod
     def open(
