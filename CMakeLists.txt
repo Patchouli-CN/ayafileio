@@ -128,7 +128,12 @@ else()
 endif()
 
 # 创建 Python 扩展模块
-nanobind_add_module(_ayafileio ${SOURCES})
+nanobind_add_module(_ayafileio FREE_THREADED ${SOURCES})
+
+# 兼容 old/new nanobind target 命名
+if(NOT TARGET nanobind-static AND TARGET nanobind-static-ft)
+    add_library(nanobind-static ALIAS nanobind-static-ft)
+endif()
 
 # 添加 include 目录
 target_include_directories(_ayafileio PRIVATE

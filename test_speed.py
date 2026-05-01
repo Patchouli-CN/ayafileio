@@ -724,11 +724,11 @@ async def run_benchmark(config: Config) -> dict:
         "mixed_workload", "场景 4：混合读写", build_mixed, config, sleep_stats, results
     )
 
-    # 场景 5 — 降低并发避免 "Too many open files"
+    # 场景 5
     storm_cfg = Config(
         test_rounds=config.test_rounds,
         warmup_rounds=config.warmup_rounds,
-        concurrent_limit=20,  # macOS 上限
+        concurrent_limit=1000,
         enable_tuning=False,
     )
     await run_scenario(
