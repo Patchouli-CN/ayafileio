@@ -8,69 +8,45 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheel on ${{ matrix.os }} (Python ${{ matrix.python-version }})
+    name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
       fail-fast: false
+
+    env:
+      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+      CIBW_SKIP: "*-musllinux_*"
+      CIBW_ARCHS_LINUX: "x86_64"
+      CIBW_ARCHS_WINDOWS: "AMD64"
+      CIBW_ARCHS_MACOS: "x86_64 arm64"
+      CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
+      CIBW_BUILD_FRONTEND: "build"
+      CIBW_TEST_SKIP: "*"
+      CIBW_ENABLE: "cpython-freethreading"
+      CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10"
+      
+      # Linux: io_uring
+      CIBW_ENVIRONMENT_LINUX: "ENABLE_IO_URING=ON"
+      CIBW_BEFORE_ALL_LINUX: "yum install -y liburing-devel"
 
     steps:
       - uses: actions/checkout@v4
-      
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      
-      - name: Install build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          python -m pip install --upgrade pip
-          pip install build scikit-build-core nanobind
 
-      - name: Install build dependencies (Win/macOS)
-        if: runner.os != 'Linux'
-        run: |
-          python -m pip install --upgrade pip
-          pip install build scikit-build-core nanobind
-      
-      # Windows/macOS: 直接构建
-      - name: Build wheel on Windows/macOS
-        if: runner.os != 'Linux'
-        run: |
-          python -m build --wheel --outdir dist
-      
-      # Linux: 使用 cibuildwheel + manylinux 镜像构建（只构建 manylinux，跳过 musllinux）
-      - name: Build wheel on Linux
-        if: runner.os == 'Linux'
-        run: |
-          CP_VERSION=$(echo "${{ matrix.python-version }}" | tr -d '.')
-          pip install cibuildwheel
+      - name: Install cibuildwheel
+        run: pip install cibuildwheel
 
-          export CIBW_BUILD="cp${CP_VERSION}-manylinux_*"
-          export CIBW_SKIP="*-musllinux_*"
-          export CIBW_ARCHS="x86_64"
-          export CIBW_MANYLINUX_X86_64_IMAGE="manylinux_2_28"
-          export CIBW_BUILD_FRONTEND="build"
-          export CIBW_TEST_SKIP="*"
-          
-          # manylinux: 启用 io_uring，安装 liburing-devel
-          export CIBW_ENVIRONMENT="ENABLE_IO_URING=ON"
-          export CIBW_BEFORE_ALL="yum install -y liburing-devel"
-          
-          python -m cibuildwheel --output-dir dist
-      
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir dist
+
       - name: List built wheels
         shell: bash
-        run: |
-          echo "=== Built wheels for Python ${{ matrix.python-version }} on ${{ matrix.os }} ==="
-          ls -la dist/
-      
-      # 上传 wheel 作为 artifact
+        run: ls -la dist/
+
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}
           path: dist/*.whl
           retention-days: 7
           if-no-files-found: error
@@ -93,21 +69,11 @@ jobs:
           find wheels -name "*.whl" -type f -exec cp {} dist/ \;
           echo "=== Collected wheels ==="
           ls -la dist/
-          
-          for wheel in dist/*.whl; do
-            if unzip -t "$wheel" > /dev/null 2>&1; then
-              echo "✓ $(basename $wheel) is valid"
-            else
-              echo "✗ $(basename $wheel) is corrupted"
-              exit 1
-            fi
-          done
       
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          pip install --upgrade pip
           pip install twine
           twine upload --skip-existing dist/*.whl --verbose
