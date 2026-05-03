@@ -29,7 +29,7 @@ jobs:
       
       CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.0"
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6.0.2
     - name: Check out recursively
       run: git submodule update --init --recursive
     - uses: actions/setup-python@v5

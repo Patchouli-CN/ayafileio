@@ -32,7 +32,8 @@ jobs:
       CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.0"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
 
       - name: Install cibuildwheel
         run: pip install cibuildwheel
