@@ -305,6 +305,7 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
     m_pending.fetch_add(1, std::memory_order_relaxed);
     
     auto self = this;
+    __block size_t total_copied = 0;
     dispatch_io_read(
         m_channel,
         offset,
@@ -313,32 +314,28 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
         ^(bool done, dispatch_data_t data, int error) {
             UR_DEBUG_LOG("MacOSGCDBackend::read callback: done=%d, data=%p, error=%d, req=%p",
                          done, (void*)data, error, (void*)req);
-            
+
             if (error) {
                 UR_DEBUG_LOG("MacOSGCDBackend::read callback error=%d", error);
                 self->complete_error(req, static_cast<DWORD>(error));
                 return;
             }
-            
+
             if (data) {
-                size_t total_bytes = dispatch_data_get_size(data);
-                UR_DEBUG_LOG("MacOSGCDBackend::read callback got data, size=%zu", total_bytes);
-                
-                __block size_t copied = 0;
+                size_t chunk_size = dispatch_data_get_size(data);
+                UR_DEBUG_LOG("MacOSGCDBackend::read callback got data, size=%zu", chunk_size);
+
                 dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t off, const void* buf, size_t len) {
                     UR_DEBUG_LOG("MacOSGCDBackend::read callback copying region: off=%zu, len=%zu", off, len);
-                    memcpy(req->buf() + off, buf, len);
-                    copied += len;
+                    memcpy(req->buf() + total_copied + off, buf, len);
                     return true;
                 });
-                
-                if (done) {
-                    UR_DEBUG_LOG("MacOSGCDBackend::read callback done, total_bytes=%zu", total_bytes);
-                    self->complete_ok(req, total_bytes);
-                }
-            } else if (done) {
-                UR_DEBUG_LOG0("MacOSGCDBackend::read callback EOF");
-                self->complete_ok(req, 0);
+                total_copied += chunk_size;
+            }
+
+            if (done) {
+                UR_DEBUG_LOG("MacOSGCDBackend::read callback done, total_bytes=%zu", total_copied);
+                self->complete_ok(req, total_copied);
             }
         }
     );
@@ -692,6 +689,7 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
     m_pending.fetch_add(1, std::memory_order_relaxed);
     
     auto self = this;
+    __block size_t total_copied = 0;
     dispatch_io_read(m_channel, offset, readSize, m_queue,
         ^(bool done, dispatch_data_t data, int error) {
             if (error) {
@@ -699,15 +697,14 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
                 return;
             }
             if (data) {
-                size_t total_bytes = dispatch_data_get_size(data);
+                size_t chunk_size = dispatch_data_get_size(data);
                 dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t off, const void* src, size_t len) {
-                    memcpy(req->buf() + off, src, len);
+                    memcpy(req->buf() + total_copied + off, src, len);
                     return true;
                 });
-                if (done) self->complete_ok(req, total_bytes);
-            } else if (done) {
-                self->complete_ok(req, 0);
+                total_copied += chunk_size;
             }
+            if (done) self->complete_ok(req, total_copied);
         });
     
     return future;
