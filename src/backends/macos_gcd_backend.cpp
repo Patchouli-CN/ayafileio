@@ -438,32 +438,32 @@ PyObject* MacOSGCDBackend::seek(int64_t offset, int whence) {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     
-    // ✅ 直接在主线程执行 lseek，不使用 GCD barrier
-    off_t new_pos;
+    // macOS dispatch_io 使用显式 offset，不需要操作 fd
+    int64_t new_pos;
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
-        
+
         if (whence == 0) {
-            new_pos = lseek(m_fd, offset, SEEK_SET);
+            new_pos = offset;
         } else if (whence == 1) {
-            new_pos = lseek(m_fd, m_filePos + offset, SEEK_SET);
+            new_pos = static_cast<int64_t>(m_filePos) + offset;
         } else if (whence == 2) {
             struct stat st;
             if (fstat(m_fd, &st) != 0) {
                 resolve_exc(future, g_OSError, errno, "fstat failed");
                 return future;
             }
-            new_pos = lseek(m_fd, st.st_size + offset, SEEK_SET);
+            new_pos = static_cast<int64_t>(st.st_size) + offset;
         } else {
             resolve_exc(future, g_ValueError, 0, "Invalid whence value");
             return future;
         }
-        
-        if (new_pos == -1) {
-            resolve_exc(future, g_OSError, errno, "lseek failed");
+
+        if (new_pos < 0) {
+            resolve_exc(future, g_ValueError, 0, "negative seek position");
             return future;
         }
-        
+
         m_filePos = static_cast<uint64_t>(new_pos);
         UR_DEBUG_LOG("MacOSGCDBackend::seek new pos=%lld", (long long)new_pos);
     }
