@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 #include <map>
@@ -13,9 +14,11 @@
 struct PoolBuf {
     char* data;
     size_t size;
-    
-    explicit PoolBuf(size_t sz) : data(new char[sz]), size(sz) {}
-    ~PoolBuf() { delete[] data; }
+
+    explicit PoolBuf(size_t sz) : data(static_cast<char*>(std::malloc(sz))), size(sz) {
+        if (!data) throw std::bad_alloc();
+    }
+    ~PoolBuf() { std::free(data); }
     
     // 禁止拷贝
     PoolBuf(const PoolBuf&) = delete;

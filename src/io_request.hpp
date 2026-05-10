@@ -6,6 +6,7 @@
 #include <windows.h>
 #endif
 #include <cstdint>
+#include <cstdlib>
 
 // ════════════════════════════════════════════════════════════════════════════
 // §5  IORequest
@@ -49,6 +50,6 @@ struct IORequest {
         }
         Py_XDECREF(userBuf);
         if (poolBuf) pool_release(poolBuf);
-        else if (!isReadinto) delete[] heapBuf;  // readinto 模式不管理 heapBuf
+        else if (!isReadinto && heapBuf) std::free(heapBuf);
     }
 };

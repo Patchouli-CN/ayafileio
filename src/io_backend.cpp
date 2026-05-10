@@ -1,6 +1,7 @@
 // io_backend.cpp
 #include "io_backend.hpp"
 #include "globals.hpp"
+#include <cstdlib>
 
 // ════════════════════════════════════════════════════════════════════════════
 // 静态辅助方法
@@ -103,7 +104,7 @@ IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) 
     if (size <= m_cached_buffer_size)
         req->poolBuf = pool_acquire_with_size(size);
     else
-        req->heapBuf = new char[size];
+        req->heapBuf = static_cast<char*>(std::malloc(size));
     return req;
 }
 
