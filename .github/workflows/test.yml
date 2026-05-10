@@ -119,8 +119,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
-      AYAFILEIO_DEBUG: 1
-      CMAKE_BUILD_TYPE: Debug
+      AYAFILEIO_DEBUG: 0
+      CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
     - uses: actions/checkout@v6.0.2
@@ -133,10 +133,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install nanobind scikit-build-core aiofiles rich
-    - name: Build ayafileio (Debug mode)
+    - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
-        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=OFF"
+        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
         pip install -e . -v
     - name: Check backend info
       timeout-minutes: 1
@@ -170,8 +170,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
-      AYAFILEIO_DEBUG: 1
-      CMAKE_BUILD_TYPE: Debug
+      AYAFILEIO_DEBUG: 0
+      CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
     - uses: actions/checkout@v6.0.2
@@ -184,10 +184,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install nanobind scikit-build-core aiofiles rich
-    - name: Build ayafileio (Debug mode)
+    - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
-        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=OFF"
+        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
         pip install -e . -v
     - name: Check backend info
       timeout-minutes: 1
