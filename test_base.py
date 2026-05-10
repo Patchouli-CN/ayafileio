@@ -662,6 +662,7 @@ async def test_seek_from_start():
         async with ayafileio.open(path, "rb") as f:
             await f.seek(5)
             chunk = await f.read(2)
+            print(f"seek from start chunk content: {chunk}")
             assert chunk == b"56"
     finally:
         path.unlink(missing_ok=True)

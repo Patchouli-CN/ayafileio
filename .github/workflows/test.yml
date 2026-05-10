@@ -37,7 +37,7 @@ jobs:
     - name: Build ayafileio (Debug mode)
       timeout-minutes: 5
       run: |
-        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=ON"
+        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=OFF"
         pip install -e . -v
     - name: Check backend info
       timeout-minutes: 1
@@ -136,7 +136,7 @@ jobs:
     - name: Build ayafileio (Debug mode)
       timeout-minutes: 5
       run: |
-        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=ON"
+        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=OFF"
         pip install -e . -v
     - name: Check backend info
       timeout-minutes: 1
@@ -187,7 +187,7 @@ jobs:
     - name: Build ayafileio (Debug mode)
       timeout-minutes: 5
       run: |
-        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=ON"
+        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DENABLE_VERBOSE_LOGGING=OFF"
         pip install -e . -v
     - name: Check backend info
       timeout-minutes: 1
