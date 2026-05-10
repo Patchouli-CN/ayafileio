@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-05-10
+
+### Fixed
+- **macOS seek + read returns empty data**: `seek()` called `lseek()` on the raw file descriptor, interfering with the Dispatch I/O channel's internal state on first use. Removed `lseek()` — the macOS backend uses `DISPATCH_IO_RANDOM` with explicit offsets, so the fd position is irrelevant.
+- **macOS `dispatch_io_read` multi-callback data loss**: `dispatch_io_read` may deliver data across multiple callbacks (first with `data` + `done=false`, then with `NULL` + `done=true`). The accumulated byte count is now tracked across callbacks via `__block` variable.
+- **Heap corruption from `malloc`/`free` mismatch**: `PoolBuf` and `make_req` allocated buffers with `new[]`, but `dispatch_data_create(..., DISPATCH_DATA_DESTRUCTOR_DEFAULT)` freed them with `free()`. Changed all buffer allocations to `std::malloc`/`std::free`.
+- **CI test steps always passing**: Removed `continue-on-error: true` from test run steps in `test.yml`, so test failures now correctly fail the workflow. Release workflow now depends on test workflow success via `workflow_run` trigger.
+- **CI verbose debug logging**: Changed test builds from Debug to Release mode with debug/verbose logging disabled, reducing log output noise.
+
 ## [1.1.2.post1] - 2026-05-06
 
 ### Fixed
