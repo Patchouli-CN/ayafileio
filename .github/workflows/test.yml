@@ -118,7 +118,6 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
-      AYAFILEIO_DEBUG: 0
       CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
@@ -169,7 +168,6 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
-      AYAFILEIO_DEBUG: 0
       CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
