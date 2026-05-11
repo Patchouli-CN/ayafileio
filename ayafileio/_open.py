@@ -17,6 +17,7 @@ def open(
     encoding: str | None = None,
     newline: str | None = None,
     errors: str | None = None,
+    auto_flush: bool = False
 ) -> AsyncFile[str]:
     """文本模式：read() 返回 str"""
     ...
@@ -29,6 +30,7 @@ def open(
     encoding: None = None,
     newline: str | None = None,
     errors: str | None = None,
+    auto_flush: bool = False
 ) -> AsyncFile[bytes]:
     """二进制模式：read() 返回 bytes"""
     ...
@@ -40,6 +42,7 @@ def open(
     encoding: str | None = None,
     newline: str | None = None,
     errors: str | None = None,
+    auto_flush: bool = False
 ) -> AsyncFile[str] | AsyncFile[bytes]:
     """打开一个 AsyncFile 实例，自动复用已缓存的句柄。
 
@@ -53,4 +56,4 @@ def open(
 
     💡 性能提示：尽量复用同一个句柄，避免在循环中反复 open/close。
     """
-    return AsyncFile(path, mode, encoding, newline, errors)
+    return AsyncFile(path, mode, encoding, newline, errors, auto_flush)

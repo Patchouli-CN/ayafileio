@@ -28,6 +28,7 @@ class AsyncFile(Generic[T]):
         "_newline",
         "_errors",
         "_mode",
+        "_auto_flush"
     )
 
     def __init__(
@@ -37,6 +38,7 @@ class AsyncFile(Generic[T]):
         encoding: str | None = None,
         newline: str | None = None,
         errors: str | None = None,
+        auto_flush: bool = False
     ) -> None:
 
         self._path = str(path)
@@ -44,6 +46,7 @@ class AsyncFile(Generic[T]):
 
         self._newline = newline
         self._errors = errors or "strict"
+        self._auto_flush = auto_flush
 
         # ── 文本 / 二进制模式判断 ──────────────────────────────────────────
         self._mode = ""
@@ -80,6 +83,9 @@ class AsyncFile(Generic[T]):
         return self
 
     async def __aexit__(self, *_) -> None:
+        if self._auto_flush:
+            await self.flush() # 如果要确保数据真的在硬盘了
+            
         await self.close()
 
     # ── async iterator ────────────────────────────────────────────────────────
