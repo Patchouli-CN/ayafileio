@@ -60,6 +60,9 @@ jobs:
     name: Publish to PyPI
     needs: build_wheels
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC 需要
+      contents: read
     
     steps:
       - uses: actions/download-artifact@v4
@@ -76,9 +79,8 @@ jobs:
           ls -la dist/
       
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          pip install twine
-          twine upload --skip-existing dist/*.whl --verbose
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+          verbose: true
