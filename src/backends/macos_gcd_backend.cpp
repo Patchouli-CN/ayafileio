@@ -399,7 +399,9 @@ PyObject* MacOSGCDBackend::write(Py_buffer* view) {
     
     dispatch_data_t write_data = dispatch_data_create(
         req->buf(), size, m_queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    
+
+    req->release_buffer_ownership();  // 缓冲所有权已转移给 dispatch_data
+
     auto self = this;
     dispatch_io_write(
         m_channel,

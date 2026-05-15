@@ -41,6 +41,17 @@ struct IORequest {
         return poolBuf ? poolBuf->data : heapBuf;
     }
 
+    // 接管缓冲区所有权（调用者负责释放）
+    // 之后 buf() 返回 nullptr，析构不再触碰缓冲区
+    void release_buffer_ownership() {
+        if (poolBuf) {
+            poolBuf->data = nullptr;
+            delete poolBuf;
+            poolBuf = nullptr;
+        }
+        heapBuf = nullptr;
+    }
+
     ~IORequest() {
         Py_XDECREF(future);
         Py_XDECREF(set_result);

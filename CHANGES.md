@@ -5,13 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.6] - 2026-05-11
+## [1.1.6] - 2026-05-15
 
 ### Changed
 - **`wrap_fd` → `wrap_file`**: Renamed to reflect that it now accepts both file descriptors (`int`) and file-like objects with a `fileno()` method. Added `is_real_file()` validation to reject non-regular files (sockets, pipes, ttys).
 - **`FileObj` type**: New `_HasFileno` Protocol exported as `FileObj` in `types.py`, representing any object with `fileno() -> int`.
 - **`drain_handle_pool` / `drain_buffer_pool`**: Re-exported through `_compat.py` with proper Python wrapper functions instead of direct C++ imports.
 - **Development Status**: Updated from "4 - Beta" to "5 - Production/Stable" in `pyproject.toml`.
+
+### Fixed
+- **macOS DW_BAD_DESCRIPTOR write errors**: `dispatch_data_create(DISPATCH_DATA_DESTRUCTOR_DEFAULT)` and `IORequest` destructor both attempted to free the same buffer, causing heap corruption and intermittent EBADF on macOS. Fixed by adding `IORequest::release_buffer_ownership()` to properly transfer ownership to `dispatch_data`.
+- **`malloc`/`free` mismatch**: `PoolBuf` and `make_req` allocated buffers with `new[]`/`delete[]`, but `dispatch_data_create` released them with `free()`. Changed all buffer allocations to `std::malloc`/`std::free`.
 
 ## [1.1.5] - 2026-05-11
 

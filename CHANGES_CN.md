@@ -5,13 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [1.1.6] - 2026-05-11
+## [1.1.6] - 2026-05-15
 
 ### 变更
 - **`wrap_fd` → `wrap_file`**: 重命名以反映其现可接受文件描述符（`int`）和带 `fileno()` 方法的文件对象。新增 `is_real_file()` 校验，拒绝 socket、pipe、tty 等非普通文件。
 - **`FileObj` 类型**: 在 `types.py` 中新增 `_HasFileno` Protocol，导出为 `FileObj`，表示任何具有 `fileno() -> int` 的对象。
 - **`drain_handle_pool` / `drain_buffer_pool`**: 改为通过 `_compat.py` 的 Python 包装函数重新导出，而非直接引用 C++ 符号。
 - **开发状态**: `pyproject.toml` 中从 "4 - Beta" 更新为 "5 - Production/Stable"。
+
+### 修复
+- **macOS EBADF write 错误**: `dispatch_data_create(DISPATCH_DATA_DESTRUCTOR_DEFAULT)` 和 `IORequest` 析构同时释放同一缓冲区，导致堆破坏和间歇性 EBADF。新增 `IORequest::release_buffer_ownership()` 将所有权正确转移给 `dispatch_data`。
+- **`malloc`/`free` 不匹配**: `PoolBuf` 和 `make_req` 用 `new[]`/`delete[]` 分配缓冲区，但 `dispatch_data_create` 用 `free()` 释放。全部改为 `std::malloc`/`std::free`。
 
 ## [1.1.5] - 2026-05-11
 
