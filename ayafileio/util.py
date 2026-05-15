@@ -1,8 +1,21 @@
 """工具模块"""
 
+import os
 import sys
+import stat
 import warnings
 
+def is_real_file(obj: int) -> bool:
+    """检查一个 fd 或文件对象是否指向真正的常规文件。
+    
+    排除 socket、pipe、tty 等特殊文件类型。
+    """
+    try:
+        # 如果是文件对象，拿它的 fileno()
+        mode = os.fstat(obj).st_mode
+        return stat.S_ISREG(mode)
+    except (OSError, TypeError, AttributeError):
+        return False
 
 def _check_io_uring_available():
     """纯 Python 检测 io_uring 是否可用"""

@@ -3,6 +3,7 @@ from ._ayafileio import (
     set_handle_pool_limits as _set_handle_pool_limits,
     get_handle_pool_limits as _get_handle_pool_limits,
 )
+from ._ayafileio import drain_handle_pool as _drain_handle, drain_buffer_pool as _drain_buffer
 
 # 尝试导入 Windows 专用的 set_iocp_worker_count
 _has_native_set_iocp = False
@@ -27,6 +28,8 @@ except ImportError:
 
 _io_worker_count = 0
 
+def drain_handle_pool() -> None: _drain_handle()
+def drain_buffer_pool() -> None: _drain_buffer()
 
 def set_handle_pool_limits(max_per_key: int, max_total: int) -> None:
     if max_per_key <= 0 or max_total <= 0:

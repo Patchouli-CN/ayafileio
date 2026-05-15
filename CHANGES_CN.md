@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.1.6] - 2026-05-11
+
+### 变更
+- **`wrap_fd` → `wrap_file`**: 重命名以反映其现可接受文件描述符（`int`）和带 `fileno()` 方法的文件对象。新增 `is_real_file()` 校验，拒绝 socket、pipe、tty 等非普通文件。
+- **`FileObj` 类型**: 在 `types.py` 中新增 `_HasFileno` Protocol，导出为 `FileObj`，表示任何具有 `fileno() -> int` 的对象。
+- **`drain_handle_pool` / `drain_buffer_pool`**: 改为通过 `_compat.py` 的 Python 包装函数重新导出，而非直接引用 C++ 符号。
+- **开发状态**: `pyproject.toml` 中从 "4 - Beta" 更新为 "5 - Production/Stable"。
+
 ## [1.1.5] - 2026-05-11
 
 ### 新增

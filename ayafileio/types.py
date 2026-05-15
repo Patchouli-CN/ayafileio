@@ -1,6 +1,7 @@
 """AyaIO 类型定义"""
 
-from typing import Protocol, runtime_checkable, TypeVar, Generic
+from typing import Protocol, runtime_checkable, TypeVar
+from pathlib import Path
 import sys
 
 if sys.version_info >= (3, 11):
@@ -29,3 +30,11 @@ class AyaFileIO(Protocol[T]):
 
     async def __aenter__(self) -> Self: ...
     async def __aexit__(self, *args) -> None: ...
+
+@runtime_checkable
+class _HasFileno(Protocol):
+    """任何能提供文件描述符的对象（鸭子类型）"""
+    def fileno(self) -> int: ...
+    
+FileObj = _HasFileno
+""" 真实文件对象 """

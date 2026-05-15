@@ -29,7 +29,7 @@ async def test_wrap_file_fd():
     f = open(tmp.name, "w+b")
     fd = f.fileno()
 
-    aio = ayafileio.wrap_fd(fd, "wb")
+    aio = ayafileio.wrap_file(fd, "wb")
     assert isinstance(aio, AyaFileIO), "Should be AyaIO"
 
     n = await aio.write(b"Hello from wrap_fd!")
@@ -51,7 +51,7 @@ async def test_owns_fd_true():
     print("=== test_owns_fd_true ===")
 
     fd = os.open(tempfile.mktemp(), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-    aio = ayafileio.wrap_fd(fd, "wb", owns_fd=True)
+    aio = ayafileio.wrap_file(fd, "wb", owns_fd=True)
 
     await aio.write(b"data")
     await aio.close()
@@ -71,7 +71,7 @@ async def test_wrap_text_mode():
     # 注意：wrap_fd 目前只支持二进制（_from_impl 里写死了 _is_text=False）
     # 如果需要文本模式，后面可以扩展
     fd = os.open(tempfile.mktemp(), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-    aio = ayafileio.wrap_fd(fd, "wb")
+    aio = ayafileio.wrap_file(fd, "wb")
 
     await aio.write(b"hello\nworld\n")
     await aio.seek(0)
@@ -92,7 +92,7 @@ async def test_wrap_closed_error():
     print("=== test_wrap_closed_error ===")
 
     fd = os.open(tempfile.mktemp(), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-    aio = ayafileio.wrap_fd(fd, "wb")
+    aio = ayafileio.wrap_file(fd, "wb")
     await aio.close()
 
     try:
