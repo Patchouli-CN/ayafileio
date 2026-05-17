@@ -2,7 +2,7 @@
 #include "iocp.hpp"
 #include "io_backend.hpp"
 #include "io_request.hpp"
-#include <algorithm>
+#include "config.hpp"
 
 HANDLE                           g_iocp           = NULL;
 std::atomic<bool>                g_iocpRunning{false};
@@ -65,16 +65,37 @@ BOOL WINAPI ctrl_handler(DWORD t) {
 // ════════════════════════════════════════════════════════════════════════════
 
 void iocp_thread_proc() {
+    OVERLAPPED_ENTRY entry{};
+    OVERLAPPED_ENTRY batch[255]{};
+    unsigned batch_count = ayafileio::config().iocp_batch_size() - 1;
+    if (batch_count > 255) batch_count = 255;
+
+    auto process = [](OVERLAPPED_ENTRY& e) {
+        if (!e.lpOverlapped) return;
+        auto* req = reinterpret_cast<IORequest*>(e.lpOverlapped);
+        auto* file = req->file;
+        if (!file) { delete req; return; }
+        if (e.Internal == 0) {
+            file->complete_ok(req, e.dwNumberOfBytesTransferred);
+        } else {
+            file->complete_error(req, GetLastError());
+        }
+    };
+
     while (true) {
-        DWORD bytes=0; ULONG_PTR key=0; LPOVERLAPPED ov=nullptr;
-        BOOL ok = GetQueuedCompletionStatus(g_iocp, &bytes, &key, &ov, INFINITE);
-        if (!g_iocpRunning.load(std::memory_order_acquire) && !ov) break;
-        if (!ov) continue;
-        auto *req  = reinterpret_cast<IORequest*>(ov);
-        auto *file = req->file;
-        if (!file) { delete req; continue; }
-        if (!ok) file->complete_error(req, GetLastError());
-        else     file->complete_ok(req, bytes);
+        ULONG count = 0;
+        GetQueuedCompletionStatusEx(
+            g_iocp, &entry, 1, &count, INFINITE, FALSE);
+        if (count == 0 || !entry.lpOverlapped) {
+            if (!g_iocpRunning.load(std::memory_order_acquire)) break;
+            continue;
+        }
+        process(entry);
+
+        ULONG more = 0;
+        GetQueuedCompletionStatusEx(
+            g_iocp, batch, batch_count, &more, 0, FALSE);
+        for (ULONG i = 0; i < more; ++i) process(batch[i]);
     }
 }
 

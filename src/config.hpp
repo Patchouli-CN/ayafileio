@@ -29,12 +29,15 @@ struct Config {
     // === 超时配置 ===
     unsigned close_timeout_ms = 4000;
     
+    // === IOCP 配置 (Windows) ===
+    unsigned iocp_batch_size = 64;
+
     // === io_uring 配置 (Linux) ===
     unsigned io_uring_queue_depth = 256;
     unsigned io_uring_flags = 0;
     bool io_uring_sqpoll = false;
     unsigned io_uring_sqpoll_idle_ms = 1000;
-    
+
     // 验证配置有效性
     bool validate() const {
         if (handle_pool_max_per_key == 0 || handle_pool_max_total == 0) return false;
@@ -42,6 +45,7 @@ struct Config {
         if (io_worker_count > 128) return false;
         if (buffer_pool_max == 0 || buffer_size == 0) return false;
         if (close_timeout_ms == 0 || close_timeout_ms > 30000) return false;
+        if (iocp_batch_size < 1 || iocp_batch_size > 256) return false;
         if (io_uring_queue_depth == 0 || io_uring_queue_depth > 4096) return false;
         return true;
     }
@@ -82,6 +86,7 @@ public:
             else if (key == "buffer_pool_max") m_config.buffer_pool_max = value;
             else if (key == "buffer_size") m_config.buffer_size = value;
             else if (key == "close_timeout_ms") m_config.close_timeout_ms = (unsigned)value;
+            else if (key == "iocp_batch_size") m_config.iocp_batch_size = (unsigned)value;
             else if (key == "io_uring_queue_depth") m_config.io_uring_queue_depth = (unsigned)value;
         }
         if (!m_config.validate()) {
@@ -110,9 +115,13 @@ public:
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         return m_config.buffer_size; 
     }
-    unsigned close_timeout_ms() const { 
+    unsigned close_timeout_ms() const {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
-        return m_config.close_timeout_ms; 
+        return m_config.close_timeout_ms;
+    }
+    unsigned iocp_batch_size() const {
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
+        return m_config.iocp_batch_size;
     }
     unsigned io_uring_queue_depth() const { 
         std::shared_lock<std::shared_mutex> lock(m_mutex);

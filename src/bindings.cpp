@@ -119,6 +119,11 @@ static void py_configure(py::dict options) {
     if (options.contains("io_uring_queue_depth")) {
         cfg.io_uring_queue_depth = py::cast<unsigned>(options["io_uring_queue_depth"]);
     }
+    if (options.contains("iocp_batch_size")) {
+        unsigned val = py::cast<unsigned>(options["iocp_batch_size"]);
+        if (val < 1 || val > 256) throw py::value_error("iocp_batch_size must be 1-256");
+        cfg.iocp_batch_size = val;
+    }
     if (options.contains("io_uring_sqpoll")) {
         cfg.io_uring_sqpoll = py::cast<bool>(options["io_uring_sqpoll"]);
     }
@@ -142,6 +147,7 @@ static py::dict py_get_config() {
     result["buffer_pool_max"] = cfg.buffer_pool_max;
     result["buffer_size"] = cfg.buffer_size;
     result["close_timeout_ms"] = cfg.close_timeout_ms;
+    result["iocp_batch_size"] = cfg.iocp_batch_size;
     result["io_uring_queue_depth"] = cfg.io_uring_queue_depth;
     result["io_uring_sqpoll"] = cfg.io_uring_sqpoll;
     return result;

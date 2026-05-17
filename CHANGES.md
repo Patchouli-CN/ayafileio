@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-17
+
+### Changed
+- **IOCP batch completion harvesting**: Replaced single `GetQueuedCompletionStatus` with `GetQueuedCompletionStatusEx` using a dual-phase strategy: Phase 1 blocks on a single entry with `INFINITE` timeout, Phase 2 non-blocking drains up to `iocp_batch_size - 1` additional completions. Significantly reduces syscall overhead under high concurrency.
+- **`iocp_batch_size` config**: New configuration parameter (default 64, range 1-256) controls the maximum number of completion entries harvested per IOCP worker cycle. Configurable via `ayafileio.configure({"iocp_batch_size": N})` and readable via `ayafileio.get_config()`.
+
 ## [1.1.6] - 2026-05-15
 
 ### Changed
