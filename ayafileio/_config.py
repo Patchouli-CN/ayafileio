@@ -29,24 +29,18 @@ _CACHE_ENABLED = True
 class AyafileioConfig(TypedDict, total=False):
     """ayafileio 配置字典类型 — 所有键均为可选"""
 
-    # Windows 句柄池
-    handle_pool_max_per_key: NotRequired[int]
-    handle_pool_max_total: NotRequired[int]
-
-    # 线程池
+    # ── 跨平台 / 通用 ──────────────────────────────────────────────────────
     io_worker_count: NotRequired[int]
-
-    # 缓冲区池
     buffer_pool_max: NotRequired[int]
     buffer_size: NotRequired[int]
-
-    # 超时
     close_timeout_ms: NotRequired[int]
 
-    # IOCP (Windows)
+    # ── Windows / IOCP ─────────────────────────────────────────────────────
+    handle_pool_max_per_key: NotRequired[int]
+    handle_pool_max_total: NotRequired[int]
     iocp_batch_size: NotRequired[int]
 
-    # io_uring (Linux)
+    # ── Linux / io_uring ──────────────────────────────────────────────────
     io_uring_queue_depth: NotRequired[int]
     io_uring_sqpoll: NotRequired[bool]
 
@@ -61,12 +55,7 @@ def configure(options: AyafileioConfig) -> None:
 
     options 支持以下键：
 
-    C++ 层配置
-    ----------
-    ``handle_pool_max_per_key``
-        每个文件最大缓存句柄数（Windows，默认 64）。
-    ``handle_pool_max_total``
-        全局最大缓存句柄数（Windows，默认 2048）。
+    **跨平台 / 通用**
     ``io_worker_count``
         I/O 工作线程数，0=自动（默认 0，最大 128）。
     ``buffer_pool_max``
@@ -75,12 +64,20 @@ def configure(options: AyafileioConfig) -> None:
         单个缓冲区大小，字节（默认 65536）。
     ``close_timeout_ms``
         关闭时等待 pending I/O 的最大毫秒数（默认 4000）。
-    ``io_uring_queue_depth``
-        io_uring 队列深度（Linux，默认 256）。
-    ``io_uring_sqpoll``
-        是否启用 SQPOLL 模式（Linux，默认 ``False``）。
+
+    **Windows / IOCP**
+    ``handle_pool_max_per_key``
+        每个文件最大缓存句柄数（默认 64）。
+    ``handle_pool_max_total``
+        全局最大缓存句柄数（默认 2048）。
     ``iocp_batch_size``
-        IOCP 批量收割大小（Windows，默认 64，范围 1-256）。
+        IOCP 批量收割大小（默认 64，范围 1-256）。
+
+    **Linux / io_uring**
+    ``io_uring_queue_depth``
+        提交队列深度（默认 256，范围 1-4096）。
+    ``io_uring_sqpoll``
+        是否启用 SQPOLL 模式（默认 ``False``）。
 
     Example::
 
