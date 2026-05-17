@@ -9,7 +9,7 @@
 
 ### 变更
 - **IOCP 批量收割完成通知**: 将单次 `GetQueuedCompletionStatus` 替换为 `GetQueuedCompletionStatusEx`，采用双阶段策略：Phase 1 以单条目 + `INFINITE` 超时阻塞等待首个事件，Phase 2 非阻塞收割最多 `iocp_batch_size - 1` 个额外完成事件。高并发下显著减少 syscall 开销。
-- **`iocp_batch_size` 配置**: 新增配置参数（默认 64，范围 1-256），控制每个 IOCP 工作线程循环收割的完成事件数量上限。可通过 `ayafileio.configure({"iocp_batch_size": N})` 配置，通过 `ayafileio.get_config()` 读取。
+- **`iocp_batch_size` 配置**: 新增配置参数（默认 64，范围 1-256），控制每个 IOCP 工作线程循环收割的完成事件数量上限。可通过 `ayafileio.configure({"iocp_batch_size": N})` 配置，通过 `ayafileio.get_config()` 读取。Python 层 `AyafileioConfig` TypedDict 及 `configure()` 文档字符串同步更新。
 
 ## [1.1.6] - 2026-05-15
 

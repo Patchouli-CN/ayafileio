@@ -43,6 +43,9 @@ class AyafileioConfig(TypedDict, total=False):
     # 超时
     close_timeout_ms: NotRequired[int]
 
+    # IOCP (Windows)
+    iocp_batch_size: NotRequired[int]
+
     # io_uring (Linux)
     io_uring_queue_depth: NotRequired[int]
     io_uring_sqpoll: NotRequired[bool]
@@ -76,6 +79,8 @@ def configure(options: AyafileioConfig) -> None:
         io_uring 队列深度（Linux，默认 256）。
     ``io_uring_sqpoll``
         是否启用 SQPOLL 模式（Linux，默认 ``False``）。
+    ``iocp_batch_size``
+        IOCP 批量收割大小（Windows，默认 64，范围 1-256）。
 
     Example::
 
