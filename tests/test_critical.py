@@ -2,8 +2,16 @@ import asyncio
 import timeit
 import ayafileio
 import os
+import io
+import sys
 import faulthandler
 faulthandler.enable() 
+
+if sys.platform == "win32":
+    import io
+
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 print("应用 Windows IOCP 极限调优...")
 ayafileio.configure(
