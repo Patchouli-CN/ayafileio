@@ -21,7 +21,7 @@ struct IORequest {
 #ifdef _WIN32
     OVERLAPPED   ov{};
 #endif
-    IOBackendBase  *file          = nullptr;
+    IOBackendBase  *file       = nullptr;
     LoopHandle  *loop_handle   = nullptr;
     PyObject    *future        = nullptr;
     PyObject    *set_result    = nullptr;

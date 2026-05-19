@@ -58,11 +58,15 @@ jobs:
       run: |
         ulimit -c unlimited
         set +e
-        python test_base.py
-        python test_wrap_file.py
-        EXIT_CODE=$?
+        python tests/test_critical.py
+        EXIT_CRITICAL=$?
+        python tests/test_base.py
+        EXIT_BASE=$?
+        python tests/test_wrap_file.py
+        EXIT_WRAP=$?
+        EXIT_CODE=$((EXIT_CRITICAL + EXIT_BASE + EXIT_WRAP))
         set -e
-        echo "Test exit code: $EXIT_CODE"
+        echo "Test exit codes: critical=$EXIT_CRITICAL base=$EXIT_BASE wrap=$EXIT_WRAP"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -140,24 +144,71 @@ jobs:
       timeout-minutes: 1
       run: |
         python -c "import ayafileio; print(ayafileio.get_backend_info())"
+    - name: Configure crash dumps (Windows)
+      timeout-minutes: 1
+      shell: pwsh
+      run: |
+        $dumpDir = "${{ runner.temp }}\crash_dumps"
+        New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+        try {
+          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
+          Write-Host "WER LocalDumps configured: $dumpDir"
+        } catch {
+          Write-Host "WER config failed (may lack admin): $_"
+        }
+        echo "dump_dir=$dumpDir" >> $env:GITHUB_ENV
     - name: Run tests
       timeout-minutes: 3
       id: run_tests_windows
       run: |
-        python test_base.py
-        python test_wrap_file.py
-        echo "EXIT_CODE=$LASTEXITCODE" >> $env:GITHUB_ENV
-        if ($LASTEXITCODE -ne 0) {
-          exit $LASTEXITCODE
-        }
-    - name: Collect crash dumps (Windows)
+        python tests/test_critical.py
+        $EXIT_CRITICAL = $LASTEXITCODE
+        python tests/test_base.py
+        $EXIT_BASE = $LASTEXITCODE
+        python tests/test_wrap_file.py
+        $EXIT_WRAP = $LASTEXITCODE
+        $EXIT_CODE = $EXIT_CRITICAL + $EXIT_BASE + $EXIT_WRAP
+        Write-Host "Test exit codes: critical=$EXIT_CRITICAL base=$EXIT_BASE wrap=$EXIT_WRAP"
+        echo "EXIT_CODE=$EXIT_CODE" >> $env:GITHUB_ENV
+        if ($EXIT_CODE -ne 0) { exit $EXIT_CODE }
+    - name: Collect and analyze crash dumps (Windows)
       if: always() && steps.run_tests_windows.outcome != 'success'
+      timeout-minutes: 3
+      shell: pwsh
       run: |
-        echo "Test failed, checking for crash dumps..."
-        Get-ChildItem -Path "$env:LOCALAPPDATA\CrashDumps" -Filter "*.dmp" | ForEach-Object {
-          echo "Found dump: $($_.FullName)"
+        $dumpDir = "$env:dump_dir"
+        Write-Host "Searching for crash dumps in: $dumpDir"
+        Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object {
+          $dmp = $_.FullName
+          Write-Host "========================================"
+          Write-Host "Analyzing dump: $dmp ($($_.LastWriteTime))"
+          Write-Host "========================================"
+          $cdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+          if (Test-Path $cdb) {
+            & $cdb -z $dmp -c ".ecxr; !analyze -v; ~*kv; q" 2>&1
+          } else {
+            Write-Host "cdb not found, trying WinDbg..."
+            $windbg = "C:\Program Files\WindowsApps\Microsoft.WinDbg_*\amd64\dbgeng.dll"
+            Write-Host "Dump file available at: $dmp (size: $($_.Length) bytes)"
+            Write-Host "Install WinDbg from Microsoft Store for interactive analysis"
+          }
         }
-        Get-EventLog -LogName Application -Source "Application Error" -Newest 10 | Format-List
+        if (-not (Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue)) {
+          Write-Host "No crash dumps found in $dumpDir"
+          Write-Host "Checking default CrashDumps folder..."
+          Get-ChildItem -Path "$env:LOCALAPPDATA\CrashDumps" -Filter "*python*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object {
+            Write-Host "Found: $($_.FullName) ($($_.LastWriteTime))"
+            if (Test-Path $cdb) {
+              & $cdb -z $_.FullName -c ".ecxr; !analyze -v; ~*kv; q" 2>&1
+            }
+          }
+        }
+        Write-Host ""
+        Write-Host "--- Application Error Events ---"
+        Get-EventLog -LogName Application -Source "Application Error" -Newest 5 -ErrorAction SilentlyContinue | Format-List
 
   test-macos:
     name: "macOS (Python ${{ matrix.python-version }})"
@@ -200,9 +251,14 @@ jobs:
       id: run_tests_macos
       run: |
         ulimit -c unlimited
-        python test_base.py
-        python test_wrap_file.py
-        EXIT_CODE=$?
+        python tests/test_critical.py
+        EXIT_CRITICAL=$?
+        python tests/test_base.py
+        EXIT_BASE=$?
+        python tests/test_wrap_file.py
+        EXIT_WRAP=$?
+        EXIT_CODE=$((EXIT_CRITICAL + EXIT_BASE + EXIT_WRAP))
+        echo "Test exit codes: critical=$EXIT_CRITICAL base=$EXIT_BASE wrap=$EXIT_WRAP"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -259,14 +315,16 @@ jobs:
       shell: bash
       run: |
         set +e
-        python test_speed.py
+        python tests/test_critical.py
+        CRITICAL_EXIT=$?
+        python tests/test_speed.py
         SPEED_EXIT=$?
-        python test_loguru.py
+        python tests/test_loguru.py
         LOGURU_EXIT=$?
         set -e
         
-        if [ $SPEED_EXIT -ne 0 ] || [ $LOGURU_EXIT -ne 0 ]; then
-          echo "Benchmark failed: test_speed.py=$SPEED_EXIT, test_loguru.py=$LOGURU_EXIT"
+        if [ $CRITICAL_EXIT -ne 0 ] || [ $SPEED_EXIT -ne 0 ] || [ $LOGURU_EXIT -ne 0 ]; then
+          echo "Benchmark failed: test_critical.py=$CRITICAL_EXIT, test_speed.py=$SPEED_EXIT, test_loguru.py=$LOGURU_EXIT"
           CORES=$(find . /tmp -name "core*" -type f 2>/dev/null | head -5)
           if [ -n "$CORES" ]; then
             echo "=== Found core dumps ==="
@@ -286,7 +344,7 @@ jobs:
           sudo dmesg | grep -i "segfault\|killed\|oom" | tail -30 || true
         fi
         
-        exit $SPEED_EXIT || $LOGURU_EXIT
+        exit $((CRITICAL_EXIT || SPEED_EXIT || LOGURU_EXIT))
     - name: Upload core dumps from benchmark
       if: always() && steps.benchmark.outcome != 'success'
       uses: actions/upload-artifact@v4
