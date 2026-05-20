@@ -26,3 +26,4 @@ struct LoopHandle {
 };
 
 LoopHandle *get_or_create_loop_handle(PyObject *loop);
+void clear_loop_handles();

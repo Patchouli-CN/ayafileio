@@ -92,3 +92,11 @@ LoopHandle *get_or_create_loop_handle(PyObject *loop) {
     g_loops.emplace_back(loop, h);
     return h;
 }
+
+void clear_loop_handles() {
+    std::lock_guard<std::mutex> lk(g_loopsMtx);
+    for (auto &kv : g_loops) {
+        delete kv.second;
+    }
+    g_loops.clear();
+}

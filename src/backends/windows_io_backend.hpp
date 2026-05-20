@@ -1,15 +1,14 @@
 // windows_io_backend.hpp
 #pragma once
 #include "../io_backend.hpp"
-#include "../iocp.hpp"
-#include "../handle_pool.hpp"
+#include "../iocp_context.hpp"
 #include <string>
-#include <atomic>
-#include <mutex>
-#include <cstdint>
 
 // ════════════════════════════════════════════════════════════════════════════
-// §7  Windows IO Backend
+// §7  Windows IO Backend — lightweight forwarding layer
+//
+// All I/O state lives in IOCPContext::Session. WindowsIOBackend only holds
+// a sessionId and delegates every operation to IOCPContext::submit_*().
 // ════════════════════════════════════════════════════════════════════════════
 
 class WindowsIOBackend : public IOBackendBase {
@@ -26,30 +25,18 @@ public:
     PyObject* tell() override;
     PyObject* truncate(int64_t size) override;
     PyObject* readinto(PyObject* buf) override;
-    int fileno() const override {
-        // Windows: 把 HANDLE 转回 CRT fd
-        return _open_osfhandle((intptr_t)m_handle, 0);
-    }
+    int fileno() const override;
     void close_impl() override;
 
-private:
-    HANDLE m_handle = INVALID_HANDLE_VALUE;
-    PoolKey m_poolKey;
-    std::atomic<bool> m_running{false};
-    std::mutex m_posMtx;
-    uint64_t m_filePos = 0;
-    bool m_appendMode = false;
-    PyObject* m_loop = nullptr;
-    PyObject* m_create_future = nullptr;
-
-    PyObject* check_closed_or_raise() {
-        if (!m_running.load(std::memory_order_relaxed) || m_handle == INVALID_HANDLE_VALUE) {
-            PyObject *future = PyObject_CallNoArgs(m_create_future);
-            if (future) {
-                resolve_exc(future, g_ValueError, 0, "I/O operation on closed file.");
-            }
-            return future;
-        }
-        return nullptr;
+    // Completion handlers — unused; IOCPContext workers process completions
+    // directly via sessionId lookup. Override as defensive no-ops.
+    void complete_ok(IORequest* req, size_t /*bytes*/) override {
+        if (req) delete req;
     }
+    void complete_error(IORequest* req, DWORD /*err*/) override {
+        if (req) delete req;
+    }
+
+private:
+    uint64_t m_sessionId = 0;
 };

@@ -2,6 +2,7 @@
 #include "globals.hpp"
 #include "pool.hpp"
 #include "loop_handle.hpp"
+#include "debug_log.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -15,6 +16,14 @@
 class IOBackendBase;
 
 enum class ReqType : uint8_t { Read, Write, Other };
+
+/// Lifecycle state for an IORequest — used to detect double‑delivery
+/// of IOCP completions under extreme concurrency.
+enum class IOState : uint8_t {
+    PENDING,   // created, waiting for IOCP completion
+    RESOLVED,  // I/O completed successfully (or sync‑done)
+    REJECTED   // I/O failed, cancelled, or already processed
+};
 
 // io_request.hpp
 struct IORequest {
@@ -30,7 +39,8 @@ struct IORequest {
     char        *heapBuf       = nullptr;
     size_t       reqSize       = 0;
     ReqType      type          = ReqType::Other;
-    
+    std::atomic<IOState> state{IOState::PENDING};
+
     // readinto 专用字段
     PyObject    *userBuf       = nullptr;  // 用户提供的缓冲区对象（owned）
     Py_buffer    userBufView;             // 缓冲区的 Py_buffer（zeroed）
@@ -53,6 +63,8 @@ struct IORequest {
     }
 
     ~IORequest() {
+        UR_DEBUG_LOG("~IORequest req=%p future=%p set_result=%p set_exception=%p isReadinto=%d",
+                     (void*)this, (void*)future, (void*)set_result, (void*)set_exception, isReadinto);
         Py_XDECREF(future);
         Py_XDECREF(set_result);
         Py_XDECREF(set_exception);

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-05-21
+
+### Fixed
+- **Windows IOCP double‑delivery crash**: Under extreme concurrency (~50K concurrent readinto operations) `GetQueuedCompletionStatusEx` could return the same `OVERLAPPED` completion twice, causing use‑after‑free and `STATUS_HEAP_CORRUPTION` (0xC0000374). Added `IOState` atomic flag to `IORequest` with CAS at `process_one` entry to safely skip duplicate completions. (Captured duplicates in 12/20 stress runs.)
+- **Pending counter underflow on sync I/O**: Synchronous completions were double‑decremented (once in the submission path, once by the IOCP worker), causing `pending` to go negative and `close()` to skip `CancelIoEx` + wait. Fixed by removing the submission‑path decrement and letting the worker handle it uniformly.
+- **GIL deadlock in `submit_close`**: The `Sleep` wait loop held the GIL, preventing the IOCP worker from acquiring it to process cancelled completions. Added `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` around `Sleep`.
+
+### Changed
+- **CMakeLists.txt debug control unified**: Replaced `ENABLE_DEBUG` option with standard `CMAKE_BUILD_TYPE` (Debug / Release / RelWithDebInfo). Extracted common compiler flags for MSVC and GCC/Clang, reducing duplication.
+- **`LoopHandle` global cache cleanup**: Added `clear_loop_handles()` to free all cached `LoopHandle` objects at module cleanup, fixing a memory leak on repeated init/shutdown cycles.
+
 ## [1.2.0] - 2026-05-17
 
 ### Changed

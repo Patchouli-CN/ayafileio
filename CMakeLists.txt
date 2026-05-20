@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ayafileio VERSION 1.2.0 LANGUAGES CXX)
+project(ayafileio VERSION 1.3.0 LANGUAGES CXX)
 
 # ════════════════════════════════════════════════════════════════════════════
 # macOS 部署目标（解决 aligned allocation 兼容性）
@@ -15,27 +15,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ════════════════════════════════════════════════════════════════════════════
-# 调试选项：通过环境变量或 CMake 参数控制
+# 构建选项
 # ════════════════════════════════════════════════════════════════════════════
-option(ENABLE_DEBUG "Enable debug build with detailed logging" OFF)
+# 使用标准 CMake 参数控制构建类型:
+#   -DCMAKE_BUILD_TYPE=Debug          — 调试构建（禁用优化、包含调试符号）
+#   -DCMAKE_BUILD_TYPE=Release        — 发布构建（优化、无调试符号）
+#   -DCMAKE_BUILD_TYPE=RelWithDebInfo — 带调试符号的发布构建
+# pip install -e . --config-settings="cmake.args=-DCMAKE_BUILD_TYPE=Debug"
 option(ENABLE_ASAN "Enable AddressSanitizer for memory error detection" OFF)
 option(ENABLE_VERBOSE_LOGGING "Enable verbose runtime logging" OFF)
-
-# 如果通过环境变量设置，自动启用
-if(DEFINED ENV{AYAFILEIO_DEBUG})
-    set(ENABLE_DEBUG ON)
-    set(ENABLE_VERBOSE_LOGGING ON)
-endif()
 
 if(DEFINED ENV{AYAFILEIO_ASAN})
     set(ENABLE_ASAN ON)
 endif()
 
-# 设置构建类型
-if(ENABLE_DEBUG)
-    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
-    message(STATUS "🔧 Debug mode enabled")
-elseif(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
@@ -106,6 +100,8 @@ if(WIN32)
         src/backends/windows_io_backend.cpp
         src/handle_pool.cpp
         src/iocp.cpp
+        src/iocp_context.cpp
+        src/result_batcher.cpp
     )
 elseif(APPLE)
     message(STATUS "Building for macOS (Dispatch I/O Backend + Thread Pool fallback)")
@@ -166,78 +162,62 @@ target_compile_definitions(_ayafileio PRIVATE
 
 # 详细日志宏
 if(ENABLE_VERBOSE_LOGGING)
-    target_compile_definitions(_ayafileio PRIVATE 
+    target_compile_definitions(_ayafileio PRIVATE
         AYAFILEIO_VERBOSE_LOGGING=1
-        AYAFILEIO_DEBUG=1
     )
-    message(STATUS "📝 Verbose logging enabled")
+    message(STATUS "Verbose logging enabled")
 endif()
 
 if(MSVC)
-    # MSVC 编译选项
-    if(ENABLE_DEBUG)
-        target_compile_options(_ayafileio PRIVATE 
-            /Od                    # 禁用优化
-            /Zi                    # 生成完整调试信息
-            /EHsc                  # C++ 异常处理
-            /utf-8                 # UTF-8 编码
-            /wd4244                # 忽略转换警告
-            /wd4267                # 忽略 size_t 转换警告
-            /wd4996                # 忽略 deprecated 警告
-        )
+    # ── common MSVC flags ──────────────────────────────────────────────────
+    target_compile_options(_ayafileio PRIVATE
+        /EHsc                  # C++ exception handling
+        /utf-8                 # UTF-8 source encoding
+        /wd4244                # suppress conversion warning
+        /wd4267                # suppress size_t conversion warning
+        /wd4996                # suppress deprecated warning
+    )
+
+    # ── build-type-specific MSVC flags ─────────────────────────────────────
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(_ayafileio PRIVATE /Od /Zi)
+        target_link_options(_ayafileio PRIVATE /DEBUG:FULL)
+    elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        target_compile_options(_ayafileio PRIVATE /O2 /Zi)
         target_link_options(_ayafileio PRIVATE /DEBUG:FULL)
     else()
-        target_compile_options(_ayafileio PRIVATE 
-            /O2                    # 优化
-            /W3                    # 警告级别 3
-            /EHsc                  # C++ 异常处理
-            /utf-8                 # UTF-8 编码
-            /wd4244                # 忽略转换警告
-            /wd4267                # 忽略 size_t 转换警告
-            /wd4996                # 忽略 deprecated 警告
-        )
+        target_compile_options(_ayafileio PRIVATE /O2 /W3)
     endif()
+
     target_compile_definitions(_ayafileio PRIVATE
         _CRT_SECURE_NO_WARNINGS
         NOMINMAX
     )
     target_link_libraries(_ayafileio PRIVATE ws2_32)
 else()
-    # GCC/Clang 编译选项
-    if(ENABLE_DEBUG)
-        target_compile_options(_ayafileio PRIVATE 
-            -O0                    # 禁用优化，便于调试
-            -g3                    # 最大调试信息
-            -ggdb                  # GDB 格式调试信息
-            -Wall                  # 所有警告
-            -Wextra                # 额外警告
-            -fPIC                  # 位置无关代码
-            -fno-omit-frame-pointer # 保留栈帧指针
-            -rdynamic              # 导出所有符号
+    # ── GCC/Clang compiler options ─────────────────────────────────────────
+
+    # common flags
+    target_compile_options(_ayafileio PRIVATE -Wall -Wextra -fPIC)
+
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(_ayafileio PRIVATE
+            -O0 -g3 -fno-omit-frame-pointer
         )
     else()
-        target_compile_options(_ayafileio PRIVATE 
-            -O3                    # 优化级别 3
-            -Wall                  # 所有警告
-            -Wextra                # 额外警告
-            -Wpedantic             # 严格标准
-            -fPIC                  # 位置无关代码
-        )
+        target_compile_options(_ayafileio PRIVATE -O3 -Wpedantic)
     endif()
-    
-    # AddressSanitizer (内存错误检测)
+
+    # AddressSanitizer
     if(ENABLE_ASAN)
-        target_compile_options(_ayafileio PRIVATE 
-            -fsanitize=address
-            -fno-omit-frame-pointer
+        target_compile_options(_ayafileio PRIVATE
+            -fsanitize=address -fno-omit-frame-pointer
         )
-        target_link_options(_ayafileio PRIVATE 
-            -fsanitize=address
-        )
+        target_link_options(_ayafileio PRIVATE -fsanitize=address)
         target_compile_definitions(_ayafileio PRIVATE AYAFILEIO_ASAN=1)
-        message(STATUS "🧹 AddressSanitizer enabled")
+        message(STATUS "AddressSanitizer enabled")
     endif()
-    
+
     if(NOT WIN32)
         target_link_libraries(_ayafileio PRIVATE Threads::Threads)
     endif()
@@ -265,13 +245,12 @@ endif()
 # ════════════════════════════════════════════════════════════════════════════
 message(STATUS "========================================")
 message(STATUS "Build Configuration:")
-message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Build type:  ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME}")
-message(STATUS "  Debug: ${ENABLE_DEBUG}")
-message(STATUS "  ASan: ${ENABLE_ASAN}")
-message(STATUS "  Verbose logging: ${ENABLE_VERBOSE_LOGGING}")
+message(STATUS "  Platform:     ${CMAKE_SYSTEM_NAME}")
+message(STATUS "  ASan:         ${ENABLE_ASAN}")
+message(STATUS "  Verbose log:  ${ENABLE_VERBOSE_LOGGING}")
 if(APPLE)
     message(STATUS "  Backend: Dispatch I/O (GCD) + Thread Pool fallback")
 elseif(WIN32)

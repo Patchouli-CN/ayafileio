@@ -3,44 +3,30 @@
 #include <algorithm>
 #include <filesystem>
 
-// cached event loop
-static PyObject   *g_cachedLoop       = nullptr;
-static PyObject   *g_cachedFutureFn   = nullptr;
-static LoopHandle *g_cachedLoopHandle = nullptr;
-
-static void refresh_loop_cache(PyObject *loop) {
-    if (loop == g_cachedLoop) return;
-    Py_XDECREF(g_cachedFutureFn);
-    g_cachedLoop       = loop;
-    g_cachedFutureFn   = PyObject_GetAttr(loop, g_str_create_future);
-    g_cachedLoopHandle = get_or_create_loop_handle(loop);
-}
+// ════════════════════════════════════════════════════════════════════════════
+// WindowsIOBackend — constructor (path)
+// ════════════════════════════════════════════════════════════════════════════
 
 WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &mode) {
-    auto& cfg = ayafileio::config();
-    m_cached_buffer_size = cfg.buffer_size();
-    m_cached_buffer_pool_max = cfg.buffer_pool_max();
-    m_cached_close_timeout_ms = cfg.close_timeout_ms();
-    
-    static bool ctrl_reg = false;
-    if (!ctrl_reg) { SetConsoleCtrlHandler(ctrl_handler, TRUE); ctrl_reg = true; }
+    auto &cfg = ayafileio::config();
 
+    // ── get event loop + create_future ────────────────────────────────────
     PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) throw py::python_error();
-    refresh_loop_cache(loop);
-    m_loop          = loop;
-    m_create_future = g_cachedFutureFn; Py_INCREF(m_create_future);
-    m_loop_handle   = g_cachedLoopHandle;
+    PyObject *create_future = PyObject_GetAttr(loop, g_str_create_future);
+    if (!create_future) throw py::python_error();
 
+    // ── parse mode ────────────────────────────────────────────────────────
     DWORD access = 0, disp = OPEN_EXISTING;
     ModeInfo mi;
     try {
         mi = parse_mode(mode);
     } catch (const std::invalid_argument &e) {
+        Py_DECREF(create_future);
         throw py::value_error(e.what());
     }
-    bool canRead = mi.canRead;
-    bool canWrite = mi.canWrite;
+    bool canRead    = mi.canRead;
+    bool canWrite   = mi.canWrite;
     bool appendMode = mi.appendMode;
 
     if (mi.hasR) { disp = OPEN_EXISTING; }
@@ -51,514 +37,211 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     if (canRead)  access |= GENERIC_READ;
     if (canWrite) access |= GENERIC_WRITE;
 
-    m_appendMode = appendMode;
-
+    // ── open / acquire HANDLE ─────────────────────────────────────────────
+    HANDLE h = INVALID_HANDLE_VALUE;
+    PoolKey poolKey;
     bool canReuse = (disp == OPEN_EXISTING || disp == OPEN_ALWAYS);
     if (canReuse) {
-        m_poolKey = make_pool_key(path, access, disp);
-        m_handle = handle_pool_acquire(m_poolKey);
+        poolKey = make_pool_key(path, access, disp);
+        h = handle_pool_acquire(poolKey);
     }
 
     std::wstring wpath = std::filesystem::u8path(path).wstring();
 
-    if (m_handle == INVALID_HANDLE_VALUE) {
-        m_handle = CreateFileW(wpath.c_str(), access,
-            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-            NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
-        if (m_handle == INVALID_HANDLE_VALUE)
-            win_throw_os_error(GetLastError(), "Failed to open file", path.c_str());
-        if (!CreateIoCompletionPort(m_handle, g_iocp, (ULONG_PTR)this, 0)) {
-            CloseHandle(m_handle);
-            win_throw_os_error(GetLastError(), "Failed to associate file to IOCP");
+    if (h == INVALID_HANDLE_VALUE) {
+        h = CreateFileW(wpath.c_str(), access,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            Py_DECREF(create_future);
+            win_throw_os_error(err, "Failed to open file", path.c_str());
         }
-        // Suppress IOCP packets when I/O completes synchronously (data in cache).
-        // Allows inline future resolution without cross-thread wakeup.
-        SetFileCompletionNotificationModes(m_handle,
-            FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE);
-    } else {
-        // Re-associate pooled handle with this FileHandle as completion key.
-        if (!CreateIoCompletionPort(m_handle, g_iocp, (ULONG_PTR)this, 0)) {
-            CloseHandle(m_handle);
-            m_handle = CreateFileW(wpath.c_str(), access,
-                FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-                NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
-            if (m_handle == INVALID_HANDLE_VALUE)
-                win_throw_os_error(GetLastError(), "Failed to open file", path.c_str());
-            if (!CreateIoCompletionPort(m_handle, g_iocp, (ULONG_PTR)this, 0)) {
-                CloseHandle(m_handle);
-                win_throw_os_error(GetLastError(), "Failed to associate file to IOCP");
-            }
-            SetFileCompletionNotificationModes(m_handle,
-                FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE);
-        }
-        // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS persists across pool recycles.
     }
 
-    // 所有可能失败的初始化均已完成，加入打开文件集合
-    { std::lock_guard<std::mutex> lk(g_openFilesMtx); g_openFiles.insert(this); }
+    // ── register with IOCPContext ─────────────────────────────────────────
+    try {
+        m_sessionId = IOCPContext::instance().create_session(
+            h, loop, create_future, appendMode, poolKey, /*owns_fd=*/true);
+    } catch (...) {
+        CloseHandle(h);
+        Py_DECREF(create_future);
+        throw;
+    }
+    Py_DECREF(create_future);
 
-    m_running.store(true, std::memory_order_release);
-    m_pending.store(0, std::memory_order_relaxed);
-    m_filePos = 0;
-    if (m_appendMode) {
-        LARGE_INTEGER li{}; if (GetFileSizeEx(m_handle,&li)) m_filePos=(uint64_t)li.QuadPart;
+    // ── init file position ────────────────────────────────────────────────
+    if (appendMode) {
+        auto s = IOCPContext::instance().get_session(m_sessionId);
+        if (s) {
+            LARGE_INTEGER li{};
+            if (GetFileSizeEx(h, &li)) {
+                std::lock_guard<std::mutex> lk(s->posMtx);
+                s->filePos = (uint64_t)li.QuadPart;
+            }
+        }
     }
 }
 
-WindowsIOBackend::WindowsIOBackend(int fd, const std::string& mode, bool owns_fd) {
-    auto& cfg = ayafileio::config();
-    m_cached_buffer_size = cfg.buffer_size();
-    m_cached_buffer_pool_max = cfg.buffer_pool_max();
-    m_cached_close_timeout_ms = cfg.close_timeout_ms();
-    
-    m_owns_fd = owns_fd;
-    
-    static bool ctrl_reg = false;
-    if (!ctrl_reg) { 
-        SetConsoleCtrlHandler(ctrl_handler, TRUE); 
-        ctrl_reg = true; 
-    }
+// ════════════════════════════════════════════════════════════════════════════
+// WindowsIOBackend — constructor (fd)
+// ════════════════════════════════════════════════════════════════════════════
 
+WindowsIOBackend::WindowsIOBackend(int fd, const std::string &mode, bool owns_fd) {
+    auto &cfg = ayafileio::config();
+
+    // ── get event loop + create_future ────────────────────────────────────
     PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) throw py::python_error();
-    refresh_loop_cache(loop);
-    m_loop          = loop;
-    m_create_future = g_cachedFutureFn; 
-    Py_INCREF(m_create_future);
-    m_loop_handle   = g_cachedLoopHandle;
+    PyObject *create_future = PyObject_GetAttr(loop, g_str_create_future);
+    if (!create_future) throw py::python_error();
 
-    // ── 解析 mode ──
+    // ── parse mode ────────────────────────────────────────────────────────
     ModeInfo mi;
     try {
         mi = parse_mode(mode);
     } catch (const std::invalid_argument &e) {
+        Py_DECREF(create_future);
         throw py::value_error(e.what());
     }
-    m_appendMode = mi.appendMode;
+    bool appendMode = mi.appendMode;
 
-    // ── 从 fd 获取原始 HANDLE，提取路径后重新打开 ──
+    // ── get raw HANDLE from fd ────────────────────────────────────────────
     HANDLE raw_handle = (HANDLE)_get_osfhandle(fd);
     if (raw_handle == INVALID_HANDLE_VALUE || raw_handle == NULL) {
-        win_throw_os_error(GetLastError(), "Failed to get handle from fd");
+        DWORD err = GetLastError();
+        Py_DECREF(create_future);
+        win_throw_os_error(err, "Failed to get handle from fd");
     }
-    
-    // 尝试获取文件名
+
+    // Try to get file path
     std::wstring wpath(MAX_PATH, L'\0');
-    DWORD path_len = GetFinalPathNameByHandleW(raw_handle, &wpath[0], MAX_PATH, 
+    DWORD path_len = GetFinalPathNameByHandleW(raw_handle, &wpath[0], MAX_PATH,
                                                 FILE_NAME_NORMALIZED);
 
-    // ★ 如果用户要求接管所有权，在重新打开前关闭原始 fd
-    // 这样不会有两个句柄同时存在
-    if (m_owns_fd) {
-        _close(fd);  // 关闭原始 fd（也关闭 raw_handle）
+    // If taking ownership, close the original fd (avoids two handles)
+    if (owns_fd) {
+        _close(fd);
     }
-    
+
+    HANDLE h = INVALID_HANDLE_VALUE;
+    bool ownsFd = true;
+    PoolKey poolKey;  // empty path → non-poolable
+
     if (path_len > 0 && path_len <= MAX_PATH) {
-        // ── 方案 A：有路径，用 CreateFileW + FILE_FLAG_OVERLAPPED ──
+        // ──方案 A: have path, reopen with OVERLAPPED ───────────────────────
         wpath.resize(path_len);
-        // 去掉 \\?\ 前缀
         if (wpath.compare(0, 4, L"\\\\?\\") == 0) {
             wpath = wpath.substr(4);
         }
-        
-        // ★ 关键修复：fd 已经打开了，这里换个 OVERLAPPED 句柄
-        // 给完整读写权限，避免 ReadFile 报 ERROR_ACCESS_DENIED
+
         DWORD access = GENERIC_READ | GENERIC_WRITE;
-        
         DWORD disp = OPEN_EXISTING;
         if (mi.hasW)      disp = CREATE_ALWAYS;
         else if (mi.hasA) disp = OPEN_ALWAYS;
         else if (mi.hasX) disp = CREATE_NEW;
-        
-        m_handle = CreateFileW(
-            wpath.c_str(),
-            access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            NULL,
-            disp,
-            FILE_FLAG_OVERLAPPED,
-            NULL
-        );
-        
-        if (m_handle == INVALID_HANDLE_VALUE) {
-            win_throw_os_error(GetLastError(), 
-                "Failed to reopen fd with OVERLAPPED flag");
+
+        h = CreateFileW(wpath.c_str(), access,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            Py_DECREF(create_future);
+            win_throw_os_error(err, "Failed to reopen fd with OVERLAPPED flag");
         }
     } else {
-        // ── 方案 B：没有路径（socket/pipe），复制句柄 ──
+        // ──方案 B: no path (socket/pipe), duplicate handle ─────────────────
         HANDLE proc = GetCurrentProcess();
-        // ★ 显式要求读写权限
-        if (!DuplicateHandle(proc, raw_handle, proc, &m_handle,
-                             GENERIC_READ | GENERIC_WRITE,
-                             FALSE, 0)) {
-            // 回退：继承源句柄权限
-            if (!DuplicateHandle(proc, raw_handle, proc, &m_handle,
+        if (!DuplicateHandle(proc, raw_handle, proc, &h,
+                             GENERIC_READ | GENERIC_WRITE, FALSE, 0)) {
+            if (!DuplicateHandle(proc, raw_handle, proc, &h,
                                  0, FALSE, DUPLICATE_SAME_ACCESS)) {
-                win_throw_os_error(GetLastError(), 
-                    "Failed to duplicate handle from fd");
+                DWORD err = GetLastError();
+                Py_DECREF(create_future);
+                win_throw_os_error(err, "Failed to duplicate handle from fd");
             }
         }
     }
 
-    // ── 关联 IOCP ──
-    if (!CreateIoCompletionPort(m_handle, g_iocp, (ULONG_PTR)this, 0)) {
-        if (m_owns_fd) CloseHandle(m_handle);
-        win_throw_os_error(GetLastError(), "Failed to associate fd to IOCP");
+    // ── register with IOCPContext ─────────────────────────────────────────
+    try {
+        m_sessionId = IOCPContext::instance().create_session(
+            h, loop, create_future, appendMode, poolKey, ownsFd);
+    } catch (...) {
+        if (ownsFd) CloseHandle(h);
+        Py_DECREF(create_future);
+        throw;
     }
-    
-    SetFileCompletionNotificationModes(m_handle,
-        FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE);
+    Py_DECREF(create_future);
 
-    // 所有可能失败的初始化均已完成，加入打开文件集合
-    { std::lock_guard<std::mutex> lk(g_openFilesMtx); g_openFiles.insert(this); }
-
-    // ── 初始化状态 ──
-    m_running.store(true, std::memory_order_release);
-    m_pending.store(0, std::memory_order_relaxed);
-    m_filePos = 0;
-
-    if (m_appendMode) {
-        LARGE_INTEGER li{};
-        if (GetFileSizeEx(m_handle, &li)) {
-            m_filePos = (uint64_t)li.QuadPart;
+    // ── init file position ────────────────────────────────────────────────
+    if (appendMode) {
+        auto s = IOCPContext::instance().get_session(m_sessionId);
+        if (s) {
+            LARGE_INTEGER li{};
+            if (GetFileSizeEx(h, &li)) {
+                std::lock_guard<std::mutex> lk(s->posMtx);
+                s->filePos = (uint64_t)li.QuadPart;
+            }
         }
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Destructor
+// ════════════════════════════════════════════════════════════════════════════
 
 WindowsIOBackend::~WindowsIOBackend() {
     close_impl();
-    { std::lock_guard<std::mutex> lk(g_openFilesMtx); g_openFiles.erase(this); }
-    Py_XDECREF(m_create_future);
-    Py_XDECREF(m_loop);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// I/O methods — all delegate to IOCPContext
+// ════════════════════════════════════════════════════════════════════════════
+
 PyObject *WindowsIOBackend::read(int64_t size) {
-    PyObject *future = check_closed_or_raise();
-    if (future) return future;  // 已关闭，直接返回带异常的 future
-
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-
-    if (g_ctrlcTriggered.load(std::memory_order_relaxed) ||
-        !m_running.load(std::memory_order_relaxed)) {
-        resolve_exc(future, g_KeyboardInterrupt, 0, "interrupted");
-        return future;
-    }
-
-    uint64_t offset; size_t readSize;
-    {
-        std::lock_guard<std::mutex> lk(m_posMtx);
-        LARGE_INTEGER fs{};
-        if (!GetFileSizeEx(m_handle, &fs)) {
-            resolve_exc(future, g_OSError, GetLastError(), "GetFileSizeEx failed");
-            return future;
-        }
-        int64_t rem = (int64_t)fs.QuadPart - (int64_t)m_filePos;
-        if (rem <= 0) { resolve_bytes(future, nullptr, 0); return future; }
-        readSize = (size<0||(size_t)size>rem) ? (size_t)rem : (size_t)size;
-        if (readSize == 0) { resolve_bytes(future, nullptr, 0); return future; }
-        offset = m_filePos;
-        m_filePos += readSize;
-    }
-
-    IORequest *req = make_req(readSize, future, ReqType::Read);
-    req->ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
-    req->ov.OffsetHigh = (DWORD)(offset >> 32);
-
-    m_pending.fetch_add(1, std::memory_order_relaxed);
-    DWORD got = 0;
-    BOOL ok = ReadFile(m_handle, req->buf(), (DWORD)readSize, &got, &req->ov);
-    if (ok) {
-        // Synchronous completion: resolve inline, no IOCP round-trip.
-        m_pending.fetch_sub(1, std::memory_order_relaxed);
-        PyObject *val = PyBytes_FromStringAndSize(req->buf(), got);
-        resolve_ok(future, val); Py_DECREF(val);
-        delete req;
-    } else {
-        DWORD err = GetLastError();
-        if (err != ERROR_IO_PENDING) {
-            m_pending.fetch_sub(1, std::memory_order_relaxed);
-            complete_error_inline(req, err);
-        }
-    }
-    return future;
+    return IOCPContext::instance().submit_read(m_sessionId, size);
 }
 
 PyObject *WindowsIOBackend::write(Py_buffer *view) {
-    PyObject *future = check_closed_or_raise();
-    if (future) return future;  // 已关闭，直接返回带异常的 future
-
-    size_t size = (size_t)view->len;
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-
-    if (g_ctrlcTriggered.load(std::memory_order_relaxed) ||
-        !m_running.load(std::memory_order_relaxed)) {
-        resolve_exc(future, g_KeyboardInterrupt, 0, "interrupted");
-        return future;
-    }
-    if (size == 0) {
-        PyObject *z = PyLong_FromLong(0);
-        resolve_ok(future, z); Py_DECREF(z);
-        return future;
-    }
-
-    uint64_t offset;
-    {
-        std::lock_guard<std::mutex> lk(m_posMtx);
-        if (m_appendMode) {
-            LARGE_INTEGER li{};
-            if (!GetFileSizeEx(m_handle, &li)) {
-                resolve_exc(future, g_OSError, GetLastError(), "GetFileSizeEx failed");
-                return future;
-            }
-            offset = (uint64_t)li.QuadPart;
-        } else {
-            offset = m_filePos;
-        }
-        m_filePos = offset + size;
-    }
-
-    IORequest *req = make_req(size, future, ReqType::Write);
-    memcpy(req->buf(), view->buf, size);
-    req->ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
-    req->ov.OffsetHigh = (DWORD)(offset >> 32);
-
-    m_pending.fetch_add(1, std::memory_order_relaxed);
-    DWORD wrote = 0;
-    BOOL ok = WriteFile(m_handle, req->buf(), (DWORD)size, &wrote, &req->ov);
-    if (ok) {
-        // Synchronous completion: resolve inline.
-        m_pending.fetch_sub(1, std::memory_order_relaxed);
-        PyObject *val = PyLong_FromSsize_t((Py_ssize_t)wrote);
-        resolve_ok(future, val); Py_DECREF(val);
-        delete req;
-    } else {
-        DWORD err = GetLastError();
-        if (err != ERROR_IO_PENDING) {
-            m_pending.fetch_sub(1, std::memory_order_relaxed);
-            complete_error_inline(req, err);
-        }
-    }
-    return future;
+    return IOCPContext::instance().submit_write(m_sessionId, view);
 }
 
 PyObject *WindowsIOBackend::seek(int64_t offset, int whence) {
-    PyObject *future = check_closed_or_raise();
-    if (future) return future;  // 已关闭，直接返回带异常的 future
-
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    {
-        std::lock_guard<std::mutex> lk(m_posMtx);
-        if      (whence == 0) m_filePos = (uint64_t)offset;
-        else if (whence == 1) m_filePos = (uint64_t)((int64_t)m_filePos + offset);
-        else if (whence == 2) {
-            LARGE_INTEGER sz{};
-            if (!GetFileSizeEx(m_handle, &sz)) {
-                resolve_exc(future, g_OSError, GetLastError(), "GetFileSizeEx failed");
-                return future;
-            }
-            m_filePos = (uint64_t)((int64_t)sz.QuadPart + offset);
-        } else {
-            resolve_exc(future, g_ValueError, 0, "Invalid whence value");
-            return future;
-        }
-    }
-    PyObject *pos = PyLong_FromUnsignedLongLong(m_filePos);
-    resolve_ok(future, pos); Py_DECREF(pos);
-    return future;
+    return IOCPContext::instance().submit_seek(m_sessionId, offset, whence);
 }
 
 PyObject *WindowsIOBackend::flush() {
-    PyObject *future = check_closed_or_raise();
-    if (future) return future;  // 已关闭，直接返回带异常的 future
-
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-
-    if (!FlushFileBuffers(m_handle)) {
-        resolve_exc(future, g_OSError, GetLastError(), "FlushFileBuffers failed");
-        return future;
-    }
-    resolve_ok(future, Py_None);
-    return future;
+    return IOCPContext::instance().submit_flush(m_sessionId);
 }
 
 PyObject *WindowsIOBackend::close() {
-    PyObject *future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    close_impl();
-    resolve_ok(future, Py_None);
-    return future;
+    return IOCPContext::instance().submit_close(m_sessionId);
+}
+
+PyObject *WindowsIOBackend::tell() {
+    return IOCPContext::instance().submit_tell(m_sessionId);
+}
+
+PyObject *WindowsIOBackend::truncate(int64_t size) {
+    return IOCPContext::instance().submit_truncate(m_sessionId, size);
+}
+
+PyObject *WindowsIOBackend::readinto(PyObject *buf) {
+    return IOCPContext::instance().submit_readinto(m_sessionId, buf);
+}
+
+int WindowsIOBackend::fileno() const {
+    auto s = IOCPContext::instance().get_session(m_sessionId);
+    if (!s || s->handle == INVALID_HANDLE_VALUE) return -1;
+    return _open_osfhandle((intptr_t)s->handle, 0);
 }
 
 void WindowsIOBackend::close_impl() {
-    bool expected = true;
-    if (!m_running.compare_exchange_strong(expected, false)) return;
-
-    if (m_handle != INVALID_HANDLE_VALUE) {
-        // 只在有 pending I/O 时才 CancelIoEx，避免不必要的 syscall
-        if (m_pending.load(std::memory_order_acquire) > 0) {
-            CancelIoEx(m_handle, NULL);
-
-            unsigned timeout_ms = ayafileio::config().close_timeout_ms();
-            int w = 1;
-            int elapsed = 0;
-            while (elapsed < (int)timeout_ms && m_pending.load(std::memory_order_acquire) > 0) {
-                Sleep(w);
-                elapsed += w;
-                w = std::min(w * 2, 32);
-            }
-        }
-
-        // 注意：不需要 SetFilePointerEx — 所有 I/O 都使用
-        // OVERLAPPED.Offset 显式指定位置，文件指针无影响。
-
-        if (m_owns_fd) {
-            // m_poolKey.path 为空表示 handle 不可池化（如 CREATE_ALWAYS）
-            if (!m_poolKey.path.empty()) {
-                handle_pool_release(m_poolKey, m_handle);
-            } else {
-                CloseHandle(m_handle);
-            }
-        }
-        m_handle = INVALID_HANDLE_VALUE;
+    if (m_sessionId != 0) {
+        uint64_t sid = m_sessionId;
+        m_sessionId = 0;
+        PyObject *future = IOCPContext::instance().submit_close(sid);
+        Py_XDECREF(future);
     }
-    {
-        std::lock_guard<std::mutex> lk(g_openFilesMtx);
-        g_openFiles.erase(this);
-    }
-}
-
-PyObject* WindowsIOBackend::tell() {
-    PyObject* future = check_closed_or_raise();
-    if (future) return future;
-    
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    
-    uint64_t pos;
-    {
-        std::lock_guard<std::mutex> lk(m_posMtx);
-        pos = m_filePos;
-    }
-    
-    PyObject* py_pos = PyLong_FromUnsignedLongLong(pos);
-    resolve_ok(future, py_pos);
-    Py_DECREF(py_pos);
-    return future;
-}
-
-PyObject* WindowsIOBackend::truncate(int64_t size) {
-    PyObject* future = check_closed_or_raise();
-    if (future) return future;
-    
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    
-    if (size < 0) {
-        resolve_exc(future, g_ValueError, 0, "negative size not allowed");
-        return future;
-    }
-    
-    // 保存当前文件指针位置
-    LARGE_INTEGER prev_pos;
-    if (!SetFilePointerEx(m_handle, {0}, &prev_pos, FILE_CURRENT)) {
-        resolve_exc(future, g_OSError, GetLastError(), "SetFilePointerEx failed");
-        return future;
-    }
-    
-    // 移动到截断位置
-    LARGE_INTEGER li;
-    li.QuadPart = size;
-    if (!SetFilePointerEx(m_handle, li, NULL, FILE_BEGIN)) {
-        resolve_exc(future, g_OSError, GetLastError(), "SetFilePointerEx failed");
-        return future;
-    }
-    
-    // 设置文件结尾
-    if (!SetEndOfFile(m_handle)) {
-        // 恢复原位置
-        SetFilePointerEx(m_handle, prev_pos, NULL, FILE_BEGIN);
-        resolve_exc(future, g_OSError, GetLastError(), "SetEndOfFile failed");
-        return future;
-    }
-    
-    // 恢复原位置
-    SetFilePointerEx(m_handle, prev_pos, NULL, FILE_BEGIN);
-    
-    {
-        std::lock_guard<std::mutex> lk(m_posMtx);
-        if (static_cast<uint64_t>(size) < m_filePos) {
-            m_filePos = static_cast<uint64_t>(size);
-        }
-    }
-    
-    resolve_ok(future, Py_None);
-    return future;
-}
-
-PyObject* WindowsIOBackend::readinto(PyObject* buf) {
-    PyObject* future = check_closed_or_raise();
-    if (future) return future;
-    
-    future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    
-    Py_buffer view;
-    if (PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) < 0) {
-        resolve_exc(future, g_ValueError, 0, "readinto() requires a writable buffer");
-        return future;
-    }
-    
-    if (view.len == 0) {
-        PyBuffer_Release(&view);
-        PyObject* z = PyLong_FromLong(0);
-        resolve_ok(future, z); Py_DECREF(z);
-        return future;
-    }
-    
-    uint64_t offset;
-    size_t readSize;
-    {
-        std::lock_guard<std::mutex> lk(m_posMtx);
-        LARGE_INTEGER fs{};
-        if (!GetFileSizeEx(m_handle, &fs)) {
-            PyBuffer_Release(&view);
-            resolve_exc(future, g_OSError, GetLastError(), "GetFileSizeEx failed");
-            return future;
-        }
-        int64_t rem = static_cast<int64_t>(fs.QuadPart) - static_cast<int64_t>(m_filePos);
-        if (rem <= 0) {
-            PyBuffer_Release(&view);
-            PyObject* z = PyLong_FromLong(0);
-            resolve_ok(future, z); Py_DECREF(z);
-            return future;
-        }
-        readSize = std::min(static_cast<size_t>(view.len), static_cast<size_t>(rem));
-        offset = m_filePos;
-        m_filePos += readSize;
-    }
-    
-    IORequest* req = make_req_readinto(buf, &view, readSize, future);
-    req->ov.Offset     = static_cast<DWORD>(offset & 0xFFFFFFFF);
-    req->ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
-    
-    m_pending.fetch_add(1, std::memory_order_relaxed);
-    DWORD got = 0;
-    BOOL ok = ReadFile(m_handle, view.buf, static_cast<DWORD>(readSize), &got, &req->ov);
-    if (ok) {
-        m_pending.fetch_sub(1, std::memory_order_relaxed);
-        PyObject* val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(got));
-        resolve_ok(future, val); Py_DECREF(val);
-        delete req;
-    } else {
-        DWORD err = GetLastError();
-        if (err != ERROR_IO_PENDING) {
-            m_pending.fetch_sub(1, std::memory_order_relaxed);
-            complete_error_inline(req, err);
-        }
-    }
-    return future;
 }
