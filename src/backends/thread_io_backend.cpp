@@ -10,7 +10,7 @@
 #include "../globals.hpp"
 #include "./utils/file_mode.hpp"
 #include "./utils/error_util.hpp"
-#include "../debug_log.hpp"
+#include "utils/debug_log.hpp"
 #include <thread>
 
 // ════════════════════════════════════════════════════════════════════════════

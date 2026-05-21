@@ -3,7 +3,7 @@
 #ifdef __APPLE__
 
 #include "../io_backend.hpp"
-#include "../debug_log.hpp"
+#include "utils/debug_log.hpp"
 #include <dispatch/dispatch.h>
 #include <string>
 #include <atomic>
