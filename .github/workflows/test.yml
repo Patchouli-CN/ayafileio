@@ -303,6 +303,23 @@ jobs:
     - name: Check backend info
       run: |
         python -c "import ayafileio; print(ayafileio.get_backend_info())"
+    - name: Configure crash dumps (Windows)
+      if: runner.os == 'Windows'
+      timeout-minutes: 1
+      shell: pwsh
+      run: |
+        $dumpDir = "${{ runner.temp }}\crash_dumps"
+        New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+        try {
+          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
+          Write-Host "WER LocalDumps configured: $dumpDir"
+        } catch {
+          Write-Host "WER config failed (may lack admin): $_"
+        }
+        echo "dump_dir=$dumpDir" >> $env:GITHUB_ENV
     - name: Run speed benchmark
       id: benchmark
       timeout-minutes: 5
@@ -316,29 +333,71 @@ jobs:
         python tests/test_loguru.py
         LOGURU_EXIT=$?
         set -e
-        
-        if [ $CRITICAL_EXIT -ne 0 ] || [ $SPEED_EXIT -ne 0 ] || [ $LOGURU_EXIT -ne 0 ]; then
-          echo "Benchmark failed: test_critical.py=$CRITICAL_EXIT, test_speed.py=$SPEED_EXIT, test_loguru.py=$LOGURU_EXIT"
-          CORES=$(find . /tmp -name "core*" -type f 2>/dev/null | head -5)
-          if [ -n "$CORES" ]; then
-            echo "=== Found core dumps ==="
-            for CORE in $CORES; do
-              echo "Core: $CORE"
-              file "$CORE"
-              if command -v gdb &> /dev/null; then
-                PYTHON_EXE=$(which python)
-                echo "--- GDB Backtrace ---"
-                gdb -batch -ex "thread apply all bt full" "$PYTHON_EXE" "$CORE" 2>&1 | head -300
-                echo "--- GDB Info Registers ---"
-                gdb -batch -ex "info registers" "$PYTHON_EXE" "$CORE" 2>&1
-              fi
-            done
+
+        echo "Benchmark exit codes: test_critical=$CRITICAL_EXIT test_speed=$SPEED_EXIT test_loguru=$LOGURU_EXIT"
+
+        # Linux/macOS: check for core dumps
+        if [ "$RUNNER_OS" != "Windows" ]; then
+          if [ $CRITICAL_EXIT -ne 0 ] || [ $SPEED_EXIT -ne 0 ] || [ $LOGURU_EXIT -ne 0 ]; then
+            CORES=$(find . /tmp -name "core*" -type f 2>/dev/null | head -5)
+            if [ -n "$CORES" ]; then
+              echo "=== Found core dumps ==="
+              for CORE in $CORES; do
+                echo "Core: $CORE"
+                file "$CORE"
+                if command -v gdb &> /dev/null; then
+                  PYTHON_EXE=$(which python)
+                  echo "--- GDB Backtrace ---"
+                  gdb -batch -ex "thread apply all bt full" "$PYTHON_EXE" "$CORE" 2>&1 | head -300
+                  echo "--- GDB Info Registers ---"
+                  gdb -batch -ex "info registers" "$PYTHON_EXE" "$CORE" 2>&1
+                fi
+              done
+            fi
+            echo "--- dmesg ---"
+            sudo dmesg | grep -i "segfault\|killed\|oom" | tail -30 || true
           fi
-          echo "--- dmesg ---"
-          sudo dmesg | grep -i "segfault\|killed\|oom" | tail -30 || true
         fi
-        
+
         exit $((CRITICAL_EXIT || SPEED_EXIT || LOGURU_EXIT))
+    - name: Analyze crash dumps (Windows CDB)
+      if: always() && runner.os == 'Windows'
+      timeout-minutes: 5
+      shell: pwsh
+      run: |
+        $dumpDir = "$env:dump_dir"
+        $cdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+        Write-Host "=== Searching for crash dumps in: $dumpDir ==="
+        $dumps = @(Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        if ($dumps.Count -eq 0) {
+          Write-Host "No crash dumps found in $dumpDir"
+          Write-Host "Checking default CrashDumps folder..."
+          $dumps = @(Get-ChildItem -Path "$env:LOCALAPPDATA\CrashDumps" -Filter "*python*.dmp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        }
+        if ($dumps.Count -eq 0) {
+          Write-Host "No crash dumps found anywhere."
+          exit 0
+        }
+        $PYTHON_EXE = (Get-Command python).Source
+        Write-Host "Python executable: $PYTHON_EXE"
+        foreach ($dmp in $dumps) {
+          Write-Host "========================================"
+          Write-Host "Analyzing dump: $($dmp.FullName) ($($dmp.LastWriteTime)) size=$($dmp.Length)"
+          Write-Host "========================================"
+          if (Test-Path $cdb) {
+            Write-Host "--- CDB Stack Trace (all threads) ---"
+            & $cdb -z $dmp.FullName -c ".ecxr; !analyze -v; ~*kv; q" 2>&1 | Select-Object -First 500
+          } else {
+            Write-Host "CDB not found at $cdb, trying alternative paths..."
+            $altCdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+            if (Test-Path $altCdb) {
+              & $altCdb -z $dmp.FullName -c ".ecxr; !analyze -v; ~*kv; q" 2>&1 | Select-Object -First 500
+            } else {
+              Write-Host "CDB not available. Dump file at: $($dmp.FullName)"
+              Write-Host "Install Windows SDK Debugging Tools for analysis."
+            }
+          }
+        }
     - name: Upload core dumps from benchmark
       if: always() && steps.benchmark.outcome != 'success'
       uses: actions/upload-artifact@v4
@@ -348,6 +407,7 @@ jobs:
           core.*
           *.core
           /tmp/core.*
+          **/*.dmp
         if-no-files-found: ignore
         retention-days: 7
     - name: Upload benchmark results
