@@ -88,45 +88,24 @@ async def stress_ayafileio():
     )
 
 async def stress_write():
-    import tempfile, shutil
-    from concurrent.futures import ThreadPoolExecutor
-
-    tmpdir = tempfile.mkdtemp(prefix="ayafileio_write_")
-
-    # Pre-create all files in parallel (ThreadPoolExecutor) so file creation
-    # overhead does not pollute the async write benchmark.  CI shared storage
-    # is especially slow at CreateFileW.
-    def _precreate(idx: int) -> None:
-        path = os.path.join(tmpdir, f"w{idx}")
-        with open(path, "wb") as f:
-            pass  # just create, leave empty
-
-    t0 = timeit.default_timer()
-    with ThreadPoolExecutor(max_workers=min(WRITE_CONCURRENCY, 64)) as pool:
-        list(pool.map(_precreate, range(WRITE_CONCURRENCY)))
-    precreate_elapsed = timeit.default_timer() - t0
-
-    async def worker(idx: int):
-        buf = bytes(CHUNK_SIZE)
-        path = os.path.join(tmpdir, f"w{idx}")
-        async with ayafileio.open(path, "r+b") as f:
+    async def worker():
+        buf = bytes(CHUNK_SIZE)  # 每次写同样的数据
+        async with ayafileio.open(TEST_FILE + ".write", "wb") as f:
             for _ in range(ITERATIONS_PER_TASK):
                 await f.write(buf)
 
-    total_ops = WRITE_CONCURRENCY * ITERATIONS_PER_TASK
     t = timeit.default_timer()
-    tasks = [worker(i) for i in range(WRITE_CONCURRENCY)]
+    tasks = [worker() for _ in range(CONCURRENCY)]
     await asyncio.gather(*tasks)
     elapsed = timeit.default_timer() - t
-    qps = total_ops / elapsed
+    qps = TOTAL_OPS / elapsed
     print(
-        f"[ayafileio write] {total_ops} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
-        f" | 预创建文件: {precreate_elapsed:.1f}s"
+        f"[ayafileio write] {TOTAL_OPS} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
     )
-
+    # 清理
     try:
-        shutil.rmtree(tmpdir)
-    except Exception:
+        os.remove(TEST_FILE + ".write")
+    except:
         pass
 
 async def main():
