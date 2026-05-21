@@ -11,6 +11,8 @@
 - **Windows IOCP 双重投递崩溃**: 极端并发下（约 50K 并发 readinto 操作）`GetQueuedCompletionStatusEx` 可能对同一个 `OVERLAPPED` 返回两次完成包，导致 use‑after‑free 和 `STATUS_HEAP_CORRUPTION`（0xC0000374）。在 `IORequest` 中增加 `IOState` 原子标记，`process_one` 入口处 CAS 检测并安全跳过重复完成包。（20 轮压测中 12 轮捕获到重复投递。）
 - **同步 I/O 的 pending 计数器负溢出**: 同步完成的 pending 被双重递减（提交路径减一次 + IOCP worker 减一次），导致 `pending` 变为负数，`close()` 跳过 `CancelIoEx` + 等待。修复为移除提交路径的递减，统一由 worker 处理。
 - **`submit_close` 中的 GIL 死锁**: Sleep 等待循环持有 GIL，阻止 IOCP worker 获取 GIL 处理已取消的完成包。在 `Sleep` 周围添加 `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`。
+- **Handle Pool 与 IOCP 关联冲突导致堆损坏**: `submit_close` 将已关联 IOCP 的 HANDLE 放回池中缓存，后续 `create_session` 重新获取该 HANDLE 并调用 `CreateIoCompletionPort` 更新 completion key 时失败（err=87 `ERROR_INVALID_PARAMETER`），错误路径中 `CloseHandle` 后内核复用同一个 HANDLE 值，导致连锁的 HANDLE 无效（err=6）和堆损坏 crash。修复为 IOCP 路径下 HANDLE 不再回池，直接 `CloseHandle`；新增 `handle_pool_evict()` 在 IOCP 关联失败时清空池中对应 key 的所有缓存 HANDLE。压测 500K 次 readinto（50K 并发）零 crash 通过。
+- **yuyuko 内存追踪器集成与修复**: 项目内建的幽幽子（Yuyuko）内存生命周期追踪系统（`yuyuko_memlife.hpp`）集成到 IOCP 路径的 `IORequest` 分配/释放。修复了追踪器自身的多个问题：64 位地址空间下 `ShadowMemory` 数组越界（改为基于魂簿哈希表查询）、`TRACKED_NEW`/`TRACKED_DELETE` 宏未调用构造/析构函数（改为使用 `new`/`delete`）。新增 `ENABLE_ASAN` 编译选项的 MSVC 支持。yuyuko 在压测中捕获到 1 次 IOCP 双重投递导致的 use‑after‑free（被 `IOState` CAS guard 正确防御）。
 
 ### 变更
 - **CMakeLists.txt 调试控制统一**: 用标准 `CMAKE_BUILD_TYPE`（Debug / Release / RelWithDebInfo）替代 `ENABLE_DEBUG` 选项。提取 MSVC 和 GCC/Clang 的公共编译选项，减少重复。

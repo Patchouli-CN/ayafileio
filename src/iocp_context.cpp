@@ -1,7 +1,8 @@
 #include "iocp_context.hpp"
 #include "pool.hpp"
 #include "config.hpp"
-#include "debug_log.hpp"
+#include "utils/debug_log.hpp"
+#include "utils/yuyuko_memlife.hpp"
 #include <algorithm>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +32,7 @@ IOCPContext::~IOCPContext() {
 // All Python references are released here so that the worker can delete req
 // without needing the GIL.
 void mark_sync_done(IORequest *req) {
+    Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__);
     UR_DEBUG_LOG("mark_sync_done req=%p future=%p set_result=%p set_exception=%p isReadinto=%d",
                  (void*)req, (void*)req->future, (void*)req->set_result, (void*)req->set_exception, req->isReadinto);
     Py_XDECREF(req->set_result);
@@ -152,6 +154,7 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
     if (!CreateIoCompletionPort(h, iocp, (ULONG_PTR)s->id, 0)) {
         DWORD err = GetLastError();
         UR_DEBUG_LOG("create_session: CreateIoCompletionPort FAILED id=%llu h=%p err=%lu", s->id, h, err);
+        if (!poolKey.path.empty()) handle_pool_evict(poolKey);
         CloseHandle(h);
         Py_DECREF(create_future);
         win_throw_os_error(err, "Failed to associate handle with IOCP");
@@ -268,6 +271,7 @@ void IOCPContext::worker_proc(HANDLE iocp) {
 
 void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
                               DWORD bytes, DWORD err) {
+    Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__);
     // ── Double‑delivery guard ────────────────────────────────────────────
     // Under extreme concurrency Windows IOCP may deliver the same OVERLAPPED
     // completion twice.  Atomically claim this request; if it was already
@@ -304,7 +308,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
             UR_DEBUG_LOG("process_one SYNC req=%p sid=%llu SESSION NOT FOUND — deleting req anyway",
                          (void*)req, sessionId);
         }
-        delete req;
+        TRACKED_DELETE(req);
         return;
     }
 
@@ -316,7 +320,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         if (it == m_sessions.end()) {
             // Session already closed — just release memory.
             UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu SESSION GONE — deleting req", (void*)req, sessionId);
-            delete req;
+            TRACKED_DELETE(req);
             return;
         }
         session = it->second;
@@ -367,7 +371,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         Py_XDECREF(val);
     }
     UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu — deleting after push", (void*)req, sessionId);
-    delete req;
+    TRACKED_DELETE(req);
 }
 
 void IOCPContext::flush_batchers() {
@@ -389,7 +393,7 @@ namespace {
 
 IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
                          size_t buf_size, size_t /*pool_max*/) {
-    auto *req = new IORequest();
+    auto *req = TRACKED_NEW(IORequest);
     req->file        = nullptr;   // not used — completion routed via sessionId
     req->loop_handle = nullptr;   // not used — batcher handles dispatch
     req->future      = future;
@@ -410,7 +414,7 @@ IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
 
 IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
                                   PyObject *future) {
-    auto *req = new IORequest();
+    auto *req = TRACKED_NEW(IORequest);
     req->file        = nullptr;
     req->loop_handle = nullptr;
     req->future      = future;
@@ -558,7 +562,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            delete req;
+            TRACKED_DELETE(req);
         } else {
             UR_DEBUG_LOG("submit_read ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }
@@ -659,7 +663,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view) {
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            delete req;
+            TRACKED_DELETE(req);
         } else {
             UR_DEBUG_LOG("submit_write ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }
@@ -920,7 +924,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            delete req;
+            TRACKED_DELETE(req);
         } else {
             UR_DEBUG_LOG("submit_readinto ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }
@@ -993,13 +997,15 @@ PyObject *IOCPContext::submit_close(uint64_t session_id) {
         }
 
         if (s->owns_fd) {
+            // IOCP handles must NOT be pooled — the kernel IOCP association
+            // outlives the handle's pool lifetime and causes
+            // ERROR_INVALID_PARAMETER (err=87) when CreateIoCompletionPort
+            // is called again on the recycled handle.
             if (!s->poolKey.path.empty()) {
-                UR_DEBUG_LOG("submit_close sid=%llu — releasing h=%p to pool", session_id, s->handle);
-                handle_pool_release(s->poolKey, s->handle);
-            } else {
-                UR_DEBUG_LOG("submit_close sid=%llu — CloseHandle h=%p", session_id, s->handle);
-                CloseHandle(s->handle);
+                handle_pool_evict(s->poolKey);
             }
+            UR_DEBUG_LOG("submit_close sid=%llu — CloseHandle h=%p", session_id, s->handle);
+            CloseHandle(s->handle);
         }
         s->handle = INVALID_HANDLE_VALUE;
     }
@@ -1062,10 +1068,9 @@ void IOCPContext::close_all_sessions() {
             }
             if (s->owns_fd) {
                 if (!s->poolKey.path.empty()) {
-                    handle_pool_release(s->poolKey, s->handle);
-                } else {
-                    CloseHandle(s->handle);
+                    handle_pool_evict(s->poolKey);
                 }
+                CloseHandle(s->handle);
             }
             s->handle = INVALID_HANDLE_VALUE;
         }

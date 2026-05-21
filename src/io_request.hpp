@@ -2,7 +2,7 @@
 #include "globals.hpp"
 #include "pool.hpp"
 #include "loop_handle.hpp"
-#include "debug_log.hpp"
+#include "utils/debug_log.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #endif

@@ -64,6 +64,7 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
         m_sessionId = IOCPContext::instance().create_session(
             h, loop, create_future, appendMode, poolKey, /*owns_fd=*/true);
     } catch (...) {
+        if (!poolKey.path.empty()) handle_pool_evict(poolKey);
         CloseHandle(h);
         Py_DECREF(create_future);
         throw;

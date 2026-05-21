@@ -1,6 +1,8 @@
 // io_backend.cpp
 #include "io_backend.hpp"
 #include "globals.hpp"
+#include "utils/debug_log.hpp"
+#include "utils/yuyuko_memlife.hpp"
 #include <cstdlib>
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -58,7 +60,7 @@ void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
 
     if (set_fn && val) req->loop_handle->push(set_fn, val);
     else { Py_XDECREF(set_fn); Py_XDECREF(val); }
-    delete req;
+    TRACKED_DELETE(req);
 
     PyGILState_Release(gs);
 }
@@ -81,7 +83,7 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
 
     if (set_fn && exc) req->loop_handle->push(set_fn, exc);
     else { Py_XDECREF(set_fn); Py_XDECREF(exc); }
-    delete req;
+    TRACKED_DELETE(req);
 
     PyGILState_Release(gs);
 }
@@ -91,7 +93,7 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
 // ════════════════════════════════════════════════════════════════════════════
 
 IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) {
-    auto* req = new IORequest();
+    auto* req = TRACKED_NEW(IORequest);
     req->file = this;
     req->loop_handle = m_loop_handle;
     req->future = future;
@@ -109,7 +111,7 @@ IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) 
 }
 
 IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size_t size, PyObject* future) {
-    auto* req = new IORequest();
+    auto* req = TRACKED_NEW(IORequest);
     req->file = this;
     req->loop_handle = m_loop_handle;
     req->future = future;
@@ -148,5 +150,5 @@ void IOBackendBase::complete_error_inline(IORequest* req, DWORD err) {
     }
     Py_XDECREF(set_fn);
     Py_DECREF(exc);
-    delete req;
+    TRACKED_DELETE(req);
 }

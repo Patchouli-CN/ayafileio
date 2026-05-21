@@ -42,6 +42,10 @@ HANDLE handle_pool_acquire(const PoolKey &key);
 // Return a HANDLE to the pool. Closes it immediately if pool is full.
 void handle_pool_release(const PoolKey &key, HANDLE h);
 
+// Remove all cached handles for a given key and close them.
+// Called when an apparently-valid handle fails (e.g. IOCP association error).
+void handle_pool_evict(const PoolKey &key);
+
 // Close all pooled handles (called at shutdown).
 void handle_pool_drain();
 
@@ -58,6 +62,7 @@ std::pair<size_t, size_t> get_handle_pool_limits();
 #ifndef _WIN32
 inline HANDLE handle_pool_acquire(const PoolKey&) { return INVALID_HANDLE_VALUE; }
 inline void handle_pool_release(const PoolKey&, HANDLE h) { if (h != -1) ::close(h); }
+inline void handle_pool_evict(const PoolKey&) {}
 inline void handle_pool_drain() {}
 inline PoolKey make_pool_key(const std::string& path, DWORD access, DWORD disp) {
     return PoolKey{path, access, disp};

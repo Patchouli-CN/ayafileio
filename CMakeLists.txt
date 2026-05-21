@@ -194,6 +194,12 @@ if(MSVC)
         NOMINMAX
     )
     target_link_libraries(_ayafileio PRIVATE ws2_32)
+
+    # Yuyuko memory tracker (MSVC)
+    if(ENABLE_ASAN)
+        target_compile_definitions(_ayafileio PRIVATE ENABLE_ASAN=1)
+        message(STATUS "Yuyuko memory tracker enabled (MSVC)")
+    endif()
 else()
     # ── GCC/Clang compiler options ─────────────────────────────────────────
 

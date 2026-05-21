@@ -1,6 +1,6 @@
 // global_thread_pool.cpp — 跨平台全局共享线程池实现
 #include "global_thread_pool.hpp"
-#include "debug_log.hpp"
+#include "utils/debug_log.hpp"
 
 GlobalThreadPool& GlobalThreadPool::instance() {
     static GlobalThreadPool pool;

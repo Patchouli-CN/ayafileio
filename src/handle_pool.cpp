@@ -73,6 +73,15 @@ std::pair<size_t, size_t> get_handle_pool_limits() {
     return {g_hpMaxPerKey.load(std::memory_order_relaxed), g_hpMaxTotal.load(std::memory_order_relaxed)};
 }
 
+void handle_pool_evict(const PoolKey &key) {
+    std::unique_lock<std::shared_mutex> lk(g_hpMtx);
+    auto it = g_hpMap.find(key);
+    if (it == g_hpMap.end()) return;
+    for (HANDLE h : it->second) CloseHandle(h);
+    g_hpTotal -= it->second.size();
+    g_hpMap.erase(it);
+}
+
 void handle_pool_drain() {
     std::unique_lock<std::shared_mutex> lk(g_hpMtx);
     for (auto &kv : g_hpMap)
