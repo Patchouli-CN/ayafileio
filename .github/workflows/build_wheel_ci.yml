@@ -1,14 +1,19 @@
 name: build wheel with ci
 
 on:
-  push:
+  workflow_run:
+    workflows: ["Build and Test"]
+    types: [completed]
     branches: [main]
+  push:
     tags: ['v*']
   workflow_dispatch:
 
 jobs:
   build:
     name: Build wheels on ${{ matrix.os }}
+    # Only run when triggered by workflow_run with success, or always for tags/manual
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

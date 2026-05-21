@@ -84,24 +84,31 @@ async def stress_ayafileio():
     )
 
 async def stress_write():
-    async def worker():
-        buf = bytes(CHUNK_SIZE)  # 每次写同样的数据
-        async with ayafileio.open(TEST_FILE + ".write", "wb") as f:
+    # Each worker gets its own temp file — avoids CREATE_ALWAYS thrashing
+    # on a single path that causes kernel resource exhaustion on Windows.
+    import tempfile
+    tmpdir = tempfile.mkdtemp(prefix="ayafileio_write_")
+
+    async def worker(idx: int):
+        buf = bytes(CHUNK_SIZE)
+        path = os.path.join(tmpdir, f"w{idx}")
+        async with ayafileio.open(path, "wb") as f:
             for _ in range(ITERATIONS_PER_TASK):
                 await f.write(buf)
 
     t = timeit.default_timer()
-    tasks = [worker() for _ in range(CONCURRENCY)]
+    tasks = [worker(i) for i in range(CONCURRENCY)]
     await asyncio.gather(*tasks)
     elapsed = timeit.default_timer() - t
     qps = TOTAL_OPS / elapsed
     print(
         f"[ayafileio write] {TOTAL_OPS} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
     )
-    # 清理
+    # 清理临时目录
+    import shutil
     try:
-        os.remove(TEST_FILE + ".write")
-    except:
+        shutil.rmtree(tmpdir)
+    except Exception:
         pass
 
 async def main():
