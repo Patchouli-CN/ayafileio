@@ -473,9 +473,14 @@ PyObject* IOUringBackend::truncate(int64_t size) {
         resolve_exc(future, g_OSError, errno, "truncate failed");
         return future;
     }
-    
+
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
+        if (static_cast<uint64_t>(size) > m_cachedFileSize) {
+            m_cachedFileSize = static_cast<uint64_t>(size);  // extending
+        } else if (static_cast<uint64_t>(size) < m_cachedFileSize) {
+            m_cachedFileSize = static_cast<uint64_t>(size);  // shrinking
+        }
         if (static_cast<uint64_t>(size) < m_filePos) {
             m_filePos = static_cast<uint64_t>(size);
         }
