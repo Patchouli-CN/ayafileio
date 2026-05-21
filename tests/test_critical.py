@@ -5,7 +5,8 @@ import os
 import io
 import sys
 import faulthandler
-faulthandler.enable() 
+import platform
+faulthandler.enable()
 
 if sys.platform == "win32":
     import io
@@ -13,7 +14,23 @@ if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-print("应用 Windows IOCP 极限调优...")
+# ── per-platform fd limit detection ───────────────────────────────────────
+def _get_fd_limit() -> int:
+    """Return a safe concurrency cap based on the platform's fd limit."""
+    if sys.platform == "win32":
+        return 50000  # Windows HANDLE limit is per-process and very high
+    try:
+        import resource
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # 80% of soft limit, minus ~50 for stdio / event loop / other overhead
+        return max(10, int(soft * 0.8) - 50)
+    except Exception:
+        return 200  # conservative fallback for macOS without resource module
+
+SAFE_CONCURRENCY = _get_fd_limit()
+
+print(f"平台: {platform.system()} | fd 安全并发上限: {SAFE_CONCURRENCY}")
+print("应用 IOCP 极限调优..." if sys.platform == "win32" else "应用调优配置...")
 ayafileio.configure(
     {
         "buffer_size": 512 * 1024,  # 提升缓冲区大小
@@ -24,9 +41,9 @@ ayafileio.configure(
 
 TEST_FILE = "test_1gb.bin"
 CHUNK_SIZE = 512  # 极小块，放大调度开销
-CONCURRENCY = 50000  # 高并发
+CONCURRENCY = min(50000, SAFE_CONCURRENCY)  # 高并发，但不超过系统 fd 上限
 ITERATIONS_PER_TASK = 10  # 每个协程循环读 10 次
-TOTAL_OPS = CONCURRENCY * ITERATIONS_PER_TASK  # 50000 次操作
+TOTAL_OPS = CONCURRENCY * ITERATIONS_PER_TASK  # 总操作数
 
 # 确保有测试文件
 if not os.path.exists(TEST_FILE):
