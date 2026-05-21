@@ -60,6 +60,10 @@ CONCURRENCY = min(50000, SAFE_CONCURRENCY)  # 高并发，但不超过系统 fd 
 ITERATIONS_PER_TASK = 10  # 每个协程循环读 10 次
 TOTAL_OPS = CONCURRENCY * ITERATIONS_PER_TASK  # 总操作数
 
+# 写测试每个 worker 创建独立文件，CI 共享磁盘上 50K 次 CreateFileW
+# 非常慢（>5 min）。CI 环境降低并发，本地保持高并发。
+WRITE_CONCURRENCY = min(CONCURRENCY, 2000) if is_ci() else CONCURRENCY
+
 # 确保有测试文件
 if not os.path.exists(TEST_FILE):
     print("正在生成 1GB 测试文件...")
@@ -96,13 +100,14 @@ async def stress_write():
             for _ in range(ITERATIONS_PER_TASK):
                 await f.write(buf)
 
+    total_ops = WRITE_CONCURRENCY * ITERATIONS_PER_TASK
     t = timeit.default_timer()
-    tasks = [worker(i) for i in range(CONCURRENCY)]
+    tasks = [worker(i) for i in range(WRITE_CONCURRENCY)]
     await asyncio.gather(*tasks)
     elapsed = timeit.default_timer() - t
-    qps = TOTAL_OPS / elapsed
+    qps = total_ops / elapsed
     print(
-        f"[ayafileio write] {TOTAL_OPS} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
+        f"[ayafileio write] {total_ops} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
     )
     # 清理临时目录
     import shutil
@@ -120,7 +125,7 @@ async def main():
 
     print("\n开始测试 ayafileio (真异步)...")
     await stress_ayafileio()
-    print("\n并发写测试")
+    print(f"\n并发写测试 (协程数: {WRITE_CONCURRENCY})")
     await stress_write()
 
     print("\n=== 测试结束 ===")
