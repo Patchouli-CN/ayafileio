@@ -102,11 +102,14 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
-    
-    if (m_appendMode) {
+
+    {
         struct stat st;
         if (fstat(m_fd, &st) == 0) {
-            m_filePos = static_cast<uint64_t>(st.st_size);
+            m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+            if (m_appendMode) {
+                m_filePos = m_cachedFileSize;
+            }
         }
     }
 }
@@ -132,15 +135,18 @@ IOUringBackend::IOUringBackend(int fd, const std::string& mode, bool owns_fd) {
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
-    
-    if (m_appendMode) {
+
+    {
         struct stat st;
         if (fstat(m_fd, &st) == 0) {
-            m_filePos = static_cast<uint64_t>(st.st_size);
+            m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+            if (m_appendMode) {
+                m_filePos = m_cachedFileSize;
+            }
         }
     }
-    
-    UR_LOG("IOUringBackend created from fd: this=%p, fd=%d, owns_fd=%d", 
+
+    UR_LOG("IOUringBackend created from fd: this=%p, fd=%d, owns_fd=%d",
            (void*)this, m_fd, owns_fd);
 }
 
@@ -206,10 +212,13 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
         int ret = io_uring_wait_cqe(&inst->ring, &cqe);
         if (ret == -EEXIST || ret == -EINTR) continue;
         if (ret < 0) break;
-        
+
         unsigned head;
         unsigned count = 0;
-        
+
+        // One GIL acquire for the entire batch — matches IOCP worker behaviour
+        PyGILState_STATE gs = PyGILState_Ensure();
+
         io_uring_for_each_cqe(&inst->ring, head, cqe) {
             IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
             if (req) {
@@ -220,7 +229,7 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
                     file->complete_error(req, static_cast<DWORD>(-cqe->res));
                 }
             } else {
-                // eventfd wakeup
+                // eventfd wakeup — no-op under GIL; poll re-add is fine
                 if (!inst->reaper_stop.load(std::memory_order_acquire)) {
                     struct io_uring_sqe* sqe = io_uring_get_sqe(&inst->ring);
                     if (sqe) {
@@ -232,8 +241,10 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
             }
             count++;
         }
-        
+
         if (count > 0) io_uring_cq_advance(&inst->ring, count);
+
+        PyGILState_Release(gs);
     }
 }
 
@@ -282,12 +293,7 @@ PyObject* IOUringBackend::read(int64_t size) {
     size_t readSize;
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
-        struct stat st;
-        if (fstat(m_fd, &st) != 0) {
-            resolve_exc(future, g_OSError, errno, "fstat failed");
-            return future;
-        }
-        int64_t rem = static_cast<int64_t>(st.st_size) - static_cast<int64_t>(m_filePos);
+        int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
         if (rem <= 0) { resolve_bytes(future, nullptr, 0); return future; }
         readSize = (size < 0) ? static_cast<size_t>(rem)
                  : std::min(static_cast<size_t>(size), static_cast<size_t>(rem));
@@ -295,7 +301,7 @@ PyObject* IOUringBackend::read(int64_t size) {
         offset = m_filePos;
         m_filePos += readSize;
     }
-    
+
     IORequest* req = make_req(readSize, future, ReqType::Read);
     m_pending.fetch_add(1, std::memory_order_relaxed);
     submit_io(req, IORING_OP_READ, m_fd, req->buf(), readSize, static_cast<off_t>(offset));
@@ -326,16 +332,14 @@ PyObject* IOUringBackend::write(Py_buffer* view) {
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         if (m_appendMode) {
-            struct stat st;
-            if (fstat(m_fd, &st) != 0) {
-                resolve_exc(future, g_OSError, errno, "fstat failed");
-                return future;
-            }
-            offset = static_cast<uint64_t>(st.st_size);
+            offset = m_cachedFileSize;
         } else {
             offset = m_filePos;
         }
         m_filePos = offset + size;
+        if (m_filePos > m_cachedFileSize) {
+            m_cachedFileSize = m_filePos;  // optimistic: assume write succeeds
+        }
     }
     
     IORequest* req = make_req(size, future, ReqType::Write);
@@ -359,12 +363,7 @@ PyObject* IOUringBackend::seek(int64_t offset, int whence) {
         if (whence == 0) m_filePos = static_cast<uint64_t>(offset);
         else if (whence == 1) m_filePos = static_cast<uint64_t>(static_cast<int64_t>(m_filePos) + offset);
         else if (whence == 2) {
-            struct stat st;
-            if (fstat(m_fd, &st) != 0) {
-                resolve_exc(future, g_OSError, errno, "fstat failed");
-                return future;
-            }
-            m_filePos = static_cast<uint64_t>(static_cast<int64_t>(st.st_size) + offset);
+            m_filePos = static_cast<uint64_t>(static_cast<int64_t>(m_cachedFileSize) + offset);
         } else { resolve_exc(future, g_ValueError, 0, "Invalid whence value"); return future; }
     }
     
@@ -513,13 +512,7 @@ PyObject* IOUringBackend::readinto(PyObject* buf) {
     size_t readSize;
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
-        struct stat st;
-        if (fstat(m_fd, &st) != 0) {
-            PyBuffer_Release(&view);
-            resolve_exc(future, g_OSError, errno, "fstat failed");
-            return future;
-        }
-        int64_t rem = static_cast<int64_t>(st.st_size) - static_cast<int64_t>(m_filePos);
+        int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
         if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject* z = PyLong_FromLong(0);
@@ -530,8 +523,7 @@ PyObject* IOUringBackend::readinto(PyObject* buf) {
         offset = m_filePos;
         m_filePos += readSize;
     }
-    
-    // ✅ 一行搞定请求构造
+
     IORequest* req = make_req_readinto(buf, &view, readSize, future);
     
     m_pending.fetch_add(1, std::memory_order_relaxed);

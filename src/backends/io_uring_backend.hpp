@@ -35,6 +35,7 @@ private:
     std::atomic<bool> m_running{false};
     std::mutex m_posMtx;
     uint64_t m_filePos = 0;
+    uint64_t m_cachedFileSize = 0;  // cached at open time, refreshed on write
     bool m_appendMode = false;
     
     // 事件循环相关
