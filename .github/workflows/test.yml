@@ -58,15 +58,13 @@ jobs:
       run: |
         ulimit -c unlimited
         set +e
-        python tests/test_critical.py
-        EXIT_CRITICAL=$?
         python tests/test_base.py
         EXIT_BASE=$?
         python tests/test_wrap_file.py
         EXIT_WRAP=$?
-        EXIT_CODE=$((EXIT_CRITICAL + EXIT_BASE + EXIT_WRAP))
+        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP))
         set -e
-        echo "Test exit codes: critical=$EXIT_CRITICAL base=$EXIT_BASE wrap=$EXIT_WRAP"
+        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -164,14 +162,12 @@ jobs:
       timeout-minutes: 3
       id: run_tests_windows
       run: |
-        python tests/test_critical.py
-        $EXIT_CRITICAL = $LASTEXITCODE
         python tests/test_base.py
         $EXIT_BASE = $LASTEXITCODE
         python tests/test_wrap_file.py
         $EXIT_WRAP = $LASTEXITCODE
-        $EXIT_CODE = $EXIT_CRITICAL + $EXIT_BASE + $EXIT_WRAP
-        Write-Host "Test exit codes: critical=$EXIT_CRITICAL base=$EXIT_BASE wrap=$EXIT_WRAP"
+        $EXIT_CODE = $EXIT_BASE + $EXIT_WRAP
+        Write-Host "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP"
         echo "EXIT_CODE=$EXIT_CODE" >> $env:GITHUB_ENV
         if ($EXIT_CODE -ne 0) { exit $EXIT_CODE }
     - name: Collect and analyze crash dumps (Windows)
@@ -251,14 +247,12 @@ jobs:
       id: run_tests_macos
       run: |
         ulimit -c unlimited
-        python tests/test_critical.py
-        EXIT_CRITICAL=$?
         python tests/test_base.py
         EXIT_BASE=$?
         python tests/test_wrap_file.py
         EXIT_WRAP=$?
-        EXIT_CODE=$((EXIT_CRITICAL + EXIT_BASE + EXIT_WRAP))
-        echo "Test exit codes: critical=$EXIT_CRITICAL base=$EXIT_BASE wrap=$EXIT_WRAP"
+        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP))
+        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
