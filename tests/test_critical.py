@@ -8,7 +8,22 @@ import faulthandler
 import platform
 faulthandler.enable()
 
-if sys.platform == "win32":
+def is_ci() -> bool:
+    """检测是否在持续集成(CI)环境中运行"""
+    ci_vars = [
+        "CI",              # 通用，GitHub Actions / Travis / GitLab CI 等都会设置
+        "GITHUB_ACTIONS",  # GitHub Actions
+        "GITLAB_CI",       # GitLab CI
+        "JENKINS_HOME",    # Jenkins
+        "TRAVIS",          # Travis CI
+        "CIRCLECI",        # CircleCI
+        "APPVEYOR",        # AppVeyor
+        "DRONE",           # Drone CI
+        "BUILD_ID",        # Jenkins / Google Cloud Build
+    ]
+    return any(os.environ.get(var) for var in ci_vars)
+
+if sys.platform == "win32" and is_ci():
     import io
 
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -68,6 +83,26 @@ async def stress_ayafileio():
         f"[ayafileio] {TOTAL_OPS} 次读取 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
     )
 
+async def stress_write():
+    async def worker():
+        buf = bytes(CHUNK_SIZE)  # 每次写同样的数据
+        async with ayafileio.open(TEST_FILE + ".write", "wb") as f:
+            for _ in range(ITERATIONS_PER_TASK):
+                await f.write(buf)
+
+    t = timeit.default_timer()
+    tasks = [worker() for _ in range(CONCURRENCY)]
+    await asyncio.gather(*tasks)
+    elapsed = timeit.default_timer() - t
+    qps = TOTAL_OPS / elapsed
+    print(
+        f"[ayafileio write] {TOTAL_OPS} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
+    )
+    # 清理
+    try:
+        os.remove(TEST_FILE + ".write")
+    except:
+        pass
 
 async def main():
     print(f"\n=== DDoS 压力测试 ===")
@@ -78,6 +113,8 @@ async def main():
 
     print("\n开始测试 ayafileio (真异步)...")
     await stress_ayafileio()
+    print("\n并发写测试")
+    await stress_write()
 
     print("\n=== 测试结束 ===")
 
