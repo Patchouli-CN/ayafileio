@@ -216,9 +216,6 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
         unsigned head;
         unsigned count = 0;
 
-        // One GIL acquire for the entire batch — matches IOCP worker behaviour
-        PyGILState_STATE gs = PyGILState_Ensure();
-
         io_uring_for_each_cqe(&inst->ring, head, cqe) {
             IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
             if (req) {
@@ -229,22 +226,30 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
                     file->complete_error(req, static_cast<DWORD>(-cqe->res));
                 }
             } else {
-                // eventfd wakeup — no-op under GIL; poll re-add is fine
-                if (!inst->reaper_stop.load(std::memory_order_acquire)) {
+                // eventfd / timeout wakeup — re-submit poll so shutdown can wake us
+                bool stop = inst->reaper_stop.load(std::memory_order_acquire);
+                if (!stop) {
                     struct io_uring_sqe* sqe = io_uring_get_sqe(&inst->ring);
                     if (sqe) {
                         io_uring_prep_poll_add(sqe, inst->event_fd, POLLIN);
                         io_uring_sqe_set_data(sqe, nullptr);
-                        io_uring_submit(&inst->ring);
+                    } else {
+                        // Ring full: fallback to a 1 s timeout so io_uring_wait_cqe
+                        // cannot block forever even if the poll SQE was lost.
+                        struct __kernel_timespec ts = {1, 0};
+                        sqe = io_uring_get_sqe(&inst->ring);
+                        if (sqe) {
+                            io_uring_prep_timeout(sqe, &ts, 0, 0);
+                            io_uring_sqe_set_data(sqe, nullptr);
+                        }
                     }
+                    io_uring_submit(&inst->ring);
                 }
             }
             count++;
         }
 
         if (count > 0) io_uring_cq_advance(&inst->ring, count);
-
-        PyGILState_Release(gs);
     }
 }
 

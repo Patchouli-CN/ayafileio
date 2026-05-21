@@ -38,3 +38,7 @@ __pycache__/
 .idea/
 
 .pytest_cache
+
+# Test binary files
+test_1gb.bin
+test_small.bin
