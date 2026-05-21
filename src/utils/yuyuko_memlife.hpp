@@ -234,28 +234,26 @@ inline bool release_malloc(void* ptr, const char* file, int line, const char* fu
 }
 
 /// 检查地址是否属于已释放的内存块（基于魂簿查找）
-inline void check_access(void* ptr, const char* file, int line, const char* func) {
-    if (!ptr) return;
+/// @return true if safe to access, false if already freed (caller MUST NOT touch it)
+inline bool check_access(void* ptr, const char* file, int line, const char* func) {
+    if (!ptr) return true;
     std::lock_guard<std::mutex> lk(g_soul_mtx);
     SoulRecord* soul = find_soul(ptr);
-    if (!soul) {
-        // 未注册的指针 — 可能是没被追踪的内存，不报错
-        return;
-    }
-    if (soul->released) {
-        uint64_t elapsed = current_time_ms() - soul->timestamp;
-        UR_DEBUG_LOG(
-            "[Yuyuko memory] USE-AFTER-FREE %p at %s:%d (%s) — "
-            "这块内存在 %llums 前已被释放！\n"
-            "  原始登记: [thread=%s id=%s] %s:%d (%s)\n"
-            "  当前线程: [thread=%s id=%s]",
-            ptr, file, line, func,
-            static_cast<unsigned long long>(elapsed),
-            soul->thread_name.c_str(), soul->thread_id.c_str(),
-            soul->file.c_str(), soul->line, soul->func.c_str(),
-            get_thread_name().c_str(), format_thread_id().c_str()
-        );
-    }
+    if (!soul) return true;  // not tracked — assume safe
+    if (!soul->released) return true;  // still alive — safe
+    uint64_t elapsed = current_time_ms() - soul->timestamp;
+    UR_DEBUG_LOG(
+        "[Yuyuko memory] USE-AFTER-FREE %p at %s:%d (%s) — "
+        "这块内存在 %llums 前已被释放！\n"
+        "  原始登记: [thread=%s id=%s] %s:%d (%s)\n"
+        "  当前线程: [thread=%s id=%s]",
+        ptr, file, line, func,
+        static_cast<unsigned long long>(elapsed),
+        soul->thread_name.c_str(), soul->thread_id.c_str(),
+        soul->file.c_str(), soul->line, soul->func.c_str(),
+        get_thread_name().c_str(), format_thread_id().c_str()
+    );
+    return false;  // caller MUST NOT touch this pointer
 }
 
 /// 查询内存块是否已被释放
@@ -331,7 +329,7 @@ inline size_t get_alive_souls() {
 // Release 模式：所有宏退化为标准操作，零开销
 
 namespace Yuyuko {
-    inline void check_access(void*, const char*, int, const char*) {}
+    inline bool check_access(void*, const char*, int, const char*) { return true; }
     inline bool is_released(void*) { return false; }
     inline size_t get_size(void*) { return 0; }
     inline size_t get_total_souls() { return 0; }

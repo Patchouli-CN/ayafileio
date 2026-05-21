@@ -32,8 +32,8 @@ IOCPContext::~IOCPContext() {
 // All Python references are released here so that the worker can delete req
 // without needing the GIL.
 void mark_sync_done(IORequest *req) {
-    Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__);
-    UR_DEBUG_LOG("mark_sync_done req=%p future=%p set_result=%p set_exception=%p isReadinto=%d",
+    if (!Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__)) return;
+    UR_DEBUG_LOG("mark_sync_done req=%pfuture=%p set_result=%p set_exception=%p isReadinto=%d",
                  (void*)req, (void*)req->future, (void*)req->set_result, (void*)req->set_exception, req->isReadinto);
     Py_XDECREF(req->set_result);
     Py_XDECREF(req->set_exception);
@@ -271,7 +271,7 @@ void IOCPContext::worker_proc(HANDLE iocp) {
 
 void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
                               DWORD bytes, DWORD err) {
-    Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__);
+    if (!Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__)) return;
     // ── Double‑delivery guard ────────────────────────────────────────────
     // Under extreme concurrency Windows IOCP may deliver the same OVERLAPPED
     // completion twice.  Atomically claim this request; if it was already
