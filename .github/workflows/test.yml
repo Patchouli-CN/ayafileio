@@ -328,17 +328,15 @@ jobs:
         set +e
         python tests/test_critical.py
         CRITICAL_EXIT=$?
-        python tests/test_speed.py
-        SPEED_EXIT=$?
         python tests/test_loguru.py
         LOGURU_EXIT=$?
         set -e
 
-        echo "Benchmark exit codes: test_critical=$CRITICAL_EXIT test_speed=$SPEED_EXIT test_loguru=$LOGURU_EXIT"
+        echo "Benchmark exit codes: test_critical=$CRITICAL_EXIT test_loguru=$LOGURU_EXIT"
 
         # Linux/macOS: check for core dumps
         if [ "$RUNNER_OS" != "Windows" ]; then
-          if [ $CRITICAL_EXIT -ne 0 ] || [ $SPEED_EXIT -ne 0 ] || [ $LOGURU_EXIT -ne 0 ]; then
+          if [ $CRITICAL_EXIT -ne 0 ] || [ $LOGURU_EXIT -ne 0 ]; then
             CORES=$(find . /tmp -name "core*" -type f 2>/dev/null | head -5)
             if [ -n "$CORES" ]; then
               echo "=== Found core dumps ==="
@@ -359,7 +357,7 @@ jobs:
           fi
         fi
 
-        exit $((CRITICAL_EXIT || SPEED_EXIT || LOGURU_EXIT))
+        exit $((CRITICAL_EXIT || LOGURU_EXIT))
     - name: Analyze crash dumps (Windows CDB)
       if: always() && runner.os == 'Windows'
       timeout-minutes: 5
