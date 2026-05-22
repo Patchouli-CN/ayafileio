@@ -113,7 +113,7 @@ bool ResultBatcher::idle_expired() const {
 
 DWORD ResultBatcher::get_timeout_ms() const {
     std::lock_guard<std::mutex> lk(m_mtx);
-    if (!m_has_pending || m_batch.empty()) return INFINITE;
+    if (!m_has_pending || m_batch.empty()) return (DWORD)-1;  // INFINITE
 
     auto elapsed = std::chrono::steady_clock::now() - m_first_push;
     long long elapsed_ms =
@@ -121,7 +121,7 @@ DWORD ResultBatcher::get_timeout_ms() const {
     long long remaining = static_cast<long long>(m_idle_timeout_ms) - elapsed_ms;
 
     if (remaining <= 0) return 0;        // already expired
-    if (remaining > INFINITE - 1) return INFINITE - 1;  // clamp
+    if (remaining > (long long)((DWORD)-1) - 1) return (DWORD)-1 - 1;  // clamp
     return static_cast<DWORD>(remaining);
 }
 
