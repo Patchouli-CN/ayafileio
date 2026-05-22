@@ -95,12 +95,13 @@ async def stress_write():
                 await f.write(buf)
 
     t = timeit.default_timer()
-    tasks = [worker() for _ in range(CONCURRENCY)]
+    tasks = [worker() for _ in range(WRITE_CONCURRENCY)]
     await asyncio.gather(*tasks)
+    total_write_ops = WRITE_CONCURRENCY * ITERATIONS_PER_TASK
     elapsed = timeit.default_timer() - t
-    qps = TOTAL_OPS / elapsed
+    qps = total_write_ops / elapsed
     print(
-        f"[ayafileio write] {TOTAL_OPS} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
+        f"[ayafileio write] {total_write_ops} 次写入 (512B) 耗时: {elapsed:.3f}s | QPS: {qps:.0f}"
     )
     # 清理
     try:
@@ -111,7 +112,7 @@ async def stress_write():
 async def main():
     print(f"\n=== DDoS 压力测试 ===")
     print(
-        f"协程数: {CONCURRENCY} | 每协程循环: {ITERATIONS_PER_TASK} 次 | 数据块: {CHUNK_SIZE}B"
+        f"协程数: {CONCURRENCY} | 每协程循环: {ITERATIONS_PER_TASK} 次 | 数据块: {CHUNK_SIZE}B | 写并发: {WRITE_CONCURRENCY}"
     )
     print(f"总操作数: {TOTAL_OPS}\n")
 

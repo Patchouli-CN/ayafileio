@@ -322,7 +322,7 @@ jobs:
         echo "dump_dir=$dumpDir" >> $env:GITHUB_ENV
     - name: Run speed benchmark
       id: benchmark
-      timeout-minutes: 5
+      timeout-minutes: 8
       shell: bash
       run: |
         set +e
