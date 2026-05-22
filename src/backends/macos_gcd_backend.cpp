@@ -568,12 +568,24 @@ void MacOSGCDBackend::close_impl() {
     
     if (m_channel) {
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl closing dispatch channel");
+        // DISPATCH_IO_STOP stops I/O immediately and schedules the cleanup
+        // handler on the channel's queue.  Because dispatch_io_close is
+        // asynchronous the system may close the underlying fd on a later GCD
+        // callback.  If the fd number is reused by a subsequent open() before
+        // that callback runs, the new file is closed instead → EBADF (errno 9).
+        // Fix: flush the queue with a barrier so the cleanup is guaranteed to
+        // have run before we return and the fd can be safely reused.
         dispatch_io_close(m_channel, DISPATCH_IO_STOP);
         m_channel = nullptr;
     }
-    
+
     if (m_queue) {
-        UR_DEBUG_LOG0("MacOSGCDBackend::close_impl releasing queue");
+        UR_DEBUG_LOG0("MacOSGCDBackend::close_impl waiting for queue drain");
+        // Release the GIL while waiting — GCD callbacks need it for complete_ok/error
+        Py_BEGIN_ALLOW_THREADS
+        dispatch_barrier_sync(m_queue, ^{});
+        Py_END_ALLOW_THREADS
+        UR_DEBUG_LOG0("MacOSGCDBackend::close_impl queue drained, releasing");
         dispatch_release(m_queue);
         m_queue = nullptr;
     }
@@ -581,9 +593,9 @@ void MacOSGCDBackend::close_impl() {
     if (m_owns_fd && m_fd != -1) {
         ::close(m_fd);
     }
-    
+
     m_fd = -1;
-    
+
     UR_DEBUG_LOG0("MacOSGCDBackend::close_impl done");
 }
 
