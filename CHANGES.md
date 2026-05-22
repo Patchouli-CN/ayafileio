@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.2] - 2026-05-22
+## [1.3.1] - 2026-05-22
 
 ### Changed
 - **Removed `LoopHandle`, unified on `ResultBatcher`**: Deleted the `LoopHandle` class and its `loop_handle.hpp`/`.cpp` files (~150 lines). `LoopHandle` and `ResultBatcher` had completely overlapping responsibilities — both batch-collect future results and dispatch them to the event loop via `call_soon_threadsafe`. After unification, all three non-Windows backends (io_uring, macOS GCD, ThreadIO) use a global batcher registry (`get_or_create_batcher`), and `IORequest::loop_handle` was renamed to `batcher`. The `ResultBatcher::push()` + `flush()` pattern replaces `LoopHandle::push()`'s immediate-schedule approach, naturally inheriting threshold batching, idle timeout, retry-on-failure, and `InvalidStateError` suppression for all backends.
