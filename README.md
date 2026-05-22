@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
-[![Version](https://img.shields.io/badge/version-1.3.1-red.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.2-red.svg)]()
 
 **当前是英文** | [**chinese version**](README_CN.md)
 
@@ -41,7 +41,7 @@ Windows leverages **IOCP** (I/O Completion Ports), Linux uses **io_uring** (kern
 | 📖 **Text & binary support** | Automatic encoding/decoding in text modes |
 | 🔧 **Unified configuration** | Runtime tunable parameters for all backends |
 | 🌍 **Cross-platform** | Windows, Linux, and macOS |
-| 🐍 **Latest Python** | Supports 3.10, 3.11, 3.12, 3.13, 3.14 |
+| 🐍 **Latest Python** | Supports 3.10–3.14, including 3.14t free-threading |
 
 ## 🛠️ Installation
 
@@ -143,6 +143,7 @@ ayafileio.reset_config()
 | `buffer_pool_max` | 512 | Max cached buffers |
 | `buffer_size` | 65536 | Buffer size in bytes |
 | `close_timeout_ms` | 4000 | Close timeout for pending I/O (ms) |
+| `iocp_batch_size` | 64 | IOCP batch completion harvest size (Windows, 1–256) |
 | `io_uring_queue_depth` | 256 | io_uring queue depth (Linux) |
 | `io_uring_sqpoll` | False | Enable SQPOLL mode (Linux) |
 
@@ -156,7 +157,8 @@ class AsyncFile(Generic[T]):
         self, path: str | Path, mode: str = "rb",
         encoding: str | None = None,
         newline: str | None = None,
-        errors: str | None = None
+        errors: str | None = None,
+        auto_flush: bool = False
     ): ...
 
     # 读取
@@ -217,6 +219,14 @@ def get_config() -> dict: ...                   # Get current configuration
 def reset_config() -> None: ...                 # Reset to defaults
 def get_backend_info() -> dict: ...             # Get backend information
 ```
+
+### File Wrapping
+
+```python
+def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]: ...
+```
+
+Wrap an existing file descriptor (int) or a file-like object with `fileno()` as an `AsyncFile`, backed by the optimal platform backend. Binary mode only.
 
 ### Pool Management
 

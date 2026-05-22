@@ -5,7 +5,10 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [1.3.1] - 2026-05-22
+## [1.3.2] - 2026-05-22
+
+### 重构
+- **移除 `LoopHandle`，统一为 `ResultBatcher`**: 删除了 `LoopHandle` 类及其 `loop_handle.hpp`/`.cpp`（约 150 行）。`LoopHandle` 和 `ResultBatcher` 职责完全重叠——都是批量收集 future 结果、通过 `call_soon_threadsafe` 投递到 event loop。统一后三个非 Windows 后端（io_uring、macOS GCD、ThreadIO）均使用全局 batcher 注册表（`get_or_create_batcher`），`IORequest` 中的 `loop_handle` 字段改为 `batcher`。`ResultBatcher` 的 `push()` + `flush()` 模式替代了 `LoopHandle::push()` 的单次调度模式，天然继承阈值批量、空闲超时、失败重试和 `InvalidStateError` 静默抑制等所有优化。
 
 ### 修复
 - **Windows Ctrl+C access violation 崩溃**: 控制台 handler (`ctrl_handler`) 从无 Python GIL 的 Windows 系统线程中调用了 `close_all_sessions()`。等待 IOCP pending 完成包的循环死锁——IOCP worker 需要 GIL 来处理 cancellation 包，但 GIL 被主线程（正在跑 event loop）持有。500ms 超时后在有 I/O 执行中的情况下调用 `CloseHandle` → 未定义行为 → access violation。修复为在 `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` 时只设置 `trigger_ctrlc()` 标记并返回 `FALSE`，让 Python 自己的 console handler 正常抛出 `KeyboardInterrupt`，使清理流程走持有 GIL 的 `submit_close()` 路径（该路径自 v1.3.0 起已在 sleep 循环中正确释放 GIL）。

@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
-[![Version](https://img.shields.io/badge/version-1.3.1-red.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.2-red.svg)]()
 
 **当前是中文** | [**english version**](README.md)
 
@@ -41,7 +41,7 @@ Windows 上借 **IOCP**（I/O 完成端口）之力，Linux 上用 **io_uring**�
 | 📖 **文本二进制支持** | 文本模式自动编解码 |
 | 🔧 **统一配置系统** | 运行时动态调整所有参数 |
 | 🌍 **跨平台** | Windows / Linux / macOS 皆可翱翔 |
-| 🐍 **最新 Python** | 支持 3.10, 3.11, 3.12, 3.13, 3.14 |
+| 🐍 **最新 Python** | 支持 3.10–3.14，含 3.14t free-threading |
 
 ## 🛠️ 安装
 
@@ -141,6 +141,7 @@ ayafileio.reset_config()
 | `buffer_pool_max` | 512 | 最大缓存缓冲区数 |
 | `buffer_size` | 65536 | 单个缓冲区大小 (字节) |
 | `close_timeout_ms` | 4000 | 关闭时等待 pending I/O 的超时 (ms) |
+| `iocp_batch_size` | 64 | IOCP 批量收割完成事件数 (Windows, 1–256) |
 | `io_uring_queue_depth` | 256 | io_uring 队列深度 (Linux) |
 | `io_uring_sqpoll` | False | 是否启用 SQPOLL 模式 (Linux) |
 
@@ -154,7 +155,8 @@ class AsyncFile(Generic[T]):
         self, path: str | Path, mode: str = "rb",
         encoding: str | None = None,
         newline: str | None = None,
-        errors: str | None = None
+        errors: str | None = None,
+        auto_flush: bool = False
     ): ...
 
     # 读取
@@ -215,6 +217,14 @@ def get_config() -> dict: ...                   # 获取当前配置
 def reset_config() -> None: ...                 # 重置为默认值
 def get_backend_info() -> dict: ...             # 获取后端信息
 ```
+
+### 文件包装
+
+```python
+def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]: ...
+```
+
+将已有的 `int` 文件描述符或带 `fileno()` 方法的对象包装为 `AsyncFile`，底层自动选择最优平台后端。仅支持二进制模式。
 
 ### 池管理
 

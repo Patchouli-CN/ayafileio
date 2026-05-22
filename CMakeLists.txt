@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ayafileio VERSION 1.3.1 LANGUAGES CXX)
+project(ayafileio VERSION 1.3.2 LANGUAGES CXX)
 
 # ════════════════════════════════════════════════════════════════════════════
 # macOS 部署目标（解决 aligned allocation 兼容性）
