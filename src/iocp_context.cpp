@@ -395,7 +395,7 @@ IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
                          size_t buf_size, size_t /*pool_max*/) {
     auto *req = TRACKED_NEW(IORequest);
     req->file        = nullptr;   // not used — completion routed via sessionId
-    req->loop_handle = nullptr;   // not used — batcher handles dispatch
+    req->batcher = nullptr;   // not used — batcher handles dispatch
     req->future      = future;
     Py_INCREF(future);
     req->set_result    = PyObject_GetAttr(future, g_str_set_result);
@@ -416,7 +416,7 @@ IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
                                   PyObject *future) {
     auto *req = TRACKED_NEW(IORequest);
     req->file        = nullptr;
-    req->loop_handle = nullptr;
+    req->batcher = nullptr;
     req->future      = future;
     Py_INCREF(future);
     req->set_result    = PyObject_GetAttr(future, g_str_set_result);

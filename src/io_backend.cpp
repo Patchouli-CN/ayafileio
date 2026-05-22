@@ -1,6 +1,7 @@
 // io_backend.cpp
 #include "io_backend.hpp"
 #include "globals.hpp"
+#include "result_batcher.hpp"
 #include "utils/debug_log.hpp"
 #include "utils/yuyuko_memlife.hpp"
 #include <cstdlib>
@@ -58,8 +59,13 @@ void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
     Py_DECREF(req->future); req->future = nullptr;
     Py_XDECREF(req->set_exception); req->set_exception = nullptr;
 
-    if (set_fn && val) req->loop_handle->push(set_fn, val);
-    else { Py_XDECREF(set_fn); Py_XDECREF(val); }
+    if (set_fn && val && req->batcher) {
+        req->batcher->push(set_fn, val);
+        req->batcher->flush();
+    } else {
+        Py_XDECREF(set_fn);
+        Py_XDECREF(val);
+    }
     TRACKED_DELETE(req);
 
     PyGILState_Release(gs);
@@ -81,8 +87,13 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
     Py_DECREF(req->future); req->future = nullptr;
     Py_XDECREF(req->set_result); req->set_result = nullptr;
 
-    if (set_fn && exc) req->loop_handle->push(set_fn, exc);
-    else { Py_XDECREF(set_fn); Py_XDECREF(exc); }
+    if (set_fn && exc && req->batcher) {
+        req->batcher->push(set_fn, exc);
+        req->batcher->flush();
+    } else {
+        Py_XDECREF(set_fn);
+        Py_XDECREF(exc);
+    }
     TRACKED_DELETE(req);
 
     PyGILState_Release(gs);
@@ -95,7 +106,7 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
 IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) {
     auto* req = TRACKED_NEW(IORequest);
     req->file = this;
-    req->loop_handle = m_loop_handle;
+    req->batcher = m_batcher;
     req->future = future;
     Py_INCREF(future);
     req->set_result = PyObject_GetAttr(future, g_str_set_result);
@@ -113,20 +124,20 @@ IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) 
 IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size_t size, PyObject* future) {
     auto* req = TRACKED_NEW(IORequest);
     req->file = this;
-    req->loop_handle = m_loop_handle;
+    req->batcher = m_batcher;
     req->future = future;
     Py_INCREF(future);
     req->set_result = PyObject_GetAttr(future, g_str_set_result);
     req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
     req->reqSize = size;
     req->type = ReqType::Read;
-    
+
     // readinto 专用设置
     req->isReadinto = true;
     req->userBuf = buf;
     Py_INCREF(buf);
     req->userBufView = *view;  // 复制 Py_buffer 结构体
-    
+
     return req;
 }
 

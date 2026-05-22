@@ -299,7 +299,7 @@ NB_MODULE(_ayafileio, m) {
     // 关闭全局共享线程池（所有后端的 fallback 都依赖它）
     GlobalThreadPool::instance().shutdown();
     // 清理全局 LoopHandle 缓存
-    clear_loop_handles();
+    clear_batchers();
 #ifdef _WIN32
     // Windows 特有：关闭所有打开文件并停止 IOCP
     close_all_files();

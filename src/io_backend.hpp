@@ -2,6 +2,7 @@
 #pragma once
 #include "globals.hpp"
 #include "io_request.hpp"
+#include "result_batcher.hpp"
 #include <string>
 #include <cstdint>
 
@@ -42,7 +43,7 @@ protected:
     static void resolve_exc(PyObject* future, PyObject* cls, DWORD err, const char* msg);
 
     // 子类需要设置的共享状态
-    LoopHandle* m_loop_handle = nullptr;
+    ResultBatcher* m_batcher = nullptr;
     std::atomic<long> m_pending{0};
     
     size_t m_cached_buffer_size = 65536;

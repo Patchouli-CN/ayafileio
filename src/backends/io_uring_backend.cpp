@@ -21,7 +21,7 @@
 
 static PyObject*   g_cachedLoop       = nullptr;
 static PyObject*   g_cachedFutureFn   = nullptr;
-static LoopHandle* g_cachedLoopHandle = nullptr;
+static ResultBatcher* g_cachedLoopHandle = nullptr;
 static std::mutex  g_cacheMtx;
 
 static void refresh_loop_cache(PyObject* loop) {
@@ -31,7 +31,7 @@ static void refresh_loop_cache(PyObject* loop) {
     g_cachedLoop = loop;
     g_cachedFutureFn = PyObject_GetAttr(loop, g_str_create_future);
     if (g_cachedFutureFn) Py_INCREF(g_cachedFutureFn);
-    g_cachedLoopHandle = get_or_create_loop_handle(loop);
+    g_cachedLoopHandle = get_or_create_batcher(loop);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -182,7 +182,7 @@ void IOUringBackend::ensure_loop_initialized() {
     Py_INCREF(m_loop);
     m_create_future = g_cachedFutureFn;
     Py_INCREF(m_create_future);
-    m_loop_handle = g_cachedLoopHandle;
+    m_batcher = g_cachedLoopHandle;
 
     auto& cfg = ayafileio::config();
     m_uring = uring_manager().acquire(

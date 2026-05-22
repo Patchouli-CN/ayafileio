@@ -85,15 +85,13 @@ void ResultBatcher::flush() {
     if (need_schedule) {
         PyObject *r = PyObject_CallFunctionObjArgs(m_call_soon_ts, m_drain_cb, nullptr);
         if (!r) {
-            PyErr_Print();
+            // call_soon_threadsafe failed — do NOT drop the batch entries;
+            // that would leave futures unresolved and hang coroutines.
+            // Reset dispatch_pending so the next flush() retries scheduling.
+            PyErr_Print();  // also clears the error indicator
             std::lock_guard<std::mutex> lk(m_mtx);
-            for (auto &e : m_batch) {
-                Py_DECREF(e.set_fn);
-                Py_DECREF(e.val);
-            }
-            m_batch.clear();
             m_dispatch_pending.store(false, std::memory_order_relaxed);
-            m_has_pending = false;
+            // leave m_batch and m_has_pending intact for retry
         } else {
             Py_DECREF(r);
         }
@@ -125,4 +123,27 @@ DWORD ResultBatcher::get_timeout_ms() const {
     if (remaining <= 0) return 0;        // already expired
     if (remaining > INFINITE - 1) return INFINITE - 1;  // clamp
     return static_cast<DWORD>(remaining);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Global batcher registry (shared by non-IOCP backends)
+// ════════════════════════════════════════════════════════════════════════════
+
+static std::mutex                                           g_batchersMtx;
+static std::vector<std::pair<PyObject*, ResultBatcher*>>    g_batchers;
+
+ResultBatcher *get_or_create_batcher(PyObject *loop) {
+    std::lock_guard<std::mutex> lk(g_batchersMtx);
+    for (auto &kv : g_batchers) {
+        if (kv.first == loop) return kv.second;
+    }
+    auto *b = new ResultBatcher(loop, 64, 5);
+    g_batchers.emplace_back(loop, b);
+    return b;
+}
+
+void clear_batchers() {
+    std::lock_guard<std::mutex> lk(g_batchersMtx);
+    for (auto &kv : g_batchers) delete kv.second;
+    g_batchers.clear();
 }

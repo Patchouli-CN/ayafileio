@@ -19,7 +19,7 @@
 
 static PyObject*   g_cachedLoop       = nullptr;
 static PyObject*   g_cachedFutureFn   = nullptr;
-static LoopHandle* g_cachedLoopHandle = nullptr;
+static ResultBatcher* g_cachedLoopHandle = nullptr;
 static std::mutex  g_cacheMtx;
 
 static void refresh_loop_cache(PyObject* loop) {
@@ -38,7 +38,7 @@ static void refresh_loop_cache(PyObject* loop) {
     } else {
         UR_DEBUG_LOG0("ThreadIOBackend: refresh_loop_cache FAILED to get create_future");
     }
-    g_cachedLoopHandle = get_or_create_loop_handle(loop);
+    g_cachedLoopHandle = get_or_create_batcher(loop);
     UR_DEBUG_LOG0("ThreadIOBackend: refresh_loop_cache done");
 }
 
@@ -182,7 +182,7 @@ void ThreadIOBackend::ensure_loop_initialized() {
         Py_INCREF(m_loop);
         m_create_future = g_cachedFutureFn;
         Py_INCREF(m_create_future);
-        m_loop_handle = g_cachedLoopHandle;
+        m_batcher = g_cachedLoopHandle;
 
         m_loop_initialized.store(true, std::memory_order_release);
         UR_DEBUG_LOG0("ThreadIOBackend::ensure_loop_initialized marked as initialized");

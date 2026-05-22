@@ -88,7 +88,7 @@ set(SOURCES
     src/bindings.cpp
     src/globals.cpp
     src/global_thread_pool.cpp
-    src/loop_handle.cpp
+    src/result_batcher.cpp
     src/file_handle.cpp
     src/io_backend.cpp
 )
@@ -101,7 +101,6 @@ if(WIN32)
         src/handle_pool.cpp
         src/iocp.cpp
         src/iocp_context.cpp
-        src/result_batcher.cpp
     )
 elseif(APPLE)
     message(STATUS "Building for macOS (Dispatch I/O Backend + Thread Pool fallback)")

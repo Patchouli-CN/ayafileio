@@ -1,7 +1,6 @@
 #pragma once
 #include "globals.hpp"
 #include "pool.hpp"
-#include "loop_handle.hpp"
 #include "utils/debug_log.hpp"
 #ifdef _WIN32
 #include <windows.h>
@@ -14,6 +13,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 class IOBackendBase;
+class ResultBatcher;
 
 enum class ReqType : uint8_t { Read, Write, Other };
 
@@ -25,26 +25,25 @@ enum class IOState : uint8_t {
     REJECTED   // I/O failed, cancelled, or already processed
 };
 
-// io_request.hpp
 struct IORequest {
 #ifdef _WIN32
     OVERLAPPED   ov{};
 #endif
-    IOBackendBase  *file       = nullptr;
-    LoopHandle  *loop_handle   = nullptr;
-    PyObject    *future        = nullptr;
-    PyObject    *set_result    = nullptr;
-    PyObject    *set_exception = nullptr;
-    PoolBuf     *poolBuf       = nullptr;
-    char        *heapBuf       = nullptr;
-    size_t       reqSize       = 0;
-    ReqType      type          = ReqType::Other;
+    IOBackendBase *file       = nullptr;
+    ResultBatcher *batcher    = nullptr;
+    PyObject      *future        = nullptr;
+    PyObject      *set_result    = nullptr;
+    PyObject      *set_exception = nullptr;
+    PoolBuf       *poolBuf       = nullptr;
+    char          *heapBuf       = nullptr;
+    size_t         reqSize       = 0;
+    ReqType        type          = ReqType::Other;
     std::atomic<IOState> state{IOState::PENDING};
 
     // readinto 专用字段
-    PyObject    *userBuf       = nullptr;  // 用户提供的缓冲区对象（owned）
-    Py_buffer    userBufView;             // 缓冲区的 Py_buffer（zeroed）
-    bool         isReadinto    = false;   // 标记：是否为 readinto 请求
+    PyObject      *userBuf       = nullptr;  // 用户提供的缓冲区对象（owned）
+    Py_buffer      userBufView;             // 缓冲区的 Py_buffer（zeroed）
+    bool           isReadinto    = false;   // 标记：是否为 readinto 请求
 
     char *buf() noexcept {
         if (isReadinto && userBufView.buf) return (char*)userBufView.buf;
