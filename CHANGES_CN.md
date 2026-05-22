@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.3.1] - 2026-05-22
+
+### 修复
+- **Windows Ctrl+C access violation 崩溃**: 控制台 handler (`ctrl_handler`) 从无 Python GIL 的 Windows 系统线程中调用了 `close_all_sessions()`。等待 IOCP pending 完成包的循环死锁——IOCP worker 需要 GIL 来处理 cancellation 包，但 GIL 被主线程（正在跑 event loop）持有。500ms 超时后在有 I/O 执行中的情况下调用 `CloseHandle` → 未定义行为 → access violation。修复为在 `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` 时只设置 `trigger_ctrlc()` 标记并返回 `FALSE`，让 Python 自己的 console handler 正常抛出 `KeyboardInterrupt`，使清理流程走持有 GIL 的 `submit_close()` 路径（该路径自 v1.3.0 起已在 sleep 循环中正确释放 GIL）。
+- **Windows Ctrl+C `InvalidStateError` 噪音**: asyncio 任务取消时，`Task.cancel()` 对内部 future 调用 `future.cancel()`，将其转为 `CANCELLED` 状态。IOCP worker 后续完成 I/O 尝试 `future.set_result()` 时抛出 `asyncio.exceptions.InvalidStateError`，被 `PyErr_Print()` 打印到 stderr。修复为在模块 globals 中缓存 `asyncio.exceptions.InvalidStateError`，并在 `ResultBatcher` 和 `LoopHandle` 的 drain 回调中静默吞掉——future 已取消意味着没有人在等结果，丢弃是正确的行为。
+- **全平台 Ctrl+C `close_impl()` GIL 死锁**: io_uring、macOS GCD、ThreadIO 三个后端的 `close_impl()` 等待循环持 GIL 调用 `std::this_thread::sleep_for()`，导致 I/O 完成回调（io_uring reaper、GCD dispatch 回调、线程池 worker）无法通过 `PyGILState_Ensure()` 获取 GIL 来完成 `complete_ok/complete_error`。虽然 `pending` 计数器在 GIL 获取之前已原子递减，等待循环能正常退出，但完成回调一直阻塞在 GIL 上。最后一次 `close()` 时 io_uring 的 `UringInstance` 析构调用 `reaper_thread.join()` 时 reaper 仍阻塞在 `PyGILState_Ensure()` → 死锁。修复为三个后端均在 sleep 周围添加 `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS`，与 v1.3.0 中 Windows `submit_close()` 的修复一致。
+
+### CI
+- **新增 Python 3.14t free-threading 构建**到 Linux、Windows、macOS 三个平台的测试矩阵中。
+
 ## [1.3.0] - 2026-05-21
 
 ### 修复

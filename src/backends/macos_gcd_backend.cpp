@@ -554,7 +554,9 @@ void MacOSGCDBackend::close_impl() {
            m_pending.load(std::memory_order_acquire) > 0) {
         UR_DEBUG_LOG("MacOSGCDBackend::close_impl waiting for pending I/O, elapsed=%d, pending=%ld",
                      elapsed, m_pending.load());
+        Py_BEGIN_ALLOW_THREADS  // Release GIL so GCD callbacks can complete
         std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
+        Py_END_ALLOW_THREADS    // Reacquire GIL
         elapsed += wait_time;
         wait_time = std::min(wait_time * 2, 32);
     }

@@ -24,7 +24,13 @@ ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
             if (e.set_fn && e.val) {
                 PyObject *r = PyObject_CallFunctionObjArgs(e.set_fn, e.val, nullptr);
                 if (!r) {
-                    PyErr_Print();
+                    // Future was cancelled (e.g. Ctrl+C cleanup) — silently discard
+                    if (g_InvalidStateError &&
+                        PyErr_ExceptionMatches(g_InvalidStateError)) {
+                        PyErr_Clear();
+                    } else {
+                        PyErr_Print();
+                    }
                 } else {
                     Py_DECREF(r);
                 }

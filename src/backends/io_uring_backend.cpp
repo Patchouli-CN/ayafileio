@@ -423,7 +423,9 @@ void IOUringBackend::close_impl() {
     int elapsed = 0, wait_time = 1;
     while (elapsed < static_cast<int>(m_cached_close_timeout_ms) &&
            m_pending.load(std::memory_order_acquire) > 0) {
+        Py_BEGIN_ALLOW_THREADS  // Release GIL so reaper can complete callbacks
         std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
+        Py_END_ALLOW_THREADS    // Reacquire GIL
         elapsed += wait_time;
         wait_time = std::min(wait_time * 2, 32);
     }

@@ -6,6 +6,7 @@ PyObject *g_FileExistsError   = nullptr;
 PyObject *g_PermissionError   = nullptr;
 PyObject *g_ValueError        = nullptr;
 PyObject *g_KeyboardInterrupt = nullptr;
+PyObject *g_InvalidStateError = nullptr;
 PyObject *g_get_running_loop  = nullptr;
 
 PyObject *g_str_set_result    = nullptr;
@@ -36,6 +37,13 @@ void cache_globals() {
 
     auto *asyncio = PyImport_ImportModule("asyncio");
     g_get_running_loop = PyObject_GetAttrString(asyncio, "get_running_loop");
+
+    auto *asyncio_exc = PyImport_ImportModule("asyncio.exceptions");
+    if (asyncio_exc) {
+        g_InvalidStateError = PyObject_GetAttrString(asyncio_exc, "InvalidStateError");
+        Py_DECREF(asyncio_exc);
+    }
+
     Py_DECREF(asyncio);
 
     g_str_set_result    = PyUnicode_InternFromString("set_result");

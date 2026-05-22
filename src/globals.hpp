@@ -30,6 +30,7 @@ extern PyObject *g_PermissionError;
 extern PyObject *g_ValueError;
 extern PyObject *g_KeyboardInterrupt;
 extern PyObject *g_FileExistsError;
+extern PyObject *g_InvalidStateError;
 extern PyObject *g_get_running_loop;
 
 extern PyObject *g_str_set_result;

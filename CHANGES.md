@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-05-22
+
+### Fixed
+- **Windows Ctrl+C access violation crash**: The console control handler (`ctrl_handler`) was calling `close_all_sessions()` from a Windows system thread that does not hold the Python GIL. The wait loop for pending IOCP completions deadlocked because the IOCP workers needed the GIL to process cancellation packets, but the GIL was held by the main thread running the event loop. After the 500ms timeout, `CloseHandle` was called with I/O still in flight → undefined behavior → access violation. Fixed by only setting `trigger_ctrlc()` in the handler for `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` and returning `FALSE` to let Python's own console handler raise `KeyboardInterrupt` normally, so cleanup proceeds through the GIL-safe `submit_close()` path (which already releases the GIL during its wait loop since v1.3.0).
+- **Windows Ctrl+C `InvalidStateError` noise**: During asyncio task cancellation, `Task.cancel()` calls `future.cancel()` on the inner future, transitioning it to `CANCELLED` state. When the IOCP worker later completed the I/O and attempted `future.set_result()`, it raised `asyncio.exceptions.InvalidStateError` which was printed to stderr via `PyErr_Print()`. Fixed by caching `asyncio.exceptions.InvalidStateError` in the module globals and silently suppressing it in both `ResultBatcher` and `LoopHandle` drain callbacks — a cancelled future means no one is waiting for the result, so discarding is correct.
+- **All platforms Ctrl+C GIL deadlock in `close_impl()`**: The `close_impl()` wait loop in the io_uring, macOS GCD, and ThreadIO backends called `std::this_thread::sleep_for()` while holding the GIL, preventing the I/O completion callbacks (io_uring reaper, GCD dispatch callbacks, thread pool workers) from acquiring the GIL via `PyGILState_Ensure()` to finish processing completions. The `pending` counter was already decremented atomically before the GIL acquire, so the wait loop would see `pending == 0` and proceed, but the completion callbacks would remain blocked. On the last `close()`, the io_uring `UringInstance` destructor called `reaper_thread.join()` while the reaper was still blocked on `PyGILState_Ensure()` → deadlock. Fixed by wrapping the sleep in `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS` in all three backends, matching the v1.3.0 fix for Windows `submit_close()`.
+
+### CI
+- **Added Python 3.14t free-threading builds** to the test matrix for Linux, Windows, and macOS.
+
 ## [1.3.0] - 2026-05-21
 
 ### Fixed
