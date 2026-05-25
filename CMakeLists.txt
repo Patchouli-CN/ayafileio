@@ -196,7 +196,7 @@ if(MSVC)
 
     # Yuyuko memory tracker (MSVC)
     if(ENABLE_ASAN)
-        target_compile_definitions(_ayafileio PRIVATE ENABLE_ASAN=1)
+        target_compile_definitions(_ayafileio PRIVATE ENABLE_ASAN=1) #  windows上ASAN支持不好，使用定制化yuyuko内存追踪器
         message(STATUS "Yuyuko memory tracker enabled (MSVC)")
     endif()
 else()
@@ -218,8 +218,7 @@ else()
         target_compile_options(_ayafileio PRIVATE
             -fsanitize=address -fno-omit-frame-pointer
         )
-        target_link_options(_ayafileio PRIVATE -fsanitize=address)
-        target_compile_definitions(_ayafileio PRIVATE AYAFILEIO_ASAN=1)
+        target_link_options(_ayafileio PRIVATE -fsanitize=address) # 使用真正的asan
         message(STATUS "AddressSanitizer enabled")
     endif()
 
