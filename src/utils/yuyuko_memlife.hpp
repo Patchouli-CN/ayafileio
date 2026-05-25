@@ -479,51 +479,59 @@ inline bool check_access(void* ptr, const char* file, int line, const char* func
 inline bool check_bounds(void* ptr, size_t size, const char* file, int line, const char* func) {
     if (!ptr) return true;
     std::lock_guard<std::mutex> lk(g_soul_mtx);
-    SoulRecord* soul = find_soul(ptr);
     
-    if (!soul) {
-        // 不是我们追踪的内存，无法检测，假设安全
-        return true;
-    }
-    
-    if (soul->released) {
-        uint64_t elapsed = current_time_ms() - soul->timestamp;
-        detail::yuyuko_logln(
-            "[Yuyuko memory] USE-AFTER-FREE %p at %s:%d (%s) — "
-            "尝试写入已释放的内存！该内存在 %llums 前被释放。",
-            ptr, file, line, func,
-            static_cast<unsigned long long>(elapsed)
-        );
-        return false;
-    }
-    
-    // 检查是否写越界
     uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-    uintptr_t alloc_start = reinterpret_cast<uintptr_t>(soul->ptr);
-    uintptr_t alloc_end = alloc_start + soul->size;
     uintptr_t write_end = start + size;
     
-    if (start < alloc_start || write_end > alloc_end) {
-        ptrdiff_t overflow;
-        const char* direction;
-        if (start < alloc_start) {
-            overflow = static_cast<ptrdiff_t>(alloc_start - start);
-            direction = "前";
-        } else {
-            overflow = static_cast<ptrdiff_t>(write_end - alloc_end);
-            direction = "后";
+    // 遍历魂簿，找到写入范围有交集的内存块
+    for (auto& kv : g_soul_book) {
+        SoulRecord& soul = kv.second;
+        uintptr_t alloc_start = reinterpret_cast<uintptr_t>(soul.ptr);
+        uintptr_t alloc_end = alloc_start + soul.size;
+        
+        // 检查写入范围是否与分配范围有交集
+        if (start < alloc_end && write_end > alloc_start) {
+            // 找到了！这块内存的写入范围跟 soul 的分配范围有重叠
+            
+            if (soul.released) {
+                uint64_t elapsed = current_time_ms() - soul.timestamp;
+                detail::yuyuko_logln(
+                    "[Yuyuko memory] USE-AFTER-FREE %p at %s:%d (%s) — "
+                    "尝试写入已释放的内存！该内存在 %llums 前被释放。",
+                    ptr, file, line, func,
+                    static_cast<unsigned long long>(elapsed)
+                );
+                return false;
+            }
+            
+            // 检查是否完全在范围内
+            if (start < alloc_start || write_end > alloc_end) {
+                ptrdiff_t overflow;
+                const char* direction;
+                if (start < alloc_start) {
+                    overflow = static_cast<ptrdiff_t>(alloc_start - start);
+                    direction = "前";
+                } else {
+                    overflow = static_cast<ptrdiff_t>(write_end - alloc_end);
+                    direction = "后";
+                }
+                detail::yuyuko_logln(
+                    "[Yuyuko memory] BUFFER OVERFLOW at %s:%d (%s) — "
+                    "写入 %zu 字节到 %p 时向%s越界 %td 字节！"
+                    "  分配大小: %zu 字节 (分配于 %s:%d)",
+                    file, line, func,
+                    size, ptr, direction, overflow,
+                    soul.size, soul.file.c_str(), soul.line
+                );
+                return false;
+            }
+            
+            // 完全在范围内，安全
+            return true;
         }
-        detail::yuyuko_logln(
-            "[Yuyuko memory] BUFFER OVERFLOW at %s:%d (%s) — "
-            "写入 %zu 字节到 %p 时向%s越界 %td 字节！"
-            "  分配大小: %zu 字节 (分配于 %s:%d)",
-            file, line, func,
-            size, ptr, direction, overflow,
-            soul->size, soul->file.c_str(), soul->line
-        );
-        return false;
     }
     
+    // 没有找到任何交集的灵魂记录，不是我们追踪的内存
     return true;
 }
 
