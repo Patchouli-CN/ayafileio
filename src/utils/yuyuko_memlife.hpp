@@ -474,6 +474,59 @@ inline bool check_access(void* ptr, const char* file, int line, const char* func
     return false;  // caller MUST NOT touch this pointer
 }
 
+/// 检查指针是否存活，以及 [ptr, ptr+size) 是否在分配范围内
+/// @return true if safe to write, false if out of bounds or already freed
+inline bool check_bounds(void* ptr, size_t size, const char* file, int line, const char* func) {
+    if (!ptr) return true;
+    std::lock_guard<std::mutex> lk(g_soul_mtx);
+    SoulRecord* soul = find_soul(ptr);
+    
+    if (!soul) {
+        // 不是我们追踪的内存，无法检测，假设安全
+        return true;
+    }
+    
+    if (soul->released) {
+        uint64_t elapsed = current_time_ms() - soul->timestamp;
+        detail::yuyuko_logln(
+            "[Yuyuko memory] USE-AFTER-FREE %p at %s:%d (%s) — "
+            "尝试写入已释放的内存！该内存在 %llums 前被释放。",
+            ptr, file, line, func,
+            static_cast<unsigned long long>(elapsed)
+        );
+        return false;
+    }
+    
+    // 检查是否写越界
+    uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+    uintptr_t alloc_start = reinterpret_cast<uintptr_t>(soul->ptr);
+    uintptr_t alloc_end = alloc_start + soul->size;
+    uintptr_t write_end = start + size;
+    
+    if (start < alloc_start || write_end > alloc_end) {
+        ptrdiff_t overflow;
+        const char* direction;
+        if (start < alloc_start) {
+            overflow = static_cast<ptrdiff_t>(alloc_start - start);
+            direction = "前";
+        } else {
+            overflow = static_cast<ptrdiff_t>(write_end - alloc_end);
+            direction = "后";
+        }
+        detail::yuyuko_logln(
+            "[Yuyuko memory] BUFFER OVERFLOW at %s:%d (%s) — "
+            "写入 %zu 字节到 %p 时向%s越界 %td 字节！"
+            "  分配大小: %zu 字节 (分配于 %s:%d)",
+            file, line, func,
+            size, ptr, direction, overflow,
+            soul->size, soul->file.c_str(), soul->line
+        );
+        return false;
+    }
+    
+    return true;
+}
+
 /// 查询内存块是否已被释放
 inline bool is_released(void* ptr) {
     std::lock_guard<std::mutex> lk(g_soul_mtx);
@@ -935,6 +988,42 @@ function sortTable(col) {
         } \
     } while(0)
 
+// ════════════════════════════════════════════════════════════════════════════
+// 带边界检查的内存操作宏
+// ════════════════════════════════════════════════════════════════════════════
+
+#define TRACKED_MEMSET(ptr, val, size) \
+    do { \
+        if (Yuyuko::check_bounds((ptr), (size), __FILE__, __LINE__, __FUNCTION__)) { \
+            std::memset((ptr), (val), (size)); \
+        } \
+    } while(0)
+
+#define TRACKED_MEMCPY(dst, src, size) \
+    do { \
+        if (Yuyuko::check_bounds((dst), (size), __FILE__, __LINE__, __FUNCTION__)) { \
+            std::memcpy((dst), (src), (size)); \
+        } \
+    } while(0)
+
+#define TRACKED_MEMMOVE(dst, src, size) \
+    do { \
+        if (Yuyuko::check_bounds((dst), (size), __FILE__, __LINE__, __FUNCTION__)) { \
+            std::memmove((dst), (src), (size)); \
+        } \
+    } while(0)
+
+#define TRACKED_STRCPY(dst, src) \
+    TRACKED_MEMCPY((dst), (src), std::strlen(src) + 1)
+
+#define TRACKED_STRNCPY(dst, src, n) \
+    do { \
+        size_t len = std::strnlen((src), (n)); \
+        if (Yuyuko::check_bounds((dst), (n), __FILE__, __LINE__, __FUNCTION__)) { \
+            std::strncpy((dst), (src), (n)); \
+        } \
+    } while(0)
+
 #else // ENABLE_ASAN 未启用
 
 // Release 模式：所有宏退化为标准操作，零开销
@@ -950,6 +1039,7 @@ namespace Yuyuko {
     inline bool release_malloc(void*, const char*, int, const char*) { return true; }
 
     inline bool check_access(void*, const char*, int, const char*) { return true; }
+    inline bool check_bounds(void*, size_t, const char*, int, const char*) { return true; }
     inline bool is_released(void*) { return false; }
     inline size_t get_size(void*) { return 0; }
     inline size_t get_total_souls() { return 0; }
@@ -965,5 +1055,11 @@ namespace Yuyuko {
 #define TRACKED_DELETE(ptr) delete ptr
 #define TRACKED_ALLOC(size) std::malloc(size)
 #define TRACKED_FREE(ptr)   std::free(ptr)
+
+#define TRACKED_MEMSET(ptr, val, size)   std::memset((ptr), (val), (size))
+#define TRACKED_MEMCPY(dst, src, size)   std::memcpy((dst), (src), (size))
+#define TRACKED_MEMMOVE(dst, src, size)  std::memmove((dst), (src), (size))
+#define TRACKED_STRCPY(dst, src)         std::strcpy((dst), (src))
+#define TRACKED_STRNCPY(dst, src, n)     std::strncpy((dst), (src), (n))
 
 #endif // ENABLE_ASAN
