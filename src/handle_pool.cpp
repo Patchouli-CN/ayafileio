@@ -18,7 +18,7 @@ static std::atomic_size_t                                           g_hpMaxTotal
 HANDLE handle_pool_acquire(const PoolKey &key) {
     std::shared_lock<std::shared_mutex> lk(g_hpMtx);
     auto it = g_hpMap.find(key);
-    if (it == g_hpMap.end() || it->second.empty()) return INVALID_HANDLE_VALUE;
+    if (it == g_hpMap.end() || it->second.empty()) [[unlikely]] return INVALID_HANDLE_VALUE;
     HANDLE h = it->second.back();
     it->second.pop_back();
     --g_hpTotal;

@@ -120,7 +120,7 @@ static LogBuffer* g_flush  = &g_buf_B;   // 后台线程刷盘
 static std::mutex g_log_mtx;             // 保护 g_active 写入 + 指针交换
 
 // 后台线程控制
-static std::thread g_log_thread;
+static std::jthread g_log_thread;
 static std::atomic<bool> g_log_stop{false};
 static std::condition_variable g_log_cv;
 static std::mutex g_log_cv_mtx;
@@ -193,7 +193,7 @@ inline void start_async_log(const char* filepath = "yuyuko_memory.log") {
     
     detail::g_async_mode = true;
     detail::g_log_stop.store(false);
-    detail::g_log_thread = std::thread(detail::log_worker);
+    detail::g_log_thread = std::jthread(detail::log_worker);
     
     // 写一条启动日志
     char buf[detail::ASYNC_BUF_CAPACITY];
@@ -205,19 +205,17 @@ inline void start_async_log(const char* filepath = "yuyuko_memory.log") {
 /// 停止异步日志线程，等待所有日志落盘
 inline void stop_async_log() {
     if (!detail::g_async_mode) return;
-    
+
     // 写一条停止日志
     char buf[detail::ASYNC_BUF_CAPACITY];
     int len = snprintf(buf, sizeof(buf), "[Yuyuko] 异步日志引擎停止\n");
     detail::push_log(buf, static_cast<size_t>(len));
-    
+
     detail::g_log_stop.store(true);
     detail::g_log_cv.notify_one();
-    
-    if (detail::g_log_thread.joinable()) {
-        detail::g_log_thread.join();
-    }
-    
+
+    detail::g_log_thread = std::jthread{};  // jthread destructor auto-joins via reset
+
     detail::g_async_mode = false;
 }
 

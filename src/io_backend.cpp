@@ -36,17 +36,18 @@ void IOBackendBase::resolve_exc(PyObject* future, PyObject* cls, DWORD err, cons
 
 void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
     m_pending.fetch_sub(1, std::memory_order_release);
+    m_close_wake.release();
     PyGILState_STATE gs = PyGILState_Ensure();
 
     PyObject* val;
     switch (req->type) {
-        case ReqType::Read:
-            if (req->isReadinto)
+        case ReqType::Read:  [[likely]]
+            if (req->isReadinto) [[unlikely]]
                 val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
             else
                 val = PyBytes_FromStringAndSize(req->buf(), static_cast<Py_ssize_t>(bytes));
             break;
-        case ReqType::Write:
+        case ReqType::Write: [[likely]]
             val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
             break;
         default:
@@ -73,6 +74,7 @@ void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
 
 void IOBackendBase::complete_error(IORequest* req, DWORD err) {
     m_pending.fetch_sub(1, std::memory_order_release);
+    m_close_wake.release();
     PyGILState_STATE gs = PyGILState_Ensure();
 
     PyObject* exc_class;
@@ -147,6 +149,7 @@ IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size
 
 void IOBackendBase::complete_error_inline(IORequest* req, DWORD err) {
     m_pending.fetch_sub(1, std::memory_order_relaxed);
+    m_close_wake.release();
     PyObject* exc_class;
 #ifdef _WIN32
     exc_class = map_win_error(static_cast<int>(err));

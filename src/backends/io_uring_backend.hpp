@@ -5,6 +5,7 @@
 #include "../io_backend.hpp"
 #include "utils/debug_log.hpp"
 #include "uring_pool.hpp"
+#include <span>
 #include <string>
 #include <atomic>
 #include <mutex>
@@ -48,7 +49,7 @@ private:
     std::shared_ptr<UringInstance> m_uring;
     
     void ensure_loop_initialized();
-    void submit_io(IORequest* req, int op, int fd, const void* buf, size_t len, off_t offset);
+    void submit_io(IORequest* req, int op, int fd, std::span<const std::byte> data, off_t offset);
 };
 
 #endif // HAVE_IO_URING

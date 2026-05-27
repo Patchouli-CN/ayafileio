@@ -12,13 +12,15 @@ GlobalThreadPool::~GlobalThreadPool() {
 }
 
 void GlobalThreadPool::ensure_started(unsigned num_workers) {
-    if (!m_workers.empty()) return;
+    if (m_running_workers.load(std::memory_order_acquire) > 0) return;
     std::lock_guard<std::mutex> lk(m_mtx);
     if (!m_workers.empty()) return;
     m_workers.reserve(num_workers);
     for (unsigned i = 0; i < num_workers; ++i) {
-        m_workers.emplace_back(&GlobalThreadPool::worker_loop, this);
+        m_workers.emplace_back(
+            [this](std::stop_token st) { worker_loop(std::move(st)); });
     }
+    m_running_workers.store(num_workers, std::memory_order_release);
     UR_DEBUG_LOG("GlobalThreadPool: started %u workers", num_workers);
 }
 
@@ -31,33 +33,28 @@ void GlobalThreadPool::enqueue(std::function<void()> task) {
 }
 
 void GlobalThreadPool::shutdown() {
-    {
-        std::lock_guard<std::mutex> lk(m_mtx);
-        if (m_stop.load(std::memory_order_acquire)) return;
-        m_stop.store(true, std::memory_order_release);
-    }
+    unsigned n = m_running_workers.exchange(0, std::memory_order_acq_rel);
+    if (n == 0) return;
     m_cv.notify_all();
     for (auto& t : m_workers) {
-        if (t.joinable()) t.join();
+        t.request_stop();
     }
-    m_workers.clear();
+    m_workers.clear(); // jthread destructor auto-joins
     UR_DEBUG_LOG0("GlobalThreadPool: all workers shut down");
 }
 
-void GlobalThreadPool::worker_loop() {
+void GlobalThreadPool::worker_loop(std::stop_token st) {
     while (true) {
         std::function<void()> task;
         {
             std::unique_lock<std::mutex> lk(m_mtx);
-            m_cv.wait(lk, [this] {
-                return m_stop.load(std::memory_order_acquire) || !m_tasks.empty();
-            });
-            if (m_stop.load(std::memory_order_acquire) && m_tasks.empty()) {
-                return;
-            }
+            m_cv.wait_for(lk, std::chrono::milliseconds(50),
+                          [this, &st] { return !m_tasks.empty() || st.stop_requested(); });
+            if (m_tasks.empty() && st.stop_requested()) return;
+            if (m_tasks.empty()) continue;
             task = std::move(m_tasks.front());
             m_tasks.pop();
         }
-        if (task) task();
+        if (task) [[likely]] task();
     }
 }

@@ -257,22 +257,23 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
 // I/O 提交
 // ════════════════════════════════════════════════════════════════════════════
 
-void IOUringBackend::submit_io(IORequest* req, int op, int fd, 
-                                const void* buf, size_t len, off_t offset) {
+void IOUringBackend::submit_io(IORequest* req, int op, int fd,
+                                std::span<const std::byte> data, off_t offset) {
     if (!m_uring) { complete_error(req, EINVAL); return; }
-    
+
     struct io_uring_sqe* sqe = io_uring_get_sqe(&m_uring->ring);
     if (!sqe) { complete_error(req, EBUSY); return; }
-    
-    void* wbuf = const_cast<void*>(buf);
-    if (op == IORING_OP_READ)
-        io_uring_prep_read(sqe, fd, wbuf, static_cast<unsigned>(len), offset);
-    else if (op == IORING_OP_WRITE)
-        io_uring_prep_write(sqe, fd, wbuf, static_cast<unsigned>(len), offset);
+
+    void* wbuf = const_cast<std::byte*>(data.data());
+    auto len = static_cast<unsigned>(data.size());
+    if (op == IORING_OP_READ) [[likely]]
+        io_uring_prep_read(sqe, fd, wbuf, len, offset);
+    else if (op == IORING_OP_WRITE) [[likely]]
+        io_uring_prep_write(sqe, fd, wbuf, len, offset);
     else if (op == IORING_OP_FSYNC)
         io_uring_prep_fsync(sqe, fd, 0);
     else { complete_error(req, EINVAL); return; }
-    
+
     io_uring_sqe_set_data(sqe, req);
     io_uring_submit(&m_uring->ring);
 }
@@ -283,51 +284,52 @@ void IOUringBackend::submit_io(IORequest* req, int op, int fd,
 
 PyObject* IOUringBackend::read(int64_t size) {
     try { ensure_loop_initialized(); }
-    catch (const std::runtime_error&) {
+    catch (const std::runtime_error&) [[unlikely]] {
         return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
-    
+
     PyObject* future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    
+    if (!future) [[unlikely]] return nullptr;
+
     PyObject* closed_future = check_closed_and_return_future(
         m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
-    if (closed_future) { Py_DECREF(future); return closed_future; }
-    
+    if (closed_future) [[unlikely]] { Py_DECREF(future); return closed_future; }
+
     uint64_t offset;
     size_t readSize;
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
-        if (rem <= 0) { resolve_bytes(future, nullptr, 0); return future; }
+        if (rem <= 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
         readSize = (size < 0) ? static_cast<size_t>(rem)
                  : std::min(static_cast<size_t>(size), static_cast<size_t>(rem));
-        if (readSize == 0) { resolve_bytes(future, nullptr, 0); return future; }
+        if (readSize == 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
         offset = m_filePos;
         m_filePos += readSize;
     }
 
     IORequest* req = make_req(readSize, future, ReqType::Read);
     m_pending.fetch_add(1, std::memory_order_relaxed);
-    submit_io(req, IORING_OP_READ, m_fd, req->buf(), readSize, static_cast<off_t>(offset));
+    submit_io(req, IORING_OP_READ, m_fd,
+              std::as_bytes(std::span{req->buf(), readSize}), static_cast<off_t>(offset));
     return future;
 }
 
 PyObject* IOUringBackend::write(Py_buffer* view) {
     try { ensure_loop_initialized(); }
-    catch (const std::runtime_error&) {
+    catch (const std::runtime_error&) [[unlikely]] {
         return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
-    
+
     size_t size = static_cast<size_t>(view->len);
     PyObject* future = PyObject_CallNoArgs(m_create_future);
-    if (!future) return nullptr;
-    
+    if (!future) [[unlikely]] return nullptr;
+
     PyObject* closed_future = check_closed_and_return_future(
         m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
-    if (closed_future) { Py_DECREF(future); return closed_future; }
-    
-    if (size == 0) {
+    if (closed_future) [[unlikely]] { Py_DECREF(future); return closed_future; }
+
+    if (size == 0) [[unlikely]] {
         PyObject* z = PyLong_FromLong(0);
         resolve_ok(future, z); Py_DECREF(z);
         return future;
@@ -350,7 +352,8 @@ PyObject* IOUringBackend::write(Py_buffer* view) {
     IORequest* req = make_req(size, future, ReqType::Write);
     std::memcpy(req->buf(), view->buf, size);
     m_pending.fetch_add(1, std::memory_order_relaxed);
-    submit_io(req, IORING_OP_WRITE, m_fd, req->buf(), size, static_cast<off_t>(offset));
+    submit_io(req, IORING_OP_WRITE, m_fd,
+              std::as_bytes(std::span{req->buf(), size}), static_cast<off_t>(offset));
     return future;
 }
 
@@ -393,7 +396,7 @@ PyObject* IOUringBackend::flush() {
     
     IORequest* req = make_req(0, future, ReqType::Other);
     m_pending.fetch_add(1, std::memory_order_relaxed);
-    submit_io(req, IORING_OP_FSYNC, m_fd, nullptr, 0, 0);
+    submit_io(req, IORING_OP_FSYNC, m_fd, std::span<const std::byte>{}, 0);
     return future;
 }
 
@@ -419,15 +422,20 @@ PyObject* IOUringBackend::close() {
 void IOUringBackend::close_impl() {
     bool expected = true;
     if (!m_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) return;
-    
-    int elapsed = 0, wait_time = 1;
-    while (elapsed < static_cast<int>(m_cached_close_timeout_ms) &&
-           m_pending.load(std::memory_order_acquire) > 0) {
-        Py_BEGIN_ALLOW_THREADS  // Release GIL so reaper can complete callbacks
-        std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
-        Py_END_ALLOW_THREADS    // Reacquire GIL
-        elapsed += wait_time;
-        wait_time = std::min(wait_time * 2, 32);
+
+    auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(m_cached_close_timeout_ms);
+
+    while (true) {
+        long pending = m_pending.load(std::memory_order_acquire);
+        if (pending == 0) break;
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) break;
+        auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        if (remain.count() == 0) break;
+        Py_BEGIN_ALLOW_THREADS
+        m_close_wake.try_acquire_for(std::chrono::milliseconds(remain.count()));
+        Py_END_ALLOW_THREADS
     }
     
     if (m_uring) m_uring.reset();
@@ -537,9 +545,12 @@ PyObject* IOUringBackend::readinto(PyObject* buf) {
     }
 
     IORequest* req = make_req_readinto(buf, &view, readSize, future);
-    
+
     m_pending.fetch_add(1, std::memory_order_relaxed);
-    submit_io(req, IORING_OP_READ, m_fd, view.buf, readSize, static_cast<off_t>(offset));
+    submit_io(req, IORING_OP_READ, m_fd,
+              std::as_bytes(std::span{
+                  static_cast<const char*>(view.buf), readSize}),
+              static_cast<off_t>(offset));
     return future;
 }
 

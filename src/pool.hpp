@@ -38,14 +38,14 @@ public:
 
         // 找到足够大的最小缓冲区（使用 map 的 lower_bound）
         auto it = m_pools.lower_bound(required_size);
-        if (it != m_pools.end() && !it->second.empty()) {
+        if (it != m_pools.end() && !it->second.empty()) [[likely]] {
             PoolBuf* buf = it->second.back();
             it->second.pop_back();
             m_total--;
             return buf;
         }
 
-        // 没有合适的，分配新的
+        // 没有合适的，分配新的 — 冷路径
         return new PoolBuf(required_size);
     }
 

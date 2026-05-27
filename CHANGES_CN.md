@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.0] - 2026-05-27
+
+### 变更
+- **C++ 标准从 C++17 升级至 C++20**: 全面现代化代码库，利用 C++20 特性提升性能与安全性。最低编译器要求提升为 GCC 10+ / Clang 10+ / MSVC 19.28+（Visual Studio 2019 16.8+）。
+- **`counting_semaphore` 优化 `close_impl()` 等待循环**: io_uring 后端的 `close_impl()` 原先使用指数退避的 `sleep_for()` 轮询（1ms 起步）等待 pending I/O 完成。替换为 `std::counting_semaphore::try_acquire_for()` — `complete_ok()`/`complete_error()` 在基类中自动释放信号量，最后一批 I/O 完成时 `close()` 立即唤醒，无需等待下一次 sleep 周期。最坏情况下 close 延迟从 ~1ms 降至 ~10μs。
+- **`[[likely]]` / `[[unlikely]]` 分支预测提示**: 在关键热路径上添加 C++20 标准分支预测属性：`complete_ok()` 的 Read/Write 分支、`IOUringBackend::read()`/`write()` 的提前退出路径（已关闭、EOF、零大小）、`BufferPool::acquire()` 缓存命中、`HandlePool::acquire()` 缓存未命中。CPU 分支预测器在这些高频路径上不再预测错误，减少流水线冲刷。
+- **`std::jthread` 线程生命周期管理**: `GlobalThreadPool` 与幽幽子异步日志引擎中的 `std::thread` 替换为 `std::jthread`。`jthread` 在析构时自动 RAII join，并内置 `std::stop_token` 支持，简化了关闭逻辑，消除了手动 `join()` 调用。
+- **`std::span` 缓冲区传递**: io_uring 后端的 `submit_io()` 现接受 `std::span<const std::byte>` 替代分离的 `(const void*, size_t)` 参数。零开销抽象——编译器生成完全相同的机器码——但可在编译期消除缓冲区/长度不匹配的 bug。
+
+### 修复
+- **`global_thread_pool` 关闭竞态**: 将 `std::atomic<bool> m_stop` 替换为 `std::atomic<unsigned> m_running_workers`，消除了 `ensure_started()` 与 `shutdown()` 之间的 TOCTOU 竞态。
+
 ## [1.3.1] - 2026-05-22
 
 ### 重构

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ayafileio VERSION 1.3.1 LANGUAGES CXX)
+project(ayafileio VERSION 1.4.0 LANGUAGES CXX)
 
 # ════════════════════════════════════════════════════════════════════════════
 # macOS 部署目标（解决 aligned allocation 兼容性）
@@ -9,7 +9,7 @@ if(APPLE)
 endif()
 
 # 设置 C++ 标准
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

@@ -3,6 +3,7 @@
 #include "globals.hpp"
 #include "io_request.hpp"
 #include "result_batcher.hpp"
+#include <semaphore>
 #include <string>
 #include <cstdint>
 
@@ -45,6 +46,7 @@ protected:
     // 子类需要设置的共享状态
     ResultBatcher* m_batcher = nullptr;
     std::atomic<long> m_pending{0};
+    std::counting_semaphore<INT32_MAX> m_close_wake{0};
     
     size_t m_cached_buffer_size = 65536;
     size_t m_cached_buffer_pool_max = 512;
