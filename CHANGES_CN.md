@@ -16,6 +16,12 @@
 
 ### 修复
 - **`global_thread_pool` 关闭竞态**: 将 `std::atomic<bool> m_stop` 替换为 `std::atomic<unsigned> m_running_workers`，消除了 `ensure_started()` 与 `shutdown()` 之间的 TOCTOU 竞态。
+- **GCC 11 对 `[[unlikely]]` catch 子句编译失败**: GCC 11 不支持 `[[unlikely]]` 属性在 `catch` 子句上（GCC 12 起支持）。移除了 io_uring 后端 `catch (const std::runtime_error&)` 处的属性，恢复对 GCC 11 的兼容。
+- **AppleClang 15 缺少 `std::jthread` / `<stop_token>`**: AppleClang 15（Xcode 15）附带的 libc++ 未实现 `<stop_token>` 和 `std::jthread`。在 `GlobalThreadPool` 和幽幽子异步日志引擎中添加 `__cpp_lib_jthread` 特性检测宏，特性不可用时自动回退到 `std::thread` + `std::atomic<bool>`。
+
+### CI
+- **升级 CI 运行镜像**: Linux `ubuntu-22.04` → `ubuntu-24.04`（GCC 11 → GCC 14），macOS `macos-14` → `macos-15`（AppleClang 15 → 16）。
+- **纯文档变更跳过 CI**: 在 `test.yml` 的 push/PR 触发器中添加 `paths-ignore`，仅修改文档文件（`**/*.md`、LICENSE、.gitignore、MANIFEST.in）时跳过 Build and Test 流水线。`build_wheel_ci.yml` 和 `release.yml` 通过 `workflow_run` 链式触发 test 成功，因此会被自动一并跳过。
 
 ## [1.3.1] - 2026-05-22
 

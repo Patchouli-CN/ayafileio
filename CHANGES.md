@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **`global_thread_pool` shutdown race**: Replaced `std::atomic<bool> m_stop` with `std::atomic<unsigned> m_running_workers`, eliminating a TOCTOU race between `ensure_started()` and `shutdown()`.
+- **GCC 11 compilation error on `[[unlikely]]` catch clause**: GCC 11 does not support the `[[unlikely]]` attribute on `catch` clauses (supported since GCC 12). Removed the attribute from the `catch (const std::runtime_error&)` sites in the io_uring backend to restore compatibility with GCC 11.
+- **`std::jthread` / `<stop_token>` unavailable on AppleClang 15**: AppleClang 15 (Xcode 15) ships libc++ without `<stop_token>` and `std::jthread` support. Added `__cpp_lib_jthread` feature test macro guards in `GlobalThreadPool` and Yuyuko's async log engine, with automatic fallback to `std::thread` + `std::atomic<bool>` when the feature is unavailable.
+
+### CI
+- **Upgraded CI runner images**: Linux `ubuntu-22.04` → `ubuntu-24.04` (GCC 11 → GCC 14), macOS `macos-14` → `macos-15` (AppleClang 15 → 16).
+- **Skip CI on docs-only changes**: Added `paths-ignore` to push/PR triggers in `test.yml` to skip the Build and Test pipeline when only documentation files (`**/*.md`, LICENSE, .gitignore, MANIFEST.in) are changed. Since `build_wheel_ci.yml` and `release.yml` chain off `workflow_run` on test success, they are automatically skipped too.
 
 ## [1.3.1] - 2026-05-22
 
