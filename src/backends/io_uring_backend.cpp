@@ -284,7 +284,7 @@ void IOUringBackend::submit_io(IORequest* req, int op, int fd,
 
 PyObject* IOUringBackend::read(int64_t size) {
     try { ensure_loop_initialized(); }
-    catch (const std::runtime_error&) [[unlikely]] {
+    catch (const std::runtime_error&) {
         return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
 
@@ -317,7 +317,7 @@ PyObject* IOUringBackend::read(int64_t size) {
 
 PyObject* IOUringBackend::write(Py_buffer* view) {
     try { ensure_loop_initialized(); }
-    catch (const std::runtime_error&) [[unlikely]] {
+    catch (const std::runtime_error&) {
         return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
 

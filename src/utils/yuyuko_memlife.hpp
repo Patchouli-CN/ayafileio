@@ -120,7 +120,11 @@ static LogBuffer* g_flush  = &g_buf_B;   // 后台线程刷盘
 static std::mutex g_log_mtx;             // 保护 g_active 写入 + 指针交换
 
 // 后台线程控制
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
 static std::jthread g_log_thread;
+#else
+static std::thread g_log_thread;
+#endif
 static std::atomic<bool> g_log_stop{false};
 static std::condition_variable g_log_cv;
 static std::mutex g_log_cv_mtx;
@@ -193,7 +197,11 @@ inline void start_async_log(const char* filepath = "yuyuko_memory.log") {
     
     detail::g_async_mode = true;
     detail::g_log_stop.store(false);
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     detail::g_log_thread = std::jthread(detail::log_worker);
+#else
+    detail::g_log_thread = std::thread(detail::log_worker);
+#endif
     
     // 写一条启动日志
     char buf[detail::ASYNC_BUF_CAPACITY];
@@ -214,7 +222,11 @@ inline void stop_async_log() {
     detail::g_log_stop.store(true);
     detail::g_log_cv.notify_one();
 
-    detail::g_log_thread = std::jthread{};  // jthread destructor auto-joins via reset
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    detail::g_log_thread = std::jthread{};  // jthread dtor auto-joins
+#else
+    if (detail::g_log_thread.joinable()) detail::g_log_thread.join();
+#endif
 
     detail::g_async_mode = false;
 }

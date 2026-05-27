@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-22.04, windows-2025, macos-latest, macos-15-intel]
+        os: [ubuntu-24.04, windows-2025, macos-latest, macos-15-intel]
       fail-fast: false
     env:
       CIBW_ARCHS_LINUX: "x86_64 aarch64 riscv64"

@@ -10,7 +10,7 @@ on:
 jobs:
   test-linux:
     name: "Linux (Python ${{ matrix.python-version }})"
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -208,7 +208,7 @@ jobs:
 
   test-macos:
     name: "macOS (Python ${{ matrix.python-version }})"
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -278,7 +278,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-14]
+        os: [ubuntu-24.04, windows-2022, macos-15]
         python-version: ["3.14"]
     steps:
     - uses: actions/checkout@v6.0.2
