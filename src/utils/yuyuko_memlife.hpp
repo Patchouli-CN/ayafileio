@@ -1,10 +1,15 @@
 // yuyuko_memlife.hpp — 幽幽子内存生命周期追踪系统
 //
+// 编译：
+//   定义 ENABLE_ASAN → 全功能追踪。
+//   不定义 ENABLE_ASAN → 所有宏/函数变为零开销 stub。
+//
 // 特性：
 //   - 追踪 new/delete 和 malloc/free 的完整生命周期
 //   - Double Free 检测与拦截
 //   - 多线程 Use-After-Free 检测
 //   - 分配器不匹配检测（new vs malloc）
+//   - CRC-32C 硬件加速内存完整性校验 (SSE4.2 / ARMv8-CRC, μs 级精度)
 //   - 内存泄漏检测（leak_check）
 //   - 双缓冲异步日志：业务线程纳秒级返回，后台线程批量写文件
 //
@@ -14,7 +19,18 @@
 //   TRACKED_DELETE(ptr)            → 释放追踪对象
 //   TRACKED_FREE(ptr)              → 释放追踪内存块
 //   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放（基于魂簿）
+//   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测
+//   Yuyuko::mem_snapshot(ptr)      → 保存内存 CRC 快照（4KB 粒度）
+//   Yuyuko::mem_snapshot_ex(ptr,N) → 保存内存 CRC 快照（自定义 N 字节粒度）
+//   Yuyuko::mem_check(ptr)         → 校验 CRC 快照，检测内存损坏
+//   Yuyuko::mem_check_ex(ptr,N)    → 校验 CRC 快照（自定义粒度）
 //   Yuyuko::leak_check()           → 程序退出时检测泄漏
+//
+// RAII 守卫：
+//   MEM_GUARD(ptr)                 → 默认 4KB 粒度
+//   MEM_GUARD_TAG(ptr, "tag")      → 自定义 tag
+//   MEM_GUARD_EX(ptr, 精度)          → 指定 CRC 分块字节数
+//   MEM_GUARD_EX_TAG(ptr, 精度, tag) → 自定义粒度 + tag
 //
 // 异步日志：
 //   Yuyuko::start_async_log("yuyuko.log")  → 启动异步日志线程
@@ -31,6 +47,7 @@
 #include <atomic>
 #include <mutex>
 #include <shared_mutex>
+#include <set>
 #include <condition_variable>
 #ifdef _WIN32
 #include <windows.h>
@@ -40,11 +57,11 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef ENABLE_ASAN
+// ════════════════════════════════════════════════════════════════════════════
+// 幽幽子命名空间
+// ════════════════════════════════════════════════════════════════════════════
 
-// ════════════════════════════════════════════════════════════════════════════
-// 幽幽子命名空间 (Debug — 全功能追踪)
-// ════════════════════════════════════════════════════════════════════════════
+#ifdef ENABLE_ASAN
 
 namespace Yuyuko {
 
@@ -85,12 +102,31 @@ inline const char* cached_thread_name() {
     return buf;
 }
 
-/// 获取当前时间戳（毫秒级，相对于启动时间）
-static uint64_t current_time_ms() {
+/// 获取当前时间戳（微秒级，相对于启动时间）
+static uint64_t current_time_us() {
     using namespace std::chrono;
     return static_cast<uint64_t>(
-        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count()
+        duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count()
     );
+}
+
+/// 自动单位换算：微秒 → 人类可读时间字符串
+/// @return 指向内部 thread_local 缓冲区的指针（下次调用会覆盖）
+inline const char* format_duration_us(uint64_t us) {
+    thread_local char buf[32];
+    if (us < 1000)
+        snprintf(buf, sizeof(buf), "%lluμs", (unsigned long long)us);
+    else if (us < 1000000)
+        snprintf(buf, sizeof(buf), "%.2fms", us / 1000.0);
+    else if (us < 60000000)
+        snprintf(buf, sizeof(buf), "%.2fs", us / 1000000.0);
+    else {
+        auto min = us / 60000000;
+        auto sec = (us % 60000000) / 1000000;
+        snprintf(buf, sizeof(buf), "%llumin%llus",
+                 (unsigned long long)min, (unsigned long long)sec);
+    }
+    return buf;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -213,19 +249,21 @@ inline void start_async_log(const char* filepath = "yuyuko_memory.log") {
 /// 停止异步日志线程，等待所有日志落盘
 inline void stop_async_log() {
     if (!detail::g_async_mode) return;
-
+    
     // 写一条停止日志
     char buf[detail::ASYNC_BUF_CAPACITY];
     int len = snprintf(buf, sizeof(buf), "[Yuyuko] 异步日志引擎停止\n");
     detail::push_log(buf, static_cast<size_t>(len));
-
+    
     detail::g_log_stop.store(true);
     detail::g_log_cv.notify_one();
-
+    
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     detail::g_log_thread = std::jthread{};  // jthread dtor auto-joins
 #else
-    if (detail::g_log_thread.joinable()) detail::g_log_thread.join();
+    if (detail::g_log_thread.joinable()) {
+        detail::g_log_thread.join();
+    }
 #endif
 
     detail::g_async_mode = false;
@@ -271,7 +309,7 @@ enum class AllocSource : uint8_t {
 struct SoulRecord {
     void*    ptr;
     size_t   size;
-    uint64_t timestamp;       // 分配/最后操作的时间戳 (ms)
+    uint64_t timestamp;       // 分配/最后操作的时间戳 (μs)
     uint16_t line;            // 行号
     uint8_t  source;          // AllocSource
     uint8_t  released;        // 0=alive, 1=freed
@@ -285,6 +323,8 @@ static_assert(sizeof(SoulRecord) <= 256, "SoulRecord too large");
 /// 全局魂簿：记录所有被追踪的内存块
 static std::shared_mutex g_soul_mtx;
 static std::unordered_map<void*, SoulRecord> g_soul_book;
+/// 按地址排序的索引 — check_bounds 二分查找用 (O(log n) vs 旧版 O(n))
+static std::set<uintptr_t> g_soul_range;
 static bool _soul_book_init = []{ g_soul_book.reserve(65536); return true; }();
 
 /// 在魂簿中查找记录（调用方需持有 g_soul_mtx）
@@ -309,7 +349,7 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
     SoulRecord sr;
     sr.ptr=ptr; sr.size=size;
     sr.source=static_cast<uint8_t>(source);
-    sr.timestamp=current_time_ms();
+    sr.timestamp=current_time_us();
     sr.line=static_cast<uint16_t>(line);
     sr.released=0;
     str_copy(sr.file,sizeof(sr.file),file);
@@ -317,7 +357,7 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
     str_copy(sr.thread_name,sizeof(sr.thread_name),cached_thread_name());
     str_copy(sr.thread_id,sizeof(sr.thread_id),cached_thread_id());
 
-    { std::unique_lock<std::shared_mutex> lk(g_soul_mtx); g_soul_book[ptr] = sr; }
+    { std::unique_lock<std::shared_mutex> lk(g_soul_mtx); g_soul_book[ptr] = sr; g_soul_range.insert(reinterpret_cast<uintptr_t>(ptr)); }
 
     detail::yuyuko_logln(
         "[Yuyuko] ALLOC %p size=%zu src=%s @ %s:%d %s() [%s/%s]",
@@ -333,7 +373,7 @@ static bool release_soul_impl(void* ptr, AllocSource source,
     if (!ptr) return false;
     const char* tn = cached_thread_name();
     const char* ti = cached_thread_id();
-    uint64_t now = current_time_ms();
+    uint64_t now = current_time_us();
     bool should_free = true;
 
     {
@@ -347,16 +387,17 @@ static bool release_soul_impl(void* ptr, AllocSource source,
                 ptr,(s->source==0)?"new":"malloc",
                 (source==AllocSource::OPERATOR_NEW)?"new":"malloc",file,line,tn,ti);
         } else if (s->released) {
-            detail::yuyuko_logln("[Yuyuko] DOUBLE-FREE %p freed %llums ago\n"
+            detail::yuyuko_logln("[Yuyuko] DOUBLE-FREE %p freed %s ago\n"
                 "  1st: [%s/%s] %s:%d %s()\n  2nd: [%s/%s] %s:%d %s()",
-                ptr,(unsigned long long)(now-s->timestamp),
+                ptr, format_duration_us(now - s->timestamp),
                 s->thread_name,s->thread_id,s->file,s->line,s->func,tn,ti,file,line,func);
             should_free = false;
         } else {
-            detail::yuyuko_logln("[Yuyuko] FREE %p life=%llums src=%s [%s/%s]",
-                ptr,(unsigned long long)(now-s->timestamp),
+            detail::yuyuko_logln("[Yuyuko] FREE %p life=%s src=%s [%s/%s]",
+                ptr, format_duration_us(now - s->timestamp),
                 (source==AllocSource::OPERATOR_NEW)?"new":"malloc",tn,ti);
             s->released=1; s->timestamp=now;
+            g_soul_range.erase(reinterpret_cast<uintptr_t>(ptr));
         }
     }
     return should_free;
@@ -391,31 +432,56 @@ inline bool check_access(void* ptr, const char* file, int line, const char* func
     SoulRecord* s = find_soul(ptr);
     if (!s || !s->released) return true;
     detail::yuyuko_logln(
-        "[Yuyuko] USE-AFTER-FREE %p @ %s:%d %s() — %llums ago [%s/%s]",
-        ptr,file,line,func,(unsigned long long)(current_time_ms()-s->timestamp),
+        "[Yuyuko] USE-AFTER-FREE %p @ %s:%d %s() — %s ago [%s/%s]",
+        ptr,file,line,func,format_duration_us(current_time_us() - s->timestamp),
         s->thread_name,s->thread_id);
     return false;
 }
 
 /// 检查 [ptr, ptr+size) 写入是否在已分配范围内 (越界检测)
+/// 在已分配块中查找包含地址范围 [ps, pe) 的 SoulRecord (O(log n))
+/// 调用方需持有 g_soul_mtx
+static SoulRecord* find_containing_soul(uintptr_t ps, uintptr_t pe) {
+    if (g_soul_range.empty()) return nullptr;
+    auto it = g_soul_range.upper_bound(ps);
+    if (it == g_soul_range.begin()) return nullptr;
+    --it;
+    uintptr_t start = *it;
+    SoulRecord* s = find_soul(reinterpret_cast<void*>(start));
+    if (!s || s->released) return nullptr;
+    uintptr_t as = start, ae = as + s->size;
+    return (ps >= as && pe <= ae) ? s : nullptr;
+}
+
+/// 检查 [ptr, ptr+size) 写入是否在已分配范围内 (越界检测)
+/// O(1) 快路径 (ptr 精确命中分配起始) + O(log n) 慢路径 (内部/偏移指针)
 inline bool check_bounds(void* ptr, size_t size, const char* file, int line, const char* func) {
     if (!ptr) return true;
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    uintptr_t ps=reinterpret_cast<uintptr_t>(ptr), pe=ps+size;
-    for (auto& kv : g_soul_book) {
-        SoulRecord& sr=kv.second;
-        uintptr_t as=reinterpret_cast<uintptr_t>(sr.ptr), ae=as+sr.size;
-        if (ps>=ae || pe<=as) continue;
-        if (sr.released) {
-            detail::yuyuko_logln("[Yuyuko] USE-AFTER-FREE-WRITE %p @ %s:%d",ptr,file,line);
+    uintptr_t ps = reinterpret_cast<uintptr_t>(ptr), pe = ps + size;
+
+    // ── 快路径：ptr 恰好是某个已知分配的起始地址 ──
+    SoulRecord* s = find_soul(ptr);
+    if (s) {
+        if (s->released) {
+            detail::yuyuko_logln("[Yuyuko] USE-AFTER-FREE-WRITE %p @ %s:%d", ptr, file, line);
             return false;
         }
-        if (ps<as || pe>ae) {
-            detail::yuyuko_logln("[Yuyuko] BUFFER-%s %p+%zu @ %s:%d alloc=%zu @ %s:%d",
-                (ps<as)?"UNDERFLOW":"OVERFLOW",ptr,size,file,line,sr.size,sr.file,sr.line);
+        uintptr_t ae = reinterpret_cast<uintptr_t>(s->ptr) + s->size;
+        if (pe > ae) {
+            detail::yuyuko_logln("[Yuyuko] BUFFER-OVERFLOW %p+%zu @ %s:%d alloc=%zu @ %s:%d",
+                ptr, size, file, line, s->size, s->file, s->line);
             return false;
         }
         return true;
+    }
+
+    // ── 慢路径：ptr 在已分配块的内部或前方 — 二分查找 (O(log n)) ──
+    s = find_containing_soul(ps, pe);
+    if (!s) {
+        detail::yuyuko_logln("[Yuyuko] WILD-WRITE %p+%zu @ %s:%d — not in any tracked allocation",
+            ptr, size, file, line);
+        return false;
     }
     return true;
 }
@@ -426,42 +492,114 @@ inline bool check_bounds(void* ptr, size_t size, const char* file, int line, con
 
 static constexpr size_t CRC_CHUNK_SIZE = 4096;  // 分块 CRC 粒度
 
-/// CRC32 查表 (多项式 0xEDB88320)
-inline uint32_t crc32_update(uint32_t crc, const uint8_t* data, size_t len) {
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRC-32C (Castagnoli) — 多项式 0x1EDC6F41 (反射: 0x82F63B78)
+// 硬件加速: x86 SSE4.2 (_mm_crc32_u64) / ARMv8-A (__crc32cd)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── 硬件 CRC-32C 分发 ────────────────────────────────────────────────────────
+
+#if defined(__SSE4_2__)
+#include <nmmintrin.h>
+#define YUYUKO_HW_CRC32C 1
+namespace detail {
+inline uint32_t hw_crc32c(uint32_t crc, const uint8_t* data, size_t len) {
+    // 8 字节块 — _mm_crc32_u64 一次处理 8B, ~1 cycle/B
+    while (len >= 8) {
+        uint64_t chunk;
+        std::memcpy(&chunk, data, 8);  // 安全非对齐加载
+        crc = (uint32_t)_mm_crc32_u64(crc, chunk);
+        data += 8; len -= 8;
+    }
+    // 4 字节尾巴
+    if (len >= 4) {
+        uint32_t chunk;
+        std::memcpy(&chunk, data, 4);
+        crc = _mm_crc32_u32(crc, chunk);
+        data += 4; len -= 4;
+    }
+    // 1 字节尾巴
+    while (len-- > 0)
+        crc = _mm_crc32_u8(crc, *data++);
+    return crc;
+}
+} // namespace detail
+
+#elif defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>
+#define YUYUKO_HW_CRC32C 1
+namespace detail {
+inline uint32_t hw_crc32c(uint32_t crc, const uint8_t* data, size_t len) {
+    while (len >= 8) {
+        crc = __crc32cd(crc, *(const uint64_t*)data);
+        data += 8; len -= 8;
+    }
+    while (len >= 4) {
+        crc = __crc32cw(crc, *(const uint32_t*)data);
+        data += 4; len -= 4;
+    }
+    while (len-- > 0)
+        crc = __crc32cb(crc, *data++);
+    return crc;
+}
+} // namespace detail
+#endif
+
+// ── 软件 CRC-32C 查表 (硬件不可用时) ──────────────────────────────────────────
+
+namespace detail {
+inline const uint32_t* crc32c_table() {
     static const uint32_t* tbl = []() -> const uint32_t* {
         static uint32_t t[256];
         for (uint32_t i = 0; i < 256; ++i) {
             uint32_t c = i;
             for (int j = 0; j < 8; ++j)
-                c = (c >> 1) ^ ((c & 1) ? 0xEDB88320u : 0);
+                c = (c >> 1) ^ ((c & 1) ? 0x82F63B78u : 0);
             t[i] = c;
         }
         return t;
     }();
-    crc ^= 0xFFFFFFFFu;
+    return tbl;
+}
+} // namespace detail
+
+/// CRC-32C 更新: 硬件加速优先, 回退到软件查表
+inline uint32_t crc32c_update(uint32_t crc, const uint8_t* data, size_t len) {
+#ifdef YUYUKO_HW_CRC32C
+    return detail::hw_crc32c(crc, data, len);
+#else
+    const uint32_t* tbl = detail::crc32c_table();
     for (size_t i = 0; i < len; ++i)
         crc = tbl[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-    return crc ^ 0xFFFFFFFFu;
+    return crc;
+#endif
 }
 
-/// 分块 CRC: 每 CRC_CHUNK_SIZE 字节存一个 CRC32
+/// 分块 CRC: 每 chunk_size 字节存一个 CRC-32C
 /// 小块只存 1 个，大块存 ceil(size/chunk_size) 个
-inline std::vector<uint32_t> crc32_chunked(const uint8_t* data, size_t size) {
+inline std::vector<uint32_t> crc32_chunked(const uint8_t* data, size_t size, size_t chunk_size) {
+    if (chunk_size == 0) chunk_size = CRC_CHUNK_SIZE;
     std::vector<uint32_t> crcs;
-    size_t n_chunks = (size + CRC_CHUNK_SIZE - 1) / CRC_CHUNK_SIZE;
+    size_t n_chunks = (size + chunk_size - 1) / chunk_size;
     if (n_chunks == 0) n_chunks = 1;
     crcs.reserve(n_chunks);
-    for (size_t off = 0; off < size; off += CRC_CHUNK_SIZE) {
-        size_t len = (off + CRC_CHUNK_SIZE <= size) ? CRC_CHUNK_SIZE : (size - off);
-        crcs.push_back(crc32_update(0, data + off, len));
+    for (size_t off = 0; off < size; off += chunk_size) {
+        size_t len = (off + chunk_size <= size) ? chunk_size : (size - off);
+        crcs.push_back(crc32c_update(0xFFFFFFFFu, data + off, len));
     }
     return crcs;
+}
+
+/// 默认 4KB 分块 CRC（向后兼容）
+inline std::vector<uint32_t> crc32_chunked(const uint8_t* data, size_t size) {
+    return crc32_chunked(data, size, CRC_CHUNK_SIZE);
 }
 
 /// 内存快照记录 — 存每块 CRC 向量
 struct MemCheckpoint {
     std::vector<uint32_t> crcs;
     uint64_t timestamp;
+    size_t   chunk_size;  // CRC 分块粒度 (bytes)
     char     tag[32];
 };
 
@@ -472,8 +610,8 @@ struct MemCheckpoint {
 static std::unordered_map<void*, MemCheckpoint> g_checkpoints;
 static std::shared_mutex g_cp_mtx;
 
-/// 保存 CRC 快照 (线程安全)
-inline void mem_snapshot(void* ptr, const char* tag = "default") {
+/// 保存 CRC 快照 (线程安全)，指定 chunk_size
+inline void mem_snapshot_ex(void* ptr, size_t chunk_size, const char* tag = "default") {
     if (!ptr) return;
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
     SoulRecord* s = find_soul(ptr);
@@ -481,14 +619,20 @@ inline void mem_snapshot(void* ptr, const char* tag = "default") {
     size_t sz = s->size;
     lk.unlock();
     MemCheckpoint cp;
-    cp.crcs = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz);
-    cp.timestamp = current_time_ms();
+    cp.crcs = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz, chunk_size);
+    cp.timestamp = current_time_us();
+    cp.chunk_size = chunk_size;
     { size_t i = 0; while (i < sizeof(cp.tag)-1 && tag[i]) { cp.tag[i]=tag[i]; ++i; } cp.tag[i]='\0'; }
     std::unique_lock<std::shared_mutex> clk(g_cp_mtx);
     g_checkpoints[ptr] = std::move(cp);
 }
 
-/// 校验快照 — 返回 true=一致
+/// 保存 CRC 快照 (线程安全)，默认 4KB 粒度
+inline void mem_snapshot(void* ptr, const char* tag = "default") {
+    mem_snapshot_ex(ptr, CRC_CHUNK_SIZE, tag);
+}
+
+/// 校验快照 — 返回 true=一致 (使用快照时保存的 chunk_size)
 inline bool mem_verify(void* ptr) {
     if (!ptr) return true;
     std::shared_lock<std::shared_mutex> slk(g_soul_mtx);
@@ -499,13 +643,15 @@ inline bool mem_verify(void* ptr) {
     std::shared_lock<std::shared_mutex> clk(g_cp_mtx);
     auto it = g_checkpoints.find(ptr);
     if (it == g_checkpoints.end()) return true;
-    auto now = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz);
+    size_t cs = it->second.chunk_size ? it->second.chunk_size : CRC_CHUNK_SIZE;
+    auto now = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz, cs);
     return now == it->second.crcs;
 }
 
-/// mem_check: 检测裸写/野写 — 精确定位损坏的 chunk
+/// mem_check_ex: 检测裸写/野写，指定 chunk 粒度精确定位损坏
+/// @param chunk_size 回退粒度（仅当快照无记录时使用，已有快照则用快照保存的粒度）
 /// @return true=完整, false=已损坏
-inline bool mem_check(void* ptr, const char* file, int line, const char* func) {
+inline bool mem_check_ex(void* ptr, size_t chunk_size, const char* file, int line, const char* func) {
     if (!ptr) return true;
     std::shared_lock<std::shared_mutex> slk(g_soul_mtx);
     SoulRecord* s = find_soul(ptr);
@@ -516,8 +662,6 @@ inline bool mem_check(void* ptr, const char* file, int line, const char* func) {
     const char* ath = s->thread_name; const char* ati = s->thread_id;
     slk.unlock();
 
-    auto now_crcs = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz);
-
     std::shared_lock<std::shared_mutex> clk(g_cp_mtx);
     auto it = g_checkpoints.find(ptr);
     if (it == g_checkpoints.end()) {
@@ -527,8 +671,12 @@ inline bool mem_check(void* ptr, const char* file, int line, const char* func) {
         return false;
     }
     const auto& old = it->second.crcs;
-    uint64_t elapsed = current_time_ms() - it->second.timestamp;
+    uint64_t elapsed = current_time_us() - it->second.timestamp;
     const char* tag = it->second.tag;
+    // 使用快照时保存的粒度（若为 0 则回退到参数 chunk_size）
+    size_t cs = it->second.chunk_size ? it->second.chunk_size : chunk_size;
+
+    auto now_crcs = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz, cs);
 
     if (now_crcs.size() != old.size()) {
         clk.unlock();
@@ -537,18 +685,19 @@ inline bool mem_check(void* ptr, const char* file, int line, const char* func) {
         return false;
     }
 
-    // 逐块比对
+    // 逐块比对 — 使用实际 chunk_size 计算偏移
+    if (cs == 0) cs = CRC_CHUNK_SIZE;
     for (size_t i = 0; i < now_crcs.size(); ++i) {
         if (now_crcs[i] != old[i]) {
-            size_t corrupt_off = i * CRC_CHUNK_SIZE;
-            size_t corrupt_end = (corrupt_off + CRC_CHUNK_SIZE < sz) ? corrupt_off + CRC_CHUNK_SIZE : sz;
+            size_t corrupt_off = i * cs;
+            size_t corrupt_end = (corrupt_off + cs < sz) ? corrupt_off + cs : sz;
             clk.unlock();
             detail::yuyuko_logln(
-                "[Yuyuko] MEM-CORRUPTION %p chunk[%zu] offset=%zu-%zu size=%zu @ %s:%d %s()\n"
-                "  snapshot: [%s] crc[%zu]=0x%08X (%llums ago)\n"
+                "[Yuyuko] MEM-CORRUPTION %p chunk[%zu] offset=%zu-%zu size=%zu cs=%zu @ %s:%d %s()\n"
+                "  snapshot: [%s] crc[%zu]=0x%08X (%s ago)\n"
                 "  now:      crc[%zu]=0x%08X (alloc'd %s:%d [%s/%s])",
-                ptr, i, corrupt_off, corrupt_end, sz, file, line, func,
-                tag, i, old[i], (unsigned long long)elapsed,
+                ptr, i, corrupt_off, corrupt_end, sz, cs, file, line, func,
+                tag, i, old[i], format_duration_us(elapsed),
                 i, now_crcs[i], af, al, ath, ati);
             return false;
         }
@@ -556,11 +705,16 @@ inline bool mem_check(void* ptr, const char* file, int line, const char* func) {
     return true;
 }
 
+/// mem_check: 检测裸写/野写 — 默认 4KB 粒度（向后兼容）
+inline bool mem_check(void* ptr, const char* file, int line, const char* func) {
+    return mem_check_ex(ptr, CRC_CHUNK_SIZE, file, line, func);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // RAII 守卫 — 构造快照, 析构校验, 零手动负担
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// 内存守卫: 作用域内自动保护一块内存
+/// 内存守卫: 作用域内自动保护一块内存（默认 4KB CRC 粒度）
 /// 构造时 MEM_SNAPSHOT, 析构时 MEM_CHECK, 损坏时日志自动包含调用点
 class MemGuard {
     void*  m_ptr;
@@ -578,6 +732,31 @@ public:
     }
     MemGuard(const MemGuard&) = delete;
     MemGuard& operator=(const MemGuard&) = delete;
+
+    /// 提前释放守卫 (不再在析构时校验)
+    void dismiss() { m_active = false; }
+};
+
+/// 内存守卫 (精确粒度版): 作用域内自动保护一块内存，可指定 CRC 分块精度
+/// 构造时 mem_snapshot_ex(ptr, chunk_size), 析构时 mem_check_ex(ptr, chunk_size)
+class MemGuardEx {
+    void*  m_ptr;
+    size_t m_chunk_size;
+    const char* m_file;
+    int    m_line;
+    const char* m_func;
+    bool   m_active;
+public:
+    MemGuardEx(void* ptr, size_t chunk_size, const char* tag,
+               const char* file, int line, const char* func)
+        : m_ptr(ptr), m_chunk_size(chunk_size), m_file(file), m_line(line), m_func(func), m_active(ptr != nullptr) {
+        if (m_active) mem_snapshot_ex(ptr, chunk_size, tag);
+    }
+    ~MemGuardEx() {
+        if (m_active) mem_check_ex(m_ptr, m_chunk_size, m_file, m_line, m_func);
+    }
+    MemGuardEx(const MemGuardEx&) = delete;
+    MemGuardEx& operator=(const MemGuardEx&) = delete;
 
     /// 提前释放守卫 (不再在析构时校验)
     void dismiss() { m_active = false; }
@@ -636,10 +815,10 @@ inline size_t leak_check() {
         if (sr.released) continue;
         ++leaks;
         detail::yuyuko_logln(
-            "[Yuyuko] LEAK %p %zub [%s/%s] %s:%d %s() age=%llums",
+            "[Yuyuko] LEAK %p %zub [%s/%s] %s:%d %s() age=%s",
             sr.ptr,sr.size,sr.thread_name,sr.thread_id,
             sr.file,sr.line,sr.func,
-            (unsigned long long)(current_time_ms()-sr.timestamp));
+            format_duration_us(current_time_us() - sr.timestamp));
     }
     detail::yuyuko_logln(leaks?"[Yuyuko] leak: %zu/%zu":"[Yuyuko] no leaks",leaks,g_soul_book.size());
     return leaks;
@@ -668,7 +847,7 @@ inline void generate_html_report(const char* filepath = "yuyuko_report.html",
         }
     }
     size_t released = total - alive;
-    uint64_t now = current_time_ms();
+    uint64_t now = current_time_us();
     
     // ═══════════════ HTML 头部 ═══════════════
     fprintf(f, 
@@ -900,11 +1079,8 @@ R"(<!DOCTYPE html>
         const char* source_text = (soul.source == 0)
             ? "new" : "malloc";
         
-        uint64_t elapsed = now - soul.timestamp;
-        const char* time_unit = "ms";
-        if (elapsed > 60000) { elapsed /= 60000; time_unit = "min"; }
-        else if (elapsed > 10000) { elapsed /= 1000; time_unit = "s"; }
-        
+        const char* elapsed_str = format_duration_us(now - soul.timestamp);
+
         fprintf(f, R"HTML(
 <tr class="%s" data-status="%s">
   <td><span class="badge %s">%s</span></td>
@@ -913,7 +1089,7 @@ R"(<!DOCTYPE html>
   <td><span class="badge %s">%s</span></td>
   <td><span class="location" title="%s:%d">%s:%d</span><br><small style="color:#8b949e">%s()</small></td>
   <td><span class="thread-tag">%s</span></td>
-  <td>%llu %s</td>
+  <td>%s</td>
 </tr>
 )HTML",
             row_class,
@@ -925,7 +1101,7 @@ R"(<!DOCTYPE html>
             soul.file, soul.line, soul.file, soul.line,
             soul.func,
             soul.thread_name,
-            static_cast<unsigned long long>(elapsed), time_unit
+            elapsed_str
         );
     }
     
@@ -1003,7 +1179,7 @@ function sortTable(col) {
 } // namespace Yuyuko
 
 // ════════════════════════════════════════════════════════════════════════════
-// 便捷宏
+// 便捷宏 (ENABLE_ASAN 启用时)
 // ════════════════════════════════════════════════════════════════════════════
 
 #define TRACKED_NEW(type) \
@@ -1074,21 +1250,30 @@ function sortTable(col) {
 // RAII 守卫: 构造快照, 析构校验 — 零手动负担
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// MEM_GUARD(ptr)            作用域内自动保护 (tag=函数名)
-// MEM_GUARD_TAG(ptr, "tag") 同上, 自定义 tag
+// MEM_GUARD(ptr)                 作用域内自动保护, 默认 4KB CRC 粒度
+// MEM_GUARD_TAG(ptr, "tag")      同上, 自定义 tag
+// MEM_GUARD_EX(ptr, 精度)          精确粒度版, 指定 CRC 分块字节数
+// MEM_GUARD_EX_TAG(ptr, 精度, tag) 精确粒度 + 自定义 tag
 //
 // 示例:
 //   void foo() {
 //       auto* p = TRACKED_ALLOC(1024);
-//       MEM_GUARD(p);           // 进入作用域 → 自动快照
-//       do_stuff(p);            // 裸写破坏 p
-//   }                           // 离开作用域 → 自动 MEM_CHECK → 检测到损坏!
+//       MEM_GUARD(p);              // 4KB 粒度, 快速
+//       MEM_GUARD_EX(p, 64);       // 64B 粒度, 精确定位到 64 字节内
+//       do_stuff(p);               // 裸写破坏 p
+//   }                              // 离开作用域 → 自动 MEM_CHECK → 检测到损坏!
 
 #define MEM_GUARD(ptr) \
     Yuyuko::MemGuard _yuko_g_##__LINE__((ptr), __FUNCTION__, __FILE__, __LINE__, __FUNCTION__)
 
 #define MEM_GUARD_TAG(ptr, tag) \
     Yuyuko::MemGuard _yuko_g_##__LINE__((ptr), (tag), __FILE__, __LINE__, __FUNCTION__)
+
+#define MEM_GUARD_EX(ptr, chunk_size) \
+    Yuyuko::MemGuardEx _yuko_gx_##__LINE__((ptr), (chunk_size), __FUNCTION__, __FILE__, __LINE__, __FUNCTION__)
+
+#define MEM_GUARD_EX_TAG(ptr, chunk_size, tag) \
+    Yuyuko::MemGuardEx _yuko_gx_##__LINE__((ptr), (chunk_size), (tag), __FILE__, __LINE__, __FUNCTION__)
 
 #define TRACKED_STRNCPY(dst, src, n) \
     do { \
@@ -1119,12 +1304,19 @@ namespace Yuyuko {
     inline size_t leak_check() { return 0; }
 
     inline void mem_snapshot(void*, const char* = "default") {}
+    inline void mem_snapshot_ex(void*, size_t, const char* = "default") {}
     inline bool mem_verify(void*) { return true; }
     inline bool mem_check(void*, const char*, int, const char*) { return true; }
+    inline bool mem_check_ex(void*, size_t, const char*, int, const char*) { return true; }
 
     class MemGuard {
     public:
         MemGuard(void*, const char*, const char*, int, const char*) {}
+        void dismiss() {}
+    };
+    class MemGuardEx {
+    public:
+        MemGuardEx(void*, size_t, const char*, const char*, int, const char*) {}
         void dismiss() {}
     };
     class MemGuardBatch {
@@ -1153,5 +1345,7 @@ namespace Yuyuko {
 #define MEM_CHECK(ptr)         (true)
 #define MEM_GUARD(ptr)         ((void)0)
 #define MEM_GUARD_TAG(ptr, tag) ((void)0)
+#define MEM_GUARD_EX(ptr, chunk_size) ((void)0)
+#define MEM_GUARD_EX_TAG(ptr, chunk_size, tag) ((void)0)
 
 #endif // ENABLE_ASAN
