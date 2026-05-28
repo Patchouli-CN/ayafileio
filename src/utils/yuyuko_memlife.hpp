@@ -1,16 +1,17 @@
 // yuyuko_memlife.hpp — 幽幽子内存生命周期追踪系统
 //
 // 编译：
-//   定义 ENABLE_ASAN → 全功能追踪。
-//   不定义 ENABLE_ASAN → 所有宏/函数变为零开销 stub。
+//   定义 ENABLE_ASAN → 全功能追踪 (双表存储, CRC-32C HW, μs 精度)
+//   不定义 ENABLE_ASAN → 所有宏/函数变为零开销 stub
 //
 // 特性：
 //   - 追踪 new/delete 和 malloc/free 的完整生命周期
-//   - Double Free 检测与拦截
+//   - Double Free 检测与拦截 (O(1) 双表分离)
 //   - 多线程 Use-After-Free 检测
 //   - 分配器不匹配检测（new vs malloc）
 //   - CRC-32C 硬件加速内存完整性校验 (SSE4.2 / ARMv8-CRC, μs 级精度)
-//   - 内存泄漏检测（leak_check）
+//   - O(log n) 越界检测 (sorted range index binary search)
+//   - O(leaks) 泄漏检测 (alive/released 双表分离)
 //   - 双缓冲异步日志：业务线程纳秒级返回，后台线程批量写文件
 //
 // 用法：
@@ -18,13 +19,13 @@
 //   TRACKED_ALLOC(size)            → 追踪原始内存块，使用 std::malloc/free
 //   TRACKED_DELETE(ptr)            → 释放追踪对象
 //   TRACKED_FREE(ptr)              → 释放追踪内存块
-//   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放（基于魂簿）
-//   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测
+//   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放
+//   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测 (O(log n))
 //   Yuyuko::mem_snapshot(ptr)      → 保存内存 CRC 快照（4KB 粒度）
 //   Yuyuko::mem_snapshot_ex(ptr,N) → 保存内存 CRC 快照（自定义 N 字节粒度）
 //   Yuyuko::mem_check(ptr)         → 校验 CRC 快照，检测内存损坏
 //   Yuyuko::mem_check_ex(ptr,N)    → 校验 CRC 快照（自定义粒度）
-//   Yuyuko::leak_check()           → 程序退出时检测泄漏
+//   Yuyuko::leak_check()           → 程序退出时检测泄漏 (O(leaks))
 //
 // RAII 守卫：
 //   MEM_GUARD(ptr)                 → 默认 4KB 粒度
@@ -257,7 +258,7 @@ inline void stop_async_log() {
     
     detail::g_log_stop.store(true);
     detail::g_log_cv.notify_one();
-    
+
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     detail::g_log_thread = std::jthread{};  // jthread dtor auto-joins
 #else
@@ -306,13 +307,14 @@ enum class AllocSource : uint8_t {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// 单条内存分配记录 (固定大小 char 数组, 零堆分配)
+/// 存活/释放状态由所在容器决定：g_soul_alive 或 g_soul_released
 struct SoulRecord {
     void*    ptr;
     size_t   size;
     uint64_t timestamp;       // 分配/最后操作的时间戳 (μs)
     uint16_t line;            // 行号
     uint8_t  source;          // AllocSource
-    uint8_t  released;        // 0=alive, 1=freed
+    char     _pad[1];         // 保持结构体对齐不变
     char     file[80];        // 源文件名
     char     func[64];        // 函数名
     char     thread_name[64]; // 线程名
@@ -320,17 +322,25 @@ struct SoulRecord {
 };
 static_assert(sizeof(SoulRecord) <= 256, "SoulRecord too large");
 
-/// 全局魂簿：记录所有被追踪的内存块
+/// 全局魂簿：双表分离 — alive 存存活分配, released 存已释放历史
 static std::shared_mutex g_soul_mtx;
-static std::unordered_map<void*, SoulRecord> g_soul_book;
-/// 按地址排序的索引 — check_bounds 二分查找用 (O(log n) vs 旧版 O(n))
-static std::set<uintptr_t> g_soul_range;
-static bool _soul_book_init = []{ g_soul_book.reserve(65536); return true; }();
+static std::unordered_map<void*, SoulRecord> g_soul_alive;
+static std::unordered_map<void*, SoulRecord> g_soul_released;
+/// 按地址排序的索引 — check_bounds 二分查找用 (O(log n))
+static std::set<uintptr_t> g_soul_alive_range;
+static std::set<uintptr_t> g_soul_released_range;
+static bool _soul_book_init = []{
+    g_soul_alive.reserve(65536);
+    g_soul_released.reserve(16384);
+    return true;
+}();
 
-/// 在魂簿中查找记录（调用方需持有 g_soul_mtx）
+/// 在魂簿中查找记录（先查 alive 再查 released，调用方需持有 g_soul_mtx）
 static SoulRecord* find_soul(void* ptr) {
-    auto it = g_soul_book.find(ptr);
-    return (it != g_soul_book.end()) ? &it->second : nullptr;
+    auto it = g_soul_alive.find(ptr);
+    if (it != g_soul_alive.end()) return &it->second;
+    auto rit = g_soul_released.find(ptr);
+    return (rit != g_soul_released.end()) ? &rit->second : nullptr;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -351,13 +361,12 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
     sr.source=static_cast<uint8_t>(source);
     sr.timestamp=current_time_us();
     sr.line=static_cast<uint16_t>(line);
-    sr.released=0;
     str_copy(sr.file,sizeof(sr.file),file);
     str_copy(sr.func,sizeof(sr.func),func);
     str_copy(sr.thread_name,sizeof(sr.thread_name),cached_thread_name());
     str_copy(sr.thread_id,sizeof(sr.thread_id),cached_thread_id());
 
-    { std::unique_lock<std::shared_mutex> lk(g_soul_mtx); g_soul_book[ptr] = sr; g_soul_range.insert(reinterpret_cast<uintptr_t>(ptr)); }
+    { std::unique_lock<std::shared_mutex> lk(g_soul_mtx); g_soul_alive[ptr] = sr; g_soul_alive_range.insert(reinterpret_cast<uintptr_t>(ptr)); }
 
     detail::yuyuko_logln(
         "[Yuyuko] ALLOC %p size=%zu src=%s @ %s:%d %s() [%s/%s]",
@@ -367,6 +376,7 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
 }
 
 /// 记录一次内存释放（内部函数）
+/// 将记录从 g_soul_alive 移送至 g_soul_released
 /// @return true if the caller should free the memory
 static bool release_soul_impl(void* ptr, AllocSource source,
                                const char* file, int line, const char* func) {
@@ -374,33 +384,49 @@ static bool release_soul_impl(void* ptr, AllocSource source,
     const char* tn = cached_thread_name();
     const char* ti = cached_thread_id();
     uint64_t now = current_time_us();
-    bool should_free = true;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
 
-    {
-        std::unique_lock<std::shared_mutex> lk(g_soul_mtx);
-        SoulRecord* s = find_soul(ptr);
+    std::unique_lock<std::shared_mutex> lk(g_soul_mtx);
 
-        if (!s) {
-            detail::yuyuko_logln("[Yuyuko] FREE-UNKNOWN %p @ %s:%d [%s/%s]",ptr,file,line,tn,ti);
-        } else if (s->source != static_cast<uint8_t>(source)) {
-            detail::yuyuko_logln("[Yuyuko] MISMATCH %p reg=%s tried=%s @ %s:%d [%s/%s]",
-                ptr,(s->source==0)?"new":"malloc",
-                (source==AllocSource::OPERATOR_NEW)?"new":"malloc",file,line,tn,ti);
-        } else if (s->released) {
-            detail::yuyuko_logln("[Yuyuko] DOUBLE-FREE %p freed %s ago\n"
-                "  1st: [%s/%s] %s:%d %s()\n  2nd: [%s/%s] %s:%d %s()",
-                ptr, format_duration_us(now - s->timestamp),
-                s->thread_name,s->thread_id,s->file,s->line,s->func,tn,ti,file,line,func);
-            should_free = false;
-        } else {
-            detail::yuyuko_logln("[Yuyuko] FREE %p life=%s src=%s [%s/%s]",
-                ptr, format_duration_us(now - s->timestamp),
-                (source==AllocSource::OPERATOR_NEW)?"new":"malloc",tn,ti);
-            s->released=1; s->timestamp=now;
-            g_soul_range.erase(reinterpret_cast<uintptr_t>(ptr));
-        }
+    // ── 已释放检测 (Double Free) ──
+    auto rit = g_soul_released.find(ptr);
+    if (rit != g_soul_released.end()) {
+        detail::yuyuko_logln("[Yuyuko] DOUBLE-FREE %p freed %s ago\n"
+            "  1st: [%s/%s] %s:%d %s()\n  2nd: [%s/%s] %s:%d %s()",
+            ptr, format_duration_us(now - rit->second.timestamp),
+            rit->second.thread_name,rit->second.thread_id,
+            rit->second.file,rit->second.line,rit->second.func,
+            tn,ti,file,line,func);
+        return false;
     }
-    return should_free;
+
+    // ── 查找存活记录 ──
+    auto ait = g_soul_alive.find(ptr);
+    if (ait == g_soul_alive.end()) {
+        detail::yuyuko_logln("[Yuyuko] FREE-UNKNOWN %p @ %s:%d [%s/%s]",ptr,file,line,tn,ti);
+        return false;
+    }
+
+    SoulRecord& s = ait->second;
+
+    // ── 分配器不匹配检测 ──
+    if (s.source != static_cast<uint8_t>(source)) {
+        detail::yuyuko_logln("[Yuyuko] MISMATCH %p reg=%s tried=%s @ %s:%d [%s/%s]",
+            ptr,(s.source==0)?"new":"malloc",
+            (source==AllocSource::OPERATOR_NEW)?"new":"malloc",file,line,tn,ti);
+        return false;
+    }
+
+    // ── 正常释放：alive → released ──
+    detail::yuyuko_logln("[Yuyuko] FREE %p life=%s src=%s [%s/%s]",
+        ptr, format_duration_us(now - s.timestamp),
+        (source==AllocSource::OPERATOR_NEW)?"new":"malloc",tn,ti);
+    s.timestamp = now;
+    g_soul_released.emplace(ptr, std::move(s));
+    g_soul_alive.erase(ait);
+    g_soul_alive_range.erase(addr);
+    g_soul_released_range.insert(addr);
+    return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -429,28 +455,31 @@ inline bool release_malloc(void* ptr, const char* file, int line, const char* fu
 inline bool check_access(void* ptr, const char* file, int line, const char* func) {
     if (!ptr) return true;
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    SoulRecord* s = find_soul(ptr);
-    if (!s || !s->released) return true;
+    auto it = g_soul_released.find(ptr);
+    if (it == g_soul_released.end()) return true;
     detail::yuyuko_logln(
         "[Yuyuko] USE-AFTER-FREE %p @ %s:%d %s() — %s ago [%s/%s]",
-        ptr,file,line,func,format_duration_us(current_time_us() - s->timestamp),
-        s->thread_name,s->thread_id);
+        ptr,file,line,func,format_duration_us(current_time_us() - it->second.timestamp),
+        it->second.thread_name,it->second.thread_id);
     return false;
 }
 
-/// 检查 [ptr, ptr+size) 写入是否在已分配范围内 (越界检测)
 /// 在已分配块中查找包含地址范围 [ps, pe) 的 SoulRecord (O(log n))
-/// 调用方需持有 g_soul_mtx
+/// 先查 alive 再查 released。调用方需持有 g_soul_mtx
 static SoulRecord* find_containing_soul(uintptr_t ps, uintptr_t pe) {
-    if (g_soul_range.empty()) return nullptr;
-    auto it = g_soul_range.upper_bound(ps);
-    if (it == g_soul_range.begin()) return nullptr;
-    --it;
-    uintptr_t start = *it;
-    SoulRecord* s = find_soul(reinterpret_cast<void*>(start));
-    if (!s || s->released) return nullptr;
-    uintptr_t as = start, ae = as + s->size;
-    return (ps >= as && pe <= ae) ? s : nullptr;
+    auto lookup = [&](const std::set<uintptr_t>& range,
+                     const std::unordered_map<void*, SoulRecord>& map) -> SoulRecord* {
+        if (range.empty()) return nullptr;
+        auto it = range.upper_bound(ps);
+        if (it == range.begin()) return nullptr;
+        --it;
+        auto sit = map.find(reinterpret_cast<void*>(*it));
+        if (sit == map.end()) return nullptr;
+        uintptr_t as = reinterpret_cast<uintptr_t>(sit->second.ptr);
+        return (ps >= as && pe <= as + sit->second.size) ? const_cast<SoulRecord*>(&sit->second) : nullptr;
+    };
+    SoulRecord* s = lookup(g_soul_alive_range, g_soul_alive);
+    return s ? s : lookup(g_soul_released_range, g_soul_released);
 }
 
 /// 检查 [ptr, ptr+size) 写入是否在已分配范围内 (越界检测)
@@ -460,25 +489,23 @@ inline bool check_bounds(void* ptr, size_t size, const char* file, int line, con
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
     uintptr_t ps = reinterpret_cast<uintptr_t>(ptr), pe = ps + size;
 
-    // ── 快路径：ptr 恰好是某个已知分配的起始地址 ──
-    SoulRecord* s = find_soul(ptr);
-    if (s) {
-        if (s->released) {
-            detail::yuyuko_logln("[Yuyuko] USE-AFTER-FREE-WRITE %p @ %s:%d", ptr, file, line);
-            return false;
-        }
-        uintptr_t ae = reinterpret_cast<uintptr_t>(s->ptr) + s->size;
+    // ── 快路径：ptr 恰好是某个已知分配 ──
+    auto ait = g_soul_alive.find(ptr);
+    if (ait != g_soul_alive.end()) {
+        SoulRecord& s = ait->second;
+        uintptr_t ae = reinterpret_cast<uintptr_t>(s.ptr) + s.size;
         if (pe > ae) {
             detail::yuyuko_logln("[Yuyuko] BUFFER-OVERFLOW %p+%zu @ %s:%d alloc=%zu @ %s:%d",
-                ptr, size, file, line, s->size, s->file, s->line);
+                ptr, size, file, line, s.size, s.file, s.line);
             return false;
         }
         return true;
     }
 
     // ── 慢路径：ptr 在已分配块的内部或前方 — 二分查找 (O(log n)) ──
-    s = find_containing_soul(ps, pe);
+    SoulRecord* s = find_containing_soul(ps, pe);
     if (!s) {
+        // 不属于任何已知分配 — 可能是野指针
         detail::yuyuko_logln("[Yuyuko] WILD-WRITE %p+%zu @ %s:%d — not in any tracked allocation",
             ptr, size, file, line);
         return false;
@@ -614,9 +641,9 @@ static std::shared_mutex g_cp_mtx;
 inline void mem_snapshot_ex(void* ptr, size_t chunk_size, const char* tag = "default") {
     if (!ptr) return;
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    SoulRecord* s = find_soul(ptr);
-    if (!s || s->released) return;
-    size_t sz = s->size;
+    auto it = g_soul_alive.find(ptr);
+    if (it == g_soul_alive.end()) return;
+    size_t sz = it->second.size;
     lk.unlock();
     MemCheckpoint cp;
     cp.crcs = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz, chunk_size);
@@ -636,16 +663,16 @@ inline void mem_snapshot(void* ptr, const char* tag = "default") {
 inline bool mem_verify(void* ptr) {
     if (!ptr) return true;
     std::shared_lock<std::shared_mutex> slk(g_soul_mtx);
-    SoulRecord* s = find_soul(ptr);
-    if (!s || s->released) return false;
-    size_t sz = s->size;
+    auto ait = g_soul_alive.find(ptr);
+    if (ait == g_soul_alive.end()) return false;
+    size_t sz = ait->second.size;
     slk.unlock();
     std::shared_lock<std::shared_mutex> clk(g_cp_mtx);
-    auto it = g_checkpoints.find(ptr);
-    if (it == g_checkpoints.end()) return true;
-    size_t cs = it->second.chunk_size ? it->second.chunk_size : CRC_CHUNK_SIZE;
+    auto cit = g_checkpoints.find(ptr);
+    if (cit == g_checkpoints.end()) return true;
+    size_t cs = cit->second.chunk_size ? cit->second.chunk_size : CRC_CHUNK_SIZE;
     auto now = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz, cs);
-    return now == it->second.crcs;
+    return now == cit->second.crcs;
 }
 
 /// mem_check_ex: 检测裸写/野写，指定 chunk 粒度精确定位损坏
@@ -654,27 +681,33 @@ inline bool mem_verify(void* ptr) {
 inline bool mem_check_ex(void* ptr, size_t chunk_size, const char* file, int line, const char* func) {
     if (!ptr) return true;
     std::shared_lock<std::shared_mutex> slk(g_soul_mtx);
-    SoulRecord* s = find_soul(ptr);
-    if (!s) { detail::yuyuko_logln("[Yuyuko] CHECK %p NOT TRACKED @ %s:%d %s()",ptr,file,line,func); return false; }
-    if (s->released) { detail::yuyuko_logln("[Yuyuko] CHECK %p FREED @ %s:%d %s()",ptr,file,line,func); return false; }
-    size_t sz = s->size;
-    const char* af = s->file; int al = s->line;
-    const char* ath = s->thread_name; const char* ati = s->thread_id;
+    auto ait = g_soul_alive.find(ptr);
+    if (ait == g_soul_alive.end()) {
+        if (g_soul_released.find(ptr) != g_soul_released.end())
+            detail::yuyuko_logln("[Yuyuko] CHECK %p FREED @ %s:%d %s()",ptr,file,line,func);
+        else
+            detail::yuyuko_logln("[Yuyuko] CHECK %p NOT TRACKED @ %s:%d %s()",ptr,file,line,func);
+        return false;
+    }
+    const SoulRecord& s = ait->second;
+    size_t sz = s.size;
+    const char* af = s.file; int al = s.line;
+    const char* ath = s.thread_name; const char* ati = s.thread_id;
     slk.unlock();
 
     std::shared_lock<std::shared_mutex> clk(g_cp_mtx);
-    auto it = g_checkpoints.find(ptr);
-    if (it == g_checkpoints.end()) {
+    auto cit = g_checkpoints.find(ptr);
+    if (cit == g_checkpoints.end()) {
         clk.unlock();
         detail::yuyuko_logln("[Yuyuko] CHECK %p NO-SNAPSHOT @ %s:%d %s() — mem_snapshot first",
             ptr,file,line,func);
         return false;
     }
-    const auto& old = it->second.crcs;
-    uint64_t elapsed = current_time_us() - it->second.timestamp;
-    const char* tag = it->second.tag;
+    const auto& old = cit->second.crcs;
+    uint64_t elapsed = current_time_us() - cit->second.timestamp;
+    const char* tag = cit->second.tag;
     // 使用快照时保存的粒度（若为 0 则回退到参数 chunk_size）
-    size_t cs = it->second.chunk_size ? it->second.chunk_size : chunk_size;
+    size_t cs = cit->second.chunk_size ? cit->second.chunk_size : chunk_size;
 
     auto now_crcs = crc32_chunked(reinterpret_cast<const uint8_t*>(ptr), sz, cs);
 
@@ -791,36 +824,43 @@ public:
 
 inline bool is_released(void* ptr) {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    auto* s=find_soul(ptr); return s?s->released:true;
+    return g_soul_released.find(ptr) != g_soul_released.end();
 }
 inline size_t get_size(void* ptr) {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    auto* s=find_soul(ptr); return s?s->size:0;
+    {
+        auto it = g_soul_alive.find(ptr);
+        if (it != g_soul_alive.end()) return it->second.size;
+    }
+    {
+        auto it = g_soul_released.find(ptr);
+        if (it != g_soul_released.end()) return it->second.size;
+    }
+    return 0;
 }
 inline size_t get_total_souls() {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    return g_soul_book.size();
+    return g_soul_alive.size() + g_soul_released.size();
 }
 inline size_t get_alive_souls() {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    size_t n=0; for(auto& kv:g_soul_book)n+=!kv.second.released; return n;
+    return g_soul_alive.size();
 }
 
-/// 程序退出时检测内存泄漏
+/// 程序退出时检测内存泄漏 — O(leaks) 只遍历存活表
 inline size_t leak_check() {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    size_t leaks=0;
-    for (auto& kv : g_soul_book) {
-        const SoulRecord& sr=kv.second;
-        if (sr.released) continue;
-        ++leaks;
+    size_t total = g_soul_alive.size() + g_soul_released.size();
+    for (auto& kv : g_soul_alive) {
+        const SoulRecord& sr = kv.second;
         detail::yuyuko_logln(
             "[Yuyuko] LEAK %p %zub [%s/%s] %s:%d %s() age=%s",
             sr.ptr,sr.size,sr.thread_name,sr.thread_id,
             sr.file,sr.line,sr.func,
             format_duration_us(current_time_us() - sr.timestamp));
     }
-    detail::yuyuko_logln(leaks?"[Yuyuko] leak: %zu/%zu":"[Yuyuko] no leaks",leaks,g_soul_book.size());
+    size_t leaks = g_soul_alive.size();
+    detail::yuyuko_logln(leaks?"[Yuyuko] leak: %zu/%zu":"[Yuyuko] no leaks",leaks,total);
     return leaks;
 }
 
@@ -835,18 +875,13 @@ inline void generate_html_report(const char* filepath = "yuyuko_report.html",
     if (!f) return;
     
     // 统计
-    size_t total = g_soul_book.size();
-    size_t alive = 0;
+    size_t total = g_soul_alive.size() + g_soul_released.size();
+    size_t alive = g_soul_alive.size();
     size_t leaked_bytes = 0;
     size_t total_bytes = 0;
-    for (const auto& kv : g_soul_book) {
-        total_bytes += kv.second.size;
-        if (!kv.second.released) {
-            alive++;
-            leaked_bytes += kv.second.size;
-        }
-    }
-    size_t released = total - alive;
+    for (const auto& kv : g_soul_alive) { total_bytes += kv.second.size; leaked_bytes += kv.second.size; }
+    for (const auto& kv : g_soul_released) total_bytes += kv.second.size;
+    size_t released = g_soul_released.size();
     uint64_t now = current_time_us();
     
     // ═══════════════ HTML 头部 ═══════════════
@@ -1058,28 +1093,14 @@ R"(<!DOCTYPE html>
 <tbody>
 )HTML");
     
-    // 遍历魂簿，生成每一行
-    for (const auto& kv : g_soul_book) {
-        const SoulRecord& soul = kv.second;
-        
-        const char* row_class = soul.released ? "released_row" : "alive";
-        const char* status_badge;
-        const char* status_text;
-        
-        if (soul.released) {
-            status_badge = "badge-released";
-            status_text = "已安息";
-        } else {
-            status_badge = "badge-leak";
-            status_text = "存活";
-        }
-        
-        const char* source_badge = (soul.source == 0)
-            ? "badge-new" : "badge-malloc";
-        const char* source_text = (soul.source == 0)
-            ? "new" : "malloc";
-        
-        const char* elapsed_str = format_duration_us(now - soul.timestamp);
+    // 遍历魂簿，生成每一行 — alive 在前, released 在后
+    auto emit_row = [&](const SoulRecord& soul, bool is_released) {
+        const char* row_class   = is_released ? "released_row" : "alive";
+        const char* status_badge = is_released ? "badge-released" : "badge-leak";
+        const char* status_text  = is_released ? "已安息" : "存活";
+        const char* source_badge = (soul.source == 0) ? "badge-new" : "badge-malloc";
+        const char* source_text  = (soul.source == 0) ? "new" : "malloc";
+        const char* elapsed_str  = format_duration_us(now - soul.timestamp);
 
         fprintf(f, R"HTML(
 <tr class="%s" data-status="%s">
@@ -1092,18 +1113,15 @@ R"(<!DOCTYPE html>
   <td>%s</td>
 </tr>
 )HTML",
-            row_class,
-            soul.released ? "released" : "alive",
+            row_class, is_released ? "released" : "alive",
             status_badge, status_text,
-            soul.ptr,
-            soul.size,
+            soul.ptr, soul.size,
             source_badge, source_text,
             soul.file, soul.line, soul.file, soul.line,
-            soul.func,
-            soul.thread_name,
-            elapsed_str
-        );
-    }
+            soul.func, soul.thread_name, elapsed_str);
+    };
+    for (const auto& kv : g_soul_alive)   emit_row(kv.second, false);
+    for (const auto& kv : g_soul_released) emit_row(kv.second, true);
     
     // ═══════════════ HTML 尾部 + JavaScript ═══════════════
     fprintf(f, R"HTML(
