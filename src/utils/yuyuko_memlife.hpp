@@ -1,17 +1,14 @@
 // yuyuko_memlife.hpp — 幽幽子内存生命周期追踪系统
 //
-// 编译：
-//   定义 ENABLE_ASAN → 全功能追踪 (双表存储, CRC-32C HW, μs 精度)
-//   不定义 ENABLE_ASAN → 所有宏/函数变为零开销 stub
+// 编译：定义 ENABLE_ASAN → 全功能。不定义 → 零开销 stub。
 //
 // 特性：
 //   - 追踪 new/delete 和 malloc/free 的完整生命周期
-//   - Double Free 检测与拦截 (O(1) 双表分离)
+//   - Double Free 检测与拦截
 //   - 多线程 Use-After-Free 检测
 //   - 分配器不匹配检测（new vs malloc）
-//   - CRC-32C 硬件加速内存完整性校验 (SSE4.2 / ARMv8-CRC, μs 级精度)
-//   - O(log n) 越界检测 (sorted range index binary search)
-//   - O(leaks) 泄漏检测 (alive/released 双表分离)
+//   - CRC-32C 硬件加速内存完整性校验 (SSE4.2 / ARMv8-CRC)
+//   - 内存泄漏检测（leak_check）
 //   - 双缓冲异步日志：业务线程纳秒级返回，后台线程批量写文件
 //
 // 用法：
@@ -19,19 +16,13 @@
 //   TRACKED_ALLOC(size)            → 追踪原始内存块，使用 std::malloc/free
 //   TRACKED_DELETE(ptr)            → 释放追踪对象
 //   TRACKED_FREE(ptr)              → 释放追踪内存块
-//   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放
-//   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测 (O(log n))
+//   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放（基于魂簿）
+//   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测
 //   Yuyuko::mem_snapshot(ptr)      → 保存内存 CRC 快照（4KB 粒度）
 //   Yuyuko::mem_snapshot_ex(ptr,N) → 保存内存 CRC 快照（自定义 N 字节粒度）
 //   Yuyuko::mem_check(ptr)         → 校验 CRC 快照，检测内存损坏
 //   Yuyuko::mem_check_ex(ptr,N)    → 校验 CRC 快照（自定义粒度）
-//   Yuyuko::leak_check()           → 程序退出时检测泄漏 (O(leaks))
-//
-// RAII 守卫：
-//   MEM_GUARD(ptr)                 → 默认 4KB 粒度
-//   MEM_GUARD_TAG(ptr, "tag")      → 自定义 tag
-//   MEM_GUARD_EX(ptr, 精度)          → 指定 CRC 分块字节数
-//   MEM_GUARD_EX_TAG(ptr, 精度, tag) → 自定义粒度 + tag
+//   Yuyuko::leak_check()           → 程序退出时检测泄漏
 //
 // 异步日志：
 //   Yuyuko::start_async_log("yuyuko.log")  → 启动异步日志线程
@@ -56,6 +47,7 @@
 #include <chrono>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -260,7 +252,7 @@ inline void stop_async_log() {
     detail::g_log_cv.notify_one();
 
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
-    detail::g_log_thread = std::jthread{};  // jthread dtor auto-joins
+    detail::g_log_thread = std::jthread{};
 #else
     if (detail::g_log_thread.joinable()) {
         detail::g_log_thread.join();
@@ -322,10 +314,14 @@ struct SoulRecord {
 };
 static_assert(sizeof(SoulRecord) <= 256, "SoulRecord too large");
 
-/// 全局魂簿：双表分离 — alive 存存活分配, released 存已释放历史
+/// 全局魂簿：三表分离
+///   alive      — 存活分配 (leak_check 扫描此表)
+///   released   — 已释放历史 (UAF / Double-Free 检测)
+///   permanent  — 常驻对象标记 (排除出 leak_check, 如连接池/全局缓存)
 static std::shared_mutex g_soul_mtx;
 static std::unordered_map<void*, SoulRecord> g_soul_alive;
 static std::unordered_map<void*, SoulRecord> g_soul_released;
+static std::unordered_set<void*> g_soul_permanent;
 /// 按地址排序的索引 — check_bounds 二分查找用 (O(log n))
 static std::set<uintptr_t> g_soul_alive_range;
 static std::set<uintptr_t> g_soul_released_range;
@@ -374,6 +370,8 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
             g_soul_released_range.erase(reinterpret_cast<uintptr_t>(ptr));
             g_soul_released.erase(rit);
         }
+        // 如果该地址曾被标记为常驻，清除标记（新对象未必还是常驻）
+        g_soul_permanent.erase(ptr);
         g_soul_alive[ptr] = sr;
         g_soul_alive_range.insert(reinterpret_cast<uintptr_t>(ptr));
     }
@@ -854,23 +852,42 @@ inline size_t get_total_souls() {
 }
 inline size_t get_alive_souls() {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    return g_soul_alive.size();
+    return g_soul_alive.size();  // 不含 permanent — 那是用户主动标记的
+}
+inline size_t get_permanent_souls() {
+    std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
+    return g_soul_permanent.size();
 }
 
-/// 程序退出时检测内存泄漏 — O(leaks) 只遍历存活表
+/// 标记常驻对象 — 排除出 leak_check
+/// 用于连接池、全局缓存、socket 等程序生命周期内不释放的对象
+inline void mark_permanent(void* ptr) {
+    if (!ptr) return;
+    std::unique_lock<std::shared_mutex> lk(g_soul_mtx);
+    auto it = g_soul_alive.find(ptr);
+    if (it == g_soul_alive.end()) return;
+    g_soul_permanent.insert(ptr);
+}
+
+/// 程序退出时检测内存泄漏 — O(leaks) 只遍历存活表, 跳过常驻对象
 inline size_t leak_check() {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
     size_t total = g_soul_alive.size() + g_soul_released.size();
+    size_t leaks = 0;
     for (auto& kv : g_soul_alive) {
+        if (g_soul_permanent.count(kv.first)) continue;  // 跳过常驻对象
         const SoulRecord& sr = kv.second;
+        ++leaks;
         detail::yuyuko_logln(
             "[Yuyuko] LEAK %p %zub [%s/%s] %s:%d %s() age=%s",
             sr.ptr,sr.size,sr.thread_name,sr.thread_id,
             sr.file,sr.line,sr.func,
             format_duration_us(current_time_us() - sr.timestamp));
     }
-    size_t leaks = g_soul_alive.size();
-    detail::yuyuko_logln(leaks?"[Yuyuko] leak: %zu/%zu":"[Yuyuko] no leaks",leaks,total);
+    size_t permanent = g_soul_permanent.size();
+    detail::yuyuko_logln(leaks ? "[Yuyuko] leak: %zu/%zu (permanent: %zu)"
+                               : "[Yuyuko] no leaks (permanent: %zu/%zu)",
+                         leaks, total, permanent);
     return leaks;
 }
 
@@ -880,217 +897,120 @@ inline size_t leak_check() {
 inline void generate_html_report(const char* filepath = "yuyuko_report.html",
                                   const char* title = "幽幽子·内存魂簿报告") {
     std::shared_lock<std::shared_mutex> lk(g_soul_mtx);
-    
+
     FILE* f = fopen(filepath, "w");
     if (!f) return;
-    
+
     // 统计
-    size_t total = g_soul_alive.size() + g_soul_released.size();
-    size_t alive = g_soul_alive.size();
-    size_t leaked_bytes = 0;
-    size_t total_bytes = 0;
-    for (const auto& kv : g_soul_alive) { total_bytes += kv.second.size; leaked_bytes += kv.second.size; }
+    size_t total     = g_soul_alive.size() + g_soul_released.size();
+    size_t alive     = g_soul_alive.size();
+    size_t permanent = g_soul_permanent.size();
+    size_t released  = g_soul_released.size();
+    size_t leaked_bytes = 0, total_bytes = 0;
+    for (const auto& kv : g_soul_alive) {
+        total_bytes += kv.second.size;
+        if (!g_soul_permanent.count(kv.first)) leaked_bytes += kv.second.size;
+    }
     for (const auto& kv : g_soul_released) total_bytes += kv.second.size;
-    size_t released = g_soul_released.size();
     uint64_t now = current_time_us();
-    
-    // ═══════════════ HTML 头部 ═══════════════
-    fprintf(f, 
-R"(<!DOCTYPE html>
+
+    // ═══════════ CSS + HTML 头部 (白玉楼主题) ═══════════
+    fprintf(f,
+R"HTML(<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>%s</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-    background: #0d1117;
-    color: #c9d1d9;
-    padding: 20px;
-  }
-  .header {
-    text-align: center;
-    padding: 30px;
-    background: linear-gradient(135deg, #1a1a2e 0%%, #16213e 50%%, #0f3460 100%%);
-    border-radius: 12px;
-    margin-bottom: 20px;
-    border: 1px solid #30363d;
-  }
-  .header h1 {
-    font-size: 2em;
-    color: #ff79c6;
-    margin-bottom: 8px;
-  }
-  .header .subtitle {
-    color: #8b949e;
-    font-size: 0.9em;
-  }
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 16px;
-    margin-bottom: 20px;
-  }
-  .card {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    padding: 20px;
-    text-align: center;
-  }
-  .card .number {
-    font-size: 2.5em;
-    font-weight: bold;
-  }
-  .card .label {
-    color: #8b949e;
-    margin-top: 4px;
-    font-size: 0.9em;
-  }
-  .card.total .number { color: #58a6ff; }
-  .card.alive .number { color: #3fb950; }
-  .card.released .number { color: #d2a8ff; }
-  .card.leaked .number { color: #f85149; }
-  .card.bytes .number { color: #d2991d; font-size: 1.8em; }
-  
-  .toolbar {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-  }
-  .toolbar button {
-    padding: 8px 16px;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    background: #21262d;
-    color: #c9d1d9;
-    cursor: pointer;
-    font-size: 0.9em;
-    transition: all 0.2s;
-  }
-  .toolbar button:hover { background: #30363d; }
-  .toolbar button.active { background: #1f6feb; border-color: #1f6feb; }
-  .toolbar input {
-    padding: 8px 12px;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    background: #0d1117;
-    color: #c9d1d9;
-    font-size: 0.9em;
-    flex: 1;
-    min-width: 200px;
-  }
-  
-  table {
-    width: 100%%;
-    border-collapse: collapse;
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    overflow: hidden;
-  }
-  th {
-    background: #21262d;
-    padding: 12px;
-    text-align: left;
-    font-weight: 600;
-    color: #8b949e;
-    font-size: 0.85em;
-    cursor: pointer;
-    user-select: none;
-  }
-  th:hover { color: #c9d1d9; }
-  th .arrow { font-size: 0.7em; margin-left: 4px; }
-  td {
-    padding: 10px 12px;
-    border-top: 1px solid #21262d;
-    font-size: 0.9em;
-  }
-  tr:hover { background: #1c2128; }
-  tr.alive { border-left: 3px solid #3fb950; }
-  tr.released_row { border-left: 3px solid #484f58; opacity: 0.65; }
-  
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.8em;
-    font-weight: 600;
-  }
-  .badge-new { background: #1f6feb22; color: #58a6ff; }
-  .badge-malloc { background: #d2991d22; color: #d2991d; }
-  .badge-alive { background: #3fb95022; color: #3fb950; }
-  .badge-released { background: #484f5822; color: #8b949e; }
-  .badge-leak { background: #f8514922; color: #f85149; }
-  
-  .addr { font-family: 'Cascadia Code', 'Fira Code', monospace; color: #7ee787; }
-  .location { color: #58a6ff; cursor: pointer; }
-  .location:hover { text-decoration: underline; }
-  .thread-tag { color: #d2a8ff; font-size: 0.85em; }
-  
-  .footer {
-    text-align: center;
-    color: #484f58;
-    margin-top: 20px;
-    font-size: 0.85em;
-  }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:'Segoe UI','PingFang SC','Noto Serif SC','Microsoft YaHei',serif;background:linear-gradient(170deg,#0d0d1a 0%%,#1a0a2e 30%%,#0d1117 70%%);color:#cdd6f4;padding:20px;min-height:100vh;overflow-x:hidden;position:relative;}
+  #sakura-canvas{position:fixed;top:0;left:0;width:100%%;height:100%%;pointer-events:none;z-index:0;}
+  .content-wrap{position:relative;z-index:1;}
+  .header{text-align:center;padding:40px 30px;margin-bottom:24px;overflow:hidden;position:relative;background:rgba(26,10,46,0.55);backdrop-filter:blur(16px) saturate(140%%);-webkit-backdrop-filter:blur(16px) saturate(140%%);border:1px solid rgba(255,121,198,0.18);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,0.4);}
+  .header::before{content:'';position:absolute;top:-50%%;left:-50%%;width:200%%;height:200%%;background:radial-gradient(ellipse at center,rgba(255,121,198,0.08) 0%%,transparent 60%%);animation:headerGlow 4s ease-in-out infinite;}
+  @keyframes headerGlow{0%%,100%%{transform:scale(1);opacity:0.6;}50%%{transform:scale(1.15);opacity:1;}}
+  .header h1{font-size:2.4em;font-weight:300;letter-spacing:.05em;background:linear-gradient(135deg,#ff79c6,#bd93f9,#ff79c6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;position:relative;z-index:1;animation:titleShimmer 3s ease-in-out infinite;background-size:200%% 100%%;}
+  @keyframes titleShimmer{0%%,100%%{background-position:0%% 50%%;}50%%{background-position:100%% 50%%;}}
+  .header .subtitle{color:rgba(205,214,244,.6);font-size:.9em;position:relative;z-index:1;margin-top:6px;}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:24px;}
+  .card{background:rgba(26,10,46,.5);backdrop-filter:blur(12px) saturate(130%%);-webkit-backdrop-filter:blur(12px) saturate(130%%);border:1px solid rgba(255,121,198,.12);border-radius:14px;padding:22px 16px;text-align:center;transition:transform .25s,border-color .25s,box-shadow .25s;cursor:default;}
+  .card:hover{transform:translateY(-3px);border-color:rgba(255,121,198,.35);box-shadow:0 8px 28px rgba(255,121,198,.15);}
+  .card .number{font-size:2.3em;font-weight:700;letter-spacing:.02em;}
+  .card .label{color:rgba(205,214,244,.55);margin-top:4px;font-size:.85em;}
+  .card.total .number{color:#89b4fa;} .card.alive .number{color:#a6e3a1;} .card.released .number{color:#cba6f7;}
+  .card.permanent .number{color:#f9e2af;} .card.leaked .number{color:#f38ba8;} .card.bytes .number{color:#fab387;font-size:1.6em;}
+  .toolbar{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;}
+  .toolbar button{padding:8px 18px;border:1px solid rgba(255,121,198,.2);border-radius:20px;background:rgba(26,10,46,.4);backdrop-filter:blur(8px);color:#cdd6f4;cursor:pointer;font-size:.88em;transition:all .25s;}
+  .toolbar button:hover{background:rgba(255,121,198,.15);border-color:rgba(255,121,198,.45);}
+  .toolbar button.active{background:rgba(203,166,247,.2);border-color:#cba6f7;color:#cba6f7;}
+  .toolbar input{padding:8px 16px;border:1px solid rgba(255,121,198,.2);border-radius:20px;background:rgba(13,13,26,.6);backdrop-filter:blur(8px);color:#cdd6f4;font-size:.88em;flex:1;min-width:200px;outline:none;transition:border-color .25s;}
+  .toolbar input:focus{border-color:rgba(255,121,198,.5);}
+  .toolbar input::placeholder{color:rgba(205,214,244,.3);}
+  .table-wrap{background:rgba(26,10,46,.42);backdrop-filter:blur(14px) saturate(120%%);-webkit-backdrop-filter:blur(14px) saturate(120%%);border:1px solid rgba(255,121,198,.14);border-radius:16px;overflow:hidden;}
+  table{width:100%%;border-collapse:collapse;}
+  th{background:rgba(30,12,50,.7);padding:13px 14px;text-align:left;font-weight:600;color:rgba(205,214,244,.65);font-size:.8em;cursor:pointer;user-select:none;letter-spacing:.03em;text-transform:uppercase;border-bottom:1px solid rgba(255,121,198,.1);}
+  th:hover{color:#cdd6f4;} th .arrow{font-size:.65em;margin-left:3px;opacity:.5;}
+  td{padding:11px 14px;border-bottom:1px solid rgba(255,121,198,.05);font-size:.88em;transition:background .15s;}
+  tbody tr{transition:background .15s;}
+  tbody tr:hover{background:rgba(255,121,198,.06)!important;}
+  tbody tr.alive{border-left:3px solid #a6e3a1;}
+  tbody tr.released_row{border-left:3px solid rgba(205,214,244,.15);opacity:.6;}
+  .badge{display:inline-block;padding:3px 10px;border-radius:14px;font-size:.78em;font-weight:600;letter-spacing:.02em;}
+  .badge-new{background:rgba(137,180,250,.15);color:#89b4fa;}
+  .badge-malloc{background:rgba(249,226,175,.15);color:#f9e2af;}
+  .badge-alive{background:rgba(166,227,161,.15);color:#a6e3a1;}
+  .badge-released{background:rgba(205,214,244,.08);color:rgba(205,214,244,.5);}
+  .badge-leak{background:rgba(243,139,168,.18);color:#f38ba8;}
+  .badge-permanent{background:rgba(249,226,175,.2);color:#f9e2af;}
+  .addr{font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace;color:#94e2d5;font-size:.9em;}
+  .location{color:#89b4fa;cursor:pointer;} .location:hover{text-decoration:underline;color:#b4d0fb;}
+  .thread-tag{color:#cba6f7;font-size:.83em;}
+  .footer{text-align:center;color:rgba(205,214,244,.25);margin-top:28px;font-size:.8em;letter-spacing:.04em;}
+  @keyframes petalFall{0%%{transform:translateY(-10vh) rotate(0deg) translateX(0);opacity:0;}10%%{opacity:.8;}90%%{opacity:.6;}100%%{transform:translateY(105vh) rotate(720deg) translateX(120px);opacity:0;}}
+  @keyframes petalSway{0%%,100%%{transform:translateX(0);}25%%{transform:translateX(30px);}75%%{transform:translateX(-25px);}}
 </style>
 </head>
 <body>
-)", title);
-    
-    // ═══════════════ 页面头部 ═══════════════
-    fprintf(f, R"(
-<div class="header">
-  <h1>🦋 %s</h1>
-  <div class="subtitle">白玉楼内存魂簿 · 生成时间：系统运行时</div>
+<canvas id="sakura-canvas"></canvas>
+<div class="content-wrap">
+)HTML", title);
+
+    // ═══════════ 页面头部 ═══════════
+    fprintf(f,
+R"HTML(<div class="header">
+  <h1>%s</h1>
+  <div class="subtitle">白玉楼内存魂簿 · 幽幽子大人巡视中</div>
 </div>
-)", title);
-    
-    // ═══════════════ 统计卡片 ═══════════════
-    fprintf(f, R"(
-<div class="cards">
-  <div class="card total">
-    <div class="number">%zu</div>
-    <div class="label">📋 总计注册灵魂</div>
-  </div>
-  <div class="card alive">
-    <div class="number">%zu</div>
-    <div class="label">🟢 存活中</div>
-  </div>
-  <div class="card released">
-    <div class="number">%zu</div>
-    <div class="label">🟣 已安息</div>
-  </div>
-  <div class="card leaked">
-    <div class="number">%zu</div>
-    <div class="label">🔴 可能泄漏</div>
-  </div>
-  <div class="card bytes">
-    <div class="number">%zu B</div>
-    <div class="label">💾 存活内存</div>
-  </div>
+)HTML", title);
+
+    // ═══════════ 统计卡片 ═══════════
+    fprintf(f,
+R"HTML(<div class="cards">
+  <div class="card total">   <div class="number">%zu</div><div class="label">总计注册</div></div>
+  <div class="card alive">   <div class="number">%zu</div><div class="label">存活中</div></div>
+  <div class="card released"> <div class="number">%zu</div><div class="label">已安息</div></div>
+  <div class="card permanent"><div class="number">%zu</div><div class="label">常驻标记</div></div>
+  <div class="card leaked">  <div class="number">%zu</div><div class="label">可能泄漏</div></div>
+  <div class="card bytes">   <div class="number">%zu B</div><div class="label">泄漏内存</div></div>
 </div>
-)", total, alive, released, alive, leaked_bytes);
-    
-    // ═══════════════ 工具栏 ═══════════════
-    fprintf(f, R"HTML(
-<div class="toolbar">
-  <button class="active" onclick="filter('all', this)">全部</button>
-  <button onclick="filter('alive', this)">🟢 存活</button>
-  <button onclick="filter('released', this)">🟣 已安息</button>
-  <input type="text" placeholder="🔍 搜索文件名、函数名或地址..." oninput="search(this.value)">
+)HTML", total, alive, released, permanent, alive - permanent, leaked_bytes);
+
+    // ═══════════ 工具栏 ═══════════
+    fprintf(f,
+R"HTML(<div class="toolbar">
+  <button class="active" onclick="filter('all',this)">全部</button>
+  <button onclick="filter('alive',this)">存活</button>
+  <button onclick="filter('released',this)">已安息</button>
+  <button onclick="filter('permanent',this)">常驻</button>
+  <input type="text" placeholder="搜索文件名、函数名或地址..." oninput="search(this.value)">
 </div>
 )HTML");
-    
-    // ═══════════════ 数据表格 ═══════════════
-    fprintf(f, R"HTML(
-<table>
-<thead>
-<tr>
+
+    // ═══════════ 数据表格 ═══════════
+    fprintf(f,
+R"HTML(<div class="table-wrap"><table>
+<thead><tr>
   <th onclick="sortTable(0)">状态<span class="arrow"></span></th>
   <th onclick="sortTable(1)">地址<span class="arrow"></span></th>
   <th onclick="sortTable(2)">大小<span class="arrow"></span></th>
@@ -1098,113 +1018,98 @@ R"(<!DOCTYPE html>
   <th onclick="sortTable(4)">分配位置<span class="arrow"></span></th>
   <th onclick="sortTable(5)">线程<span class="arrow"></span></th>
   <th onclick="sortTable(6)">存续时间<span class="arrow"></span></th>
-</tr>
-</thead>
-<tbody>
+</tr></thead><tbody>
 )HTML");
-    
-    // 遍历魂簿，生成每一行 — alive 在前, released 在后
-    auto emit_row = [&](const SoulRecord& soul, bool is_released) {
-        const char* row_class   = is_released ? "released_row" : "alive";
-        const char* status_badge = is_released ? "badge-released" : "badge-leak";
-        const char* status_text  = is_released ? "已安息" : "存活";
+
+    // ═══════════ 表格行 ── alive 在前, released 在后 ═══════════
+    auto emit_row = [&](const SoulRecord& soul, bool is_released, bool is_permanent) {
+        const char* row_class   = is_permanent ? "alive" : (is_released ? "released_row" : "alive");
+        const char* status_badge = is_permanent ? "badge-new badge-permanent"
+                                 : is_released ? "badge-released" : "badge-leak";
+        const char* status_text  = is_permanent ? "常驻"
+                                 : is_released ? "已安息" : "存活";
         const char* source_badge = (soul.source == 0) ? "badge-new" : "badge-malloc";
         const char* source_text  = (soul.source == 0) ? "new" : "malloc";
         const char* elapsed_str  = format_duration_us(now - soul.timestamp);
 
-        fprintf(f, R"HTML(
-<tr class="%s" data-status="%s">
+        fprintf(f,
+R"HTML(<tr class="%s" data-status="%s">
   <td><span class="badge %s">%s</span></td>
   <td><span class="addr">%p</span></td>
   <td>%zu B</td>
   <td><span class="badge %s">%s</span></td>
-  <td><span class="location" title="%s:%d">%s:%d</span><br><small style="color:#8b949e">%s()</small></td>
+  <td><span class="location" title="%s:%d">%s:%d</span><br><small style="color:rgba(205,214,244,.4)">%s()</small></td>
   <td><span class="thread-tag">%s</span></td>
   <td>%s</td>
 </tr>
 )HTML",
-            row_class, is_released ? "released" : "alive",
+            row_class, is_permanent ? "permanent" : (is_released ? "released" : "alive"),
             status_badge, status_text,
             soul.ptr, soul.size,
             source_badge, source_text,
             soul.file, soul.line, soul.file, soul.line,
             soul.func, soul.thread_name, elapsed_str);
     };
-    for (const auto& kv : g_soul_alive)   emit_row(kv.second, false);
-    for (const auto& kv : g_soul_released) emit_row(kv.second, true);
-    
-    // ═══════════════ HTML 尾部 + JavaScript ═══════════════
-    fprintf(f, R"HTML(
-</tbody>
-</table>
+    for (const auto& kv : g_soul_alive)
+        emit_row(kv.second, false, g_soul_permanent.count(kv.first));
+    for (const auto& kv : g_soul_released) emit_row(kv.second, true, false);
 
-<div class="footer">
-  🦋 幽幽子内存魂簿报告 · 由 Yuyuko::generate_html_report() 生成 · 白玉楼出品
-</div>
+    // ═══════════ 尾部 + 樱花 JS ═══════════
+    fprintf(f,
+R"HTML(</tbody></table></div><!-- .table-wrap -->
+
+<div class="footer">🦋 幽幽子内存魂簿报告 · 白玉楼出品</div>
 
 <script>
-// 筛选功能
-function filter(status, btn) {
-  document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  document.querySelectorAll('tbody tr').forEach(row => {
-    if (status === 'all') row.style.display = '';
-    else row.style.display = row.dataset.status === status ? '' : 'none';
+(function sakura(){
+  var c=document.getElementById('sakura-canvas'),x=c.getContext('2d'),w,h,p=[],t=0;
+  function R(){w=c.width=window.innerWidth;h=c.height=window.innerHeight;}
+  R();window.addEventListener('resize',R);
+  for(var i=0;i<50;i++)p.push({x:Math.random()*w,y:Math.random()*h-h,r:3+Math.random()*6,s:.3+Math.random()*.5,o:Math.random()*9});
+  function D(e){
+    x.clearRect(0,0,w,h);t=e;
+    for(var i=0;i<p.length;i++){var P=p[i];P.y+=P.s;P.x+=Math.sin(t/1000+P.o)*.4;if(P.y>h+20){P.y=-20;P.x=Math.random()*w;}
+    x.beginPath();x.arc(P.x,P.y,P.r,0,Math.PI*2);
+    x.fillStyle='rgba(255,182,193,'+(.35+.25*Math.sin(t/800+P.o)).toFixed(2)+')';x.fill();}
+    requestAnimationFrame(D);
+  }
+  requestAnimationFrame(D);
+})();
+function filter(s,b){
+  document.querySelectorAll('.toolbar button').forEach(function(x){x.classList.remove('active');});
+  b.classList.add('active');
+  document.querySelectorAll('tbody tr').forEach(function(r){
+    r.style.display=s==='all'?'':r.dataset.status===s?'':'none';
   });
 }
-
-// 搜索功能
-function search(query) {
-  const q = query.toLowerCase();
-  document.querySelectorAll('tbody tr').forEach(row => {
-    const text = row.textContent.toLowerCase();
-    row.style.display = text.includes(q) ? '' : 'none';
+function search(q){
+  q=q.toLowerCase();
+  document.querySelectorAll('tbody tr').forEach(function(r){
+    r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';
   });
-  // 搜索时取消筛选按钮的高亮
-  document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
-  if (!q) document.querySelector('.toolbar button').classList.add('active');
+  if(!q){var b=document.querySelectorAll('.toolbar button');if(b.length)b[0].classList.add('active');}
 }
-
-// 排序功能
-let sortDir = {};
-function sortTable(col) {
-  const tbody = document.querySelector('tbody');
-  const rows = Array.from(tbody.querySelectorAll('tr'));
-  const key = 'col' + col;
-  sortDir[key] = !(sortDir[key] || false);
-  const dir = sortDir[key] ? 1 : -1;
-  
-  rows.sort((a, b) => {
-    let va = a.cells[col].textContent.trim();
-    let vb = b.cells[col].textContent.trim();
-    // 尝试按数字排序
-    let na = parseFloat(va);
-    let nb = parseFloat(vb);
-    if (!isNaN(na) && !isNaN(nb)) return (na - nb) * dir;
-    return va.localeCompare(vb) * dir;
-  });
-  
-  // 更新箭头
-  document.querySelectorAll('th .arrow').forEach(a => a.textContent = '');
-  const th = document.querySelectorAll('th')[col];
-  th.querySelector('.arrow').textContent = dir > 0 ? '▲' : '▼';
-  
-  rows.forEach(row => tbody.appendChild(row));
+var d={};
+function sortTable(c){
+  var t=document.querySelector('tbody'),r=Array.from(t.querySelectorAll('tr'));
+  d['c'+c]=!(d['c'+c]||false);var o=d['c'+c]?1:-1;
+  r.sort(function(a,b){var va=a.cells[c].textContent.trim(),vb=b.cells[c].textContent.trim();var na=parseFloat(va),nb=parseFloat(vb);if(!isNaN(na)&&!isNaN(nb))return(na-nb)*o;return va.localeCompare(vb)*o;});
+  document.querySelectorAll('th .arrow').forEach(function(a){a.textContent='';});
+  document.querySelectorAll('th')[c].querySelector('.arrow').textContent=o>0?'▲':'▼';
+  r.forEach(function(x){t.appendChild(x);});
 }
 </script>
 </body>
 </html>
 )HTML");
-    
+
     fclose(f);
-    
-    // 同步模式下输出到终端；异步模式下已经在锁内，直接 fprintf stderr
+
     if (!detail::g_async_mode) {
         fprintf(stderr, "[Yuyuko] HTML 报告已生成: %s\n", filepath);
     }
 }
-
-} // namespace Yuyuko
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // 便捷宏 (ENABLE_ASAN 启用时)
@@ -1303,6 +1208,8 @@ function sortTable(col) {
 #define MEM_GUARD_EX_TAG(ptr, chunk_size, tag) \
     Yuyuko::MemGuardEx _yuko_gx_##__LINE__((ptr), (chunk_size), (tag), __FILE__, __LINE__, __FUNCTION__)
 
+#define PERMANENT_SOUL(ptr) Yuyuko::mark_permanent(ptr)
+
 #define TRACKED_STRNCPY(dst, src, n) \
     do { \
         size_t len = std::strnlen((src), (n)); \
@@ -1311,32 +1218,29 @@ function sortTable(col) {
         } \
     } while(0)
 
-#else // ENABLE_ASAN 未启用 — 零开销 stub
+#else
 
 namespace Yuyuko {
-
     inline void start_async_log(const char* = nullptr) {}
     inline void stop_async_log() {}
-
     inline void register_new(void*, size_t, const char*, int, const char*) {}
     inline void register_malloc(void*, size_t, const char*, int, const char*) {}
     inline bool release_new(void*, const char*, int, const char*) { return true; }
     inline bool release_malloc(void*, const char*, int, const char*) { return true; }
-
     inline bool check_access(void*, const char*, int, const char*) { return true; }
     inline bool check_bounds(void*, size_t, const char*, int, const char*) { return true; }
     inline bool is_released(void*) { return false; }
     inline size_t get_size(void*) { return 0; }
     inline size_t get_total_souls() { return 0; }
     inline size_t get_alive_souls() { return 0; }
+    inline size_t get_permanent_souls() { return 0; }
     inline size_t leak_check() { return 0; }
-
+    inline void mark_permanent(void*) {}
     inline void mem_snapshot(void*, const char* = "default") {}
     inline void mem_snapshot_ex(void*, size_t, const char* = "default") {}
     inline bool mem_verify(void*) { return true; }
     inline bool mem_check(void*, const char*, int, const char*) { return true; }
     inline bool mem_check_ex(void*, size_t, const char*, int, const char*) { return true; }
-
     class MemGuard {
     public:
         MemGuard(void*, const char*, const char*, int, const char*) {}
@@ -1352,22 +1256,18 @@ namespace Yuyuko {
         void add(void*, const char*, const char*, int, const char*) {}
         void dismiss() {}
     };
-
     inline void generate_html_report(const char* = nullptr, const char* = nullptr) {}
-
 } // namespace Yuyuko
 
 #define TRACKED_NEW(type)   new type
 #define TRACKED_DELETE(ptr) delete ptr
 #define TRACKED_ALLOC(size) std::malloc(size)
 #define TRACKED_FREE(ptr)   std::free(ptr)
-
 #define TRACKED_MEMSET(ptr, val, size)   std::memset((ptr), (val), (size))
 #define TRACKED_MEMCPY(dst, src, size)   std::memcpy((dst), (src), (size))
 #define TRACKED_MEMMOVE(dst, src, size)  std::memmove((dst), (src), (size))
 #define TRACKED_STRCPY(dst, src)         std::strcpy((dst), (src))
 #define TRACKED_STRNCPY(dst, src, n)     std::strncpy((dst), (src), (n))
-
 #define MEM_SNAPSHOT(ptr, tag) ((void)0)
 #define MEM_VERIFY(ptr)        (true)
 #define MEM_CHECK(ptr)         (true)
@@ -1375,5 +1275,6 @@ namespace Yuyuko {
 #define MEM_GUARD_TAG(ptr, tag) ((void)0)
 #define MEM_GUARD_EX(ptr, chunk_size) ((void)0)
 #define MEM_GUARD_EX_TAG(ptr, chunk_size, tag) ((void)0)
+#define PERMANENT_SOUL(ptr) ((void)0)
 
 #endif // ENABLE_ASAN
