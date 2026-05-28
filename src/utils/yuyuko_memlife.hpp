@@ -366,7 +366,17 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
     str_copy(sr.thread_name,sizeof(sr.thread_name),cached_thread_name());
     str_copy(sr.thread_id,sizeof(sr.thread_id),cached_thread_id());
 
-    { std::unique_lock<std::shared_mutex> lk(g_soul_mtx); g_soul_alive[ptr] = sr; g_soul_alive_range.insert(reinterpret_cast<uintptr_t>(ptr)); }
+    {
+        std::unique_lock<std::shared_mutex> lk(g_soul_mtx);
+        // 清理前世记录：地址复用后不再是亡灵
+        auto rit = g_soul_released.find(ptr);
+        if (rit != g_soul_released.end()) {
+            g_soul_released_range.erase(reinterpret_cast<uintptr_t>(ptr));
+            g_soul_released.erase(rit);
+        }
+        g_soul_alive[ptr] = sr;
+        g_soul_alive_range.insert(reinterpret_cast<uintptr_t>(ptr));
+    }
 
     detail::yuyuko_logln(
         "[Yuyuko] ALLOC %p size=%zu src=%s @ %s:%d %s() [%s/%s]",
