@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-05-29
+
+### Changed
+- **IOCP file size caching**: `submit_read`, `submit_readinto`, `submit_write` (append), and `submit_seek` (SEEK_END) no longer call `GetFileSizeEx` on every operation. The file size is now cached in the `Session` struct — initialized once at `create_session` and refreshed on write/truncate — eliminating a kernel syscall per I/O on the hot path. `windows_io_backend.cpp` constructors also use the cached value for append-mode position init.
+- **`ResultBatcher` dual-trigger flush**: Replaced the unconditional `|| true` flush in `flush_batchers()` with threshold-triggered flushes from `process_one`. When `push()` reaches the batch threshold, the batcher flushes immediately; otherwise the idle timeout (5ms) controls flush timing. Reduces unnecessary `call_soon_threadsafe` calls under low-to-moderate load while preserving responsiveness under high load.
+- **Thread-local `BufferPool` cache**: `pool_acquire*` / `pool_release` now use a per-thread cache (up to 8 buffers) before falling through to the global `BufferPool` mutex. The common case — release then quickly re-acquire on the same thread — avoids the global lock entirely.
+
+### Fixed
+- **`test_critical.py` write test data corruption**: The write stress test previously had all workers opening the same file path with `"wb"` (`CREATE_ALWAYS`), causing concurrent truncation and data corruption. Each worker now writes to a unique pre-created file. Added `return_exceptions=True` + failure reporting, `gc.disable()` during benchmark, `tempfile.mkdtemp`-based cleanup, and reduced the read test file from 1GB to 100MB.
+
 ## [1.4.0] - 2026-05-27
 
 ### Changed

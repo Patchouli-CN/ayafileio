@@ -34,6 +34,9 @@ struct Session {
     bool            owns_fd = true;
     PoolKey         poolKey;
 
+    // Cached file state (avoids GetFileSizeEx syscall on every read)
+    uint64_t        cachedFileSize = 0;  // updated on write/truncate, read under posMtx
+
     // Cached config values (snapshot at open time)
     size_t          cached_buffer_size = 65536;
     size_t          cached_buffer_pool_max = 512;

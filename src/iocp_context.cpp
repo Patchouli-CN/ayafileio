@@ -162,6 +162,13 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
     SetFileCompletionNotificationModes(h,
         FILE_SKIP_SET_EVENT_ON_HANDLE);
 
+    // Cache initial file size — avoids GetFileSizeEx syscall on every read
+    {
+        LARGE_INTEGER fs{};
+        if (GetFileSizeEx(h, &fs))
+            s->cachedFileSize = static_cast<uint64_t>(fs.QuadPart);
+    }
+
     s->running.store(true, std::memory_order_release);
 
     uint64_t id = s->id;
@@ -365,7 +372,8 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
     }
 
     if (set_fn && val) {
-        batcher->push(set_fn, val);
+        bool threshold = batcher->push(set_fn, val);
+        if (threshold) [[unlikely]] batcher->flush();
     } else {
         Py_XDECREF(set_fn);
         Py_XDECREF(val);
@@ -379,7 +387,7 @@ void IOCPContext::flush_batchers() {
     std::lock_guard<std::mutex> lk(m_batchersMtx);
     for (auto &kv : m_batchers) {
         auto &b = kv.second;
-        if (b->has_pending() && (b->idle_expired() || true /* flush after every batch */)) {
+        if (b->has_pending() && b->idle_expired()) {
             b->flush();
         }
     }
@@ -504,16 +512,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
     size_t   readSize;
     {
         std::lock_guard<std::mutex> lk(s->posMtx);
-        LARGE_INTEGER fs{};
-        if (!GetFileSizeEx(s->handle, &fs)) {
-            DWORD err = GetLastError();
-            PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "GetFileSizeEx failed");
-            PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
-            PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
-            Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
-            return future;
-        }
-        int64_t rem = (int64_t)fs.QuadPart - (int64_t)s->filePos;
+        int64_t rem = static_cast<int64_t>(s->cachedFileSize) - static_cast<int64_t>(s->filePos);
         if (rem <= 0) {
             PyObject *b = PyBytes_FromStringAndSize(nullptr, 0);
             PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
@@ -619,20 +618,13 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view) {
     {
         std::lock_guard<std::mutex> lk(s->posMtx);
         if (s->appendMode) {
-            LARGE_INTEGER li{};
-            if (!GetFileSizeEx(s->handle, &li)) {
-                DWORD err = GetLastError();
-                PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "GetFileSizeEx failed");
-                PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
-                PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
-                Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
-                return future;
-            }
-            offset = (uint64_t)li.QuadPart;
+            offset = s->cachedFileSize;
         } else {
             offset = s->filePos;
         }
         s->filePos = offset + wsize;
+        if (s->filePos > s->cachedFileSize)
+            s->cachedFileSize = s->filePos;  // optimistic: assume write succeeds
     }
 
     IORequest *req = make_req_iocp(wsize, future, ReqType::Write,
@@ -692,16 +684,7 @@ PyObject *IOCPContext::submit_seek(uint64_t session_id, int64_t offset, int when
         else if (whence == 1)
             s->filePos = (uint64_t)((int64_t)s->filePos + offset);
         else if (whence == 2) {
-            LARGE_INTEGER sz{};
-            if (!GetFileSizeEx(s->handle, &sz)) {
-                DWORD err = GetLastError();
-                PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "GetFileSizeEx failed");
-                PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
-                PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
-                Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
-                return future;
-            }
-            s->filePos = (uint64_t)((int64_t)sz.QuadPart + offset);
+            s->filePos = static_cast<uint64_t>(static_cast<int64_t>(s->cachedFileSize) + offset);
         } else {
             PyObject *exc = PyObject_CallFunction(g_ValueError, "s", "Invalid whence value");
             PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
@@ -829,7 +812,8 @@ PyObject *IOCPContext::submit_truncate(uint64_t session_id, int64_t size) {
 
     {
         std::lock_guard<std::mutex> lk(s->posMtx);
-        if ((uint64_t)size < s->filePos) s->filePos = (uint64_t)size;
+        s->cachedFileSize = static_cast<uint64_t>(size);
+        if (static_cast<uint64_t>(size) < s->filePos) s->filePos = static_cast<uint64_t>(size);
     }
 
     PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
@@ -874,17 +858,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
     size_t readSize;
     {
         std::lock_guard<std::mutex> lk(s->posMtx);
-        LARGE_INTEGER fs{};
-        if (!GetFileSizeEx(s->handle, &fs)) {
-            PyBuffer_Release(&view);
-            DWORD err = GetLastError();
-            PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "GetFileSizeEx failed");
-            PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
-            PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
-            Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
-            return future;
-        }
-        int64_t rem = (int64_t)fs.QuadPart - (int64_t)s->filePos;
+        int64_t rem = static_cast<int64_t>(s->cachedFileSize) - static_cast<int64_t>(s->filePos);
         if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject *z = PyLong_FromLong(0);

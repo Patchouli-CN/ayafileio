@@ -94,16 +94,39 @@ private:
     std::atomic<size_t> m_cached_max{512};
 };
 
-// 便捷函数
-inline PoolBuf* pool_acquire() {
-    return BufferPool::instance().acquire(ayafileio::config().buffer_size());
+// 便捷函数（带线程本地缓存，减少全局锁竞争）
+
+namespace detail {
+    static constexpr size_t TC_MAX = 8;
+    inline std::vector<PoolBuf*>& thread_local_cache() {
+        thread_local std::vector<PoolBuf*> cache;
+        return cache;
+    }
 }
 
 inline PoolBuf* pool_acquire_with_size(size_t size) {
+    auto& tlc = detail::thread_local_cache();
+    for (auto it = tlc.begin(); it != tlc.end(); ++it) {
+        if ((*it)->size >= size) [[likely]] {
+            PoolBuf* buf = *it;
+            tlc.erase(it);
+            return buf;
+        }
+    }
     return BufferPool::instance().acquire(size);
 }
 
+inline PoolBuf* pool_acquire() {
+    return pool_acquire_with_size(ayafileio::config().buffer_size());
+}
+
 inline void pool_release(PoolBuf* p) {
+    if (!p) return;
+    auto& tlc = detail::thread_local_cache();
+    if (tlc.size() < detail::TC_MAX) {
+        tlc.push_back(p);
+        return;
+    }
     BufferPool::instance().release(p);
 }
 

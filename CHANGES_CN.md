@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.1] - 2026-05-29
+
+### 变更
+- **IOCP 文件大小缓存**: `submit_read`、`submit_readinto`、`submit_write`（追加模式）和 `submit_seek`（SEEK_END）不再每次操作调用 `GetFileSizeEx`。文件大小现缓存于 `Session` 结构体中——在 `create_session` 时初始化一次，write/truncate 时刷新——消除了热路径上每次 I/O 的内核 syscall。`windows_io_backend.cpp` 构造函数也使用缓存值进行追加模式位置初始化。
+- **`ResultBatcher` 双触发 flush**: 将 `flush_batchers()` 中无条件的 `|| true` flush 替换为 `process_one` 中的阈值触发。当 `push()` 达到批次阈值时立即 flush；否则由空闲超时（5ms）控制 flush 时机。低到中等负载下减少不必要的 `call_soon_threadsafe` 调用，高负载下保持响应。
+- **线程本地 `BufferPool` 缓存**: `pool_acquire*` / `pool_release` 现使用 per-thread 缓存（最多 8 个缓冲区），miss 后才回退到全局 `BufferPool` mutex。常见场景——同一线程释放后迅速重新获取——完全避免了全局锁。
+
+### 修复
+- **`test_critical.py` 写入测试数据损坏**: 写入压力测试原先所有 worker 以 `"wb"`（`CREATE_ALWAYS`）模式打开同一文件路径，导致并发截断和数据损坏。现每个 worker 使用独立的预创建文件。添加了 `return_exceptions=True` + 失败汇总报告、压测期间 `gc.disable()`、基于 `tempfile.mkdtemp` 的清理机制，并将读取测试文件从 1GB 缩减至 100MB。
+
 ## [1.4.0] - 2026-05-27
 
 ### 变更

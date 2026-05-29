@@ -71,15 +71,12 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     }
     Py_DECREF(create_future);
 
-    // ── init file position ────────────────────────────────────────────────
+    // ── init file position (cachedFileSize already set in create_session) ───
     if (appendMode) {
         auto s = IOCPContext::instance().get_session(m_sessionId);
         if (s) {
-            LARGE_INTEGER li{};
-            if (GetFileSizeEx(h, &li)) {
-                std::lock_guard<std::mutex> lk(s->posMtx);
-                s->filePos = (uint64_t)li.QuadPart;
-            }
+            std::lock_guard<std::mutex> lk(s->posMtx);
+            s->filePos = s->cachedFileSize;
         }
     }
 }
@@ -175,15 +172,12 @@ WindowsIOBackend::WindowsIOBackend(int fd, const std::string &mode, bool owns_fd
     }
     Py_DECREF(create_future);
 
-    // ── init file position ────────────────────────────────────────────────
+    // ── init file position (cachedFileSize already set in create_session) ───
     if (appendMode) {
         auto s = IOCPContext::instance().get_session(m_sessionId);
         if (s) {
-            LARGE_INTEGER li{};
-            if (GetFileSizeEx(h, &li)) {
-                std::lock_guard<std::mutex> lk(s->posMtx);
-                s->filePos = (uint64_t)li.QuadPart;
-            }
+            std::lock_guard<std::mutex> lk(s->posMtx);
+            s->filePos = s->cachedFileSize;
         }
     }
 }
