@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-05-29
+
+### Fixed
+- **IOCP double‑delivery use‑after‑free crash**: Under extreme concurrency (~50K coroutines), Windows IOCP can deliver the same `OVERLAPPED` completion to `GetQueuedCompletionStatusEx` multiple times — including across separate batch calls ~10–15ms apart. When the first delivery freed the `IORequest` and a later delivery arrived after the heap reused the same address for a new `IORequest`, the double‑delivery CAS guard (`IOState`) saw `PENDING` from the **new** object and incorrectly processed the stale completion, corrupting the new `IORequest`'s data and causing an access violation in `PyGILState_Release`. Fixed with a **quarantine‑based deferred‑free** mechanism: `process_one` inserts freed `IORequest` objects into a thread‑local quarantine list instead of deleting them immediately. Quarantined objects are held for 1 second before being freed, preventing address reuse during the IOCP double‑delivery window. The CAS guard order was also corrected — the `compare_exchange_strong` on `IOState` now executes **before** `Yuyuko::check_access`, so that double deliveries are silently rejected by the CAS without touching any potentially‑stale fields.
+- **Yuyuko memory tracker enhanced** (used to diagnose the above bug): Added `TRACKED_NEW_ARGS` / `TRACKED_PLACEMENT_NEW` / `TRACKED_PLACEMENT_NEW_ARGS` macros for constructor‑argument and placement‑new allocation tracking. Added `reserve_souls(alive_cap, released_cap)` to pre‑size the soul‑book hash tables. Added `MEM_GUARD_BATCH_DEF` / `MEM_GUARD_BATCH_ADD` convenience macros for batch memory guards.
+
+### CI
+- **`test_critical.py` rewritten for stability**: Write test now uses unique pre‑created files per worker instead of all workers opening the same `"wb"` (`CREATE_ALWAYS`) file — eliminating concurrent‑truncation data corruption. Added `asyncio.gather(return_exceptions=True)` + failure reporting, `gc.disable()` during benchmark, `tempfile.mkdtemp`‑based cleanup, and reduced the read test file from 1GB to 100MB.
+
 ## [1.4.1] - 2026-05-29
 
 ### Changed

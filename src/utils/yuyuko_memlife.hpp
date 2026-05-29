@@ -12,10 +12,13 @@
 //   - 双缓冲异步日志：业务线程纳秒级返回，后台线程批量写文件
 //
 // 用法：
-//   TRACKED_NEW(type)              → 追踪对象，使用 operator new/delete
-//   TRACKED_ALLOC(size)            → 追踪原始内存块，使用 std::malloc/free
+//   TRACKED_NEW(type)              → 追踪对象（默认构造）
+//   TRACKED_NEW_ARGS(type, ...)    → 追踪对象（带参构造）
+//   TRACKED_ALLOC(size)            → 追踪原始内存块
 //   TRACKED_DELETE(ptr)            → 释放追踪对象
 //   TRACKED_FREE(ptr)              → 释放追踪内存块
+//   TRACKED_PLACEMENT_NEW(type, raw)       → placement new + 注册（默认构造）
+//   TRACKED_PLACEMENT_NEW_ARGS(type, raw, ...) → placement new + 注册（带参构造）
 //   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放（基于魂簿）
 //   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测
 //   Yuyuko::mem_snapshot(ptr)      → 保存内存 CRC 快照（4KB 粒度）
@@ -23,6 +26,10 @@
 //   Yuyuko::mem_check(ptr)         → 校验 CRC 快照，检测内存损坏
 //   Yuyuko::mem_check_ex(ptr,N)    → 校验 CRC 快照（自定义粒度）
 //   Yuyuko::leak_check()           → 程序退出时检测泄漏
+//   Yuyuko::reserve_souls(alive, released) → 调整魂簿容量
+//   PERMANENT_SOUL(ptr)            → 标记常驻对象，排除出 leak_check
+//   MEM_GUARD_BATCH_DEF(name)      → 声明批量守卫
+//   MEM_GUARD_BATCH_ADD(name, ptr, tag) → 批量守卫添加内存块
 //
 // 异步日志：
 //   Yuyuko::start_async_log("yuyuko.log")  → 启动异步日志线程
@@ -859,6 +866,15 @@ inline size_t get_permanent_souls() {
     return g_soul_permanent.size();
 }
 
+/// 调整魂簿哈希表容量 — 在大量分配开始前调用可避免 rehash
+/// @param alive_cap 存活表预留桶数（默认 65536）
+/// @param released_cap 亡灵表预留桶数（默认 16384）
+inline void reserve_souls(size_t alive_cap = 65536, size_t released_cap = 16384) {
+    std::unique_lock<std::shared_mutex> lk(g_soul_mtx);
+    g_soul_alive.reserve(alive_cap);
+    g_soul_released.reserve(released_cap);
+}
+
 /// 标记常驻对象 — 排除出 leak_check
 /// 用于连接池、全局缓存、socket 等程序生命周期内不释放的对象
 inline void mark_permanent(void* ptr) {
@@ -1122,6 +1138,27 @@ function sortTable(c){
         return ptr; \
     }(__FILE__, __LINE__, __FUNCTION__)
 
+#define TRACKED_NEW_ARGS(type, ...) \
+    [](const char* file, int line, const char* func) -> type* { \
+        type* ptr = new type(__VA_ARGS__); \
+        Yuyuko::register_new(ptr, sizeof(type), file, line, func); \
+        return ptr; \
+    }(__FILE__, __LINE__, __FUNCTION__)
+
+#define TRACKED_PLACEMENT_NEW(type, raw_ptr) \
+    [](void* rp, const char* file, int line, const char* func) -> type* { \
+        type* ptr = new (rp) type; \
+        Yuyuko::register_new(ptr, sizeof(type), file, line, func); \
+        return ptr; \
+    }(raw_ptr, __FILE__, __LINE__, __FUNCTION__)
+
+#define TRACKED_PLACEMENT_NEW_ARGS(type, raw_ptr, ...) \
+    [](void* rp, const char* file, int line, const char* func) -> type* { \
+        type* ptr = new (rp) type(__VA_ARGS__); \
+        Yuyuko::register_new(ptr, sizeof(type), file, line, func); \
+        return ptr; \
+    }(raw_ptr, __FILE__, __LINE__, __FUNCTION__)
+
 #define TRACKED_DELETE(ptr) \
     do { \
         if (ptr) { \
@@ -1208,6 +1245,12 @@ function sortTable(c){
 #define MEM_GUARD_EX_TAG(ptr, chunk_size, tag) \
     Yuyuko::MemGuardEx _yuko_gx_##__LINE__((ptr), (chunk_size), (tag), __FILE__, __LINE__, __FUNCTION__)
 
+#define MEM_GUARD_BATCH_DEF(name) \
+    Yuyuko::MemGuardBatch name
+
+#define MEM_GUARD_BATCH_ADD(name, ptr, tag) \
+    (name).add((ptr), (tag), __FILE__, __LINE__, __FUNCTION__)
+
 #define PERMANENT_SOUL(ptr) Yuyuko::mark_permanent(ptr)
 
 #define TRACKED_STRNCPY(dst, src, n) \
@@ -1235,6 +1278,7 @@ namespace Yuyuko {
     inline size_t get_alive_souls() { return 0; }
     inline size_t get_permanent_souls() { return 0; }
     inline size_t leak_check() { return 0; }
+    inline void reserve_souls(size_t = 65536, size_t = 16384) {}
     inline void mark_permanent(void*) {}
     inline void mem_snapshot(void*, const char* = "default") {}
     inline void mem_snapshot_ex(void*, size_t, const char* = "default") {}
@@ -1260,6 +1304,9 @@ namespace Yuyuko {
 } // namespace Yuyuko
 
 #define TRACKED_NEW(type)   new type
+#define TRACKED_NEW_ARGS(type, ...)   new type(__VA_ARGS__)
+#define TRACKED_PLACEMENT_NEW(type, raw_ptr)   new (raw_ptr) type
+#define TRACKED_PLACEMENT_NEW_ARGS(type, raw_ptr, ...)   new (raw_ptr) type(__VA_ARGS__)
 #define TRACKED_DELETE(ptr) delete ptr
 #define TRACKED_ALLOC(size) std::malloc(size)
 #define TRACKED_FREE(ptr)   std::free(ptr)
@@ -1275,6 +1322,8 @@ namespace Yuyuko {
 #define MEM_GUARD_TAG(ptr, tag) ((void)0)
 #define MEM_GUARD_EX(ptr, chunk_size) ((void)0)
 #define MEM_GUARD_EX_TAG(ptr, chunk_size, tag) ((void)0)
+#define MEM_GUARD_BATCH_DEF(name)       Yuyuko::MemGuardBatch name
+#define MEM_GUARD_BATCH_ADD(name, ptr, tag) ((void)0)
 #define PERMANENT_SOUL(ptr) ((void)0)
 
 #endif // ENABLE_ASAN

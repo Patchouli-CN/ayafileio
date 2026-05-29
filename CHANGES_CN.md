@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.2] - 2026-05-29
+
+### 修复
+- **IOCP 双重投递 use‑after‑free 崩溃修复**: 在极端并发（~50K 协程）下，Windows IOCP 可能将同一 `OVERLAPPED` 完成包多次投递给 `GetQueuedCompletionStatusEx`——包括跨批次调用，间隔约 10–15ms。当第一次投递释放了 `IORequest` 后、后续投递到达时，若堆已将该地址复用给新的 `IORequest`，双重投递 CAS 守卫（`IOState`）会看到**新**对象的 `PENDING` 状态并错误处理该过期完成包，破坏新 `IORequest` 的数据，最终在 `PyGILState_Release` 中导致访问违例。通过**隔离区延迟释放**机制修复：`process_one` 将释放的 `IORequest` 插入线程本地隔离列表而非立即删除，隔离对象持有 1 秒后才真正释放，防止在 IOCP 双重投递窗口内发生地址复用。同时修正了 CAS 守卫顺序——`compare_exchange_strong` 现在在 `Yuyuko::check_access` **之前**执行，使双重投递由 CAS 静默拒绝，无需触碰任何可能已失效的字段。
+- **幽幽子内存追踪器增强**（用于诊断上述 bug）：新增 `TRACKED_NEW_ARGS` / `TRACKED_PLACEMENT_NEW` / `TRACKED_PLACEMENT_NEW_ARGS` 宏，支持带参构造和 placement‑new 的分配追踪。新增 `reserve_souls(alive_cap, released_cap)` 预分配魂簿哈希表容量。新增 `MEM_GUARD_BATCH_DEF` / `MEM_GUARD_BATCH_ADD` 批量守卫便捷宏。
+
+### CI
+- **`test_critical.py` 重写提升稳定性**: 写入测试现为每个 worker 使用独立的预创建文件，而非所有 worker 打开同一 `"wb"`（`CREATE_ALWAYS`）文件——消除了并发截断导致的数据损坏。添加了 `asyncio.gather(return_exceptions=True)` + 失败汇总报告、压测期间 `gc.disable()`、基于 `tempfile.mkdtemp` 的清理机制，并将读取测试文件从 1GB 缩减至 100MB。
+
 ## [1.4.1] - 2026-05-29
 
 ### 变更

@@ -4,6 +4,7 @@
 #include "utils/debug_log.hpp"
 #include "utils/yuyuko_memlife.hpp"
 #include <algorithm>
+#include <chrono>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTAINING_RECORD — safe cast from OVERLAPPED* to IORequest*
@@ -25,6 +26,32 @@ IOCPContext &IOCPContext::instance() {
 
 IOCPContext::~IOCPContext() {
     if (m_running.load(std::memory_order_relaxed)) shutdown();
+}
+
+// Quarantine list — IORequest objects are NOT freed immediately to prevent
+// address-reuse from defeating the IOCP double-delivery CAS guard when
+// Windows re-delivers a completion across multiple GQCSEx calls.
+// Each entry is held for at least QUARANTINE_MS before being freed.
+static constexpr unsigned QUARANTINE_MS = 1000;
+struct QuarantineEntry { IORequest* req; std::chrono::steady_clock::time_point when; };
+static thread_local std::vector<QuarantineEntry> t_quarantine;
+
+static void quarantine_drain() {
+    auto now = std::chrono::steady_clock::now();
+    auto it = t_quarantine.begin();
+    while (it != t_quarantine.end()) {
+        if (now - it->when >= std::chrono::milliseconds(QUARANTINE_MS)) {
+            TRACKED_DELETE(it->req);
+            it = t_quarantine.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void quarantine_push(IORequest* req) {
+    t_quarantine.push_back({req, std::chrono::steady_clock::now()});
+    if (t_quarantine.size() >= 256) quarantine_drain();
 }
 
 // mark the request sync done — clean up Python references but don't delete req.
@@ -270,6 +297,9 @@ void IOCPContext::worker_proc(HANDLE iocp) {
             process_one(sid, req, e.dwNumberOfBytesTransferred,
                         (e.Internal == 0) ? 0 : (DWORD)e.Internal);
         }
+        // Drain quarantine — IORequest objects that have been held
+        // for QUARANTINE_MS are now safe to free.
+        quarantine_drain();
         flush_batchers();
         PyGILState_Release(gs);
     }
@@ -278,17 +308,18 @@ void IOCPContext::worker_proc(HANDLE iocp) {
 
 void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
                               DWORD bytes, DWORD err) {
-    if (!Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__)) return;
     // ── Double‑delivery guard ────────────────────────────────────────────
-    // Under extreme concurrency Windows IOCP may deliver the same OVERLAPPED
-    // completion twice.  Atomically claim this request; if it was already
-    // processed (by a previous process_one or mark_sync_done) just return.
+    // MUST come first — if this is a duplicate IOCP delivery of an already-
+    // freed IORequest, the CAS will fail (state is RESOLVED or REJECTED, not
+    // PENDING) and we bail out without touching any of req's other fields.
     IOState expected = IOState::PENDING;
     if (!req->state.compare_exchange_strong(expected, IOState::RESOLVED)) {
         UR_DEBUG_LOG("process_one DOUBLE-DELIVERY req=%p sid=%llu state=%d — skipping",
                      (void*)req, sessionId, (int)expected);
         return;
     }
+    // CAS succeeded — we own this completion exclusively, req is guaranteed alive
+    if (!Yuyuko::check_access(req, __FILE__, __LINE__, __FUNCTION__)) return;
 
     UR_DEBUG_LOG("process_one ENTER sid=%llu req=%p future=%p set_res=%p set_exc=%p bytes=%lu err=%lu type=%d isReadinto=%d",
                  sessionId, (void*)req, (void*)req->future, (void*)req->set_result,
@@ -315,7 +346,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
             UR_DEBUG_LOG("process_one SYNC req=%p sid=%llu SESSION NOT FOUND — deleting req anyway",
                          (void*)req, sessionId);
         }
-        TRACKED_DELETE(req);
+        quarantine_push(req);
         return;
     }
 
@@ -327,7 +358,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         if (it == m_sessions.end()) {
             // Session already closed — just release memory.
             UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu SESSION GONE — deleting req", (void*)req, sessionId);
-            TRACKED_DELETE(req);
+            quarantine_push(req);
             return;
         }
         session = it->second;
@@ -378,8 +409,8 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         Py_XDECREF(set_fn);
         Py_XDECREF(val);
     }
-    UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu — deleting after push", (void*)req, sessionId);
-    TRACKED_DELETE(req);
+    UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu — deferred free after push", (void*)req, sessionId);
+    quarantine_push(req);
 }
 
 void IOCPContext::flush_batchers() {
