@@ -1245,6 +1245,176 @@ async def test_readinto_text_mode_raises():
         path.unlink(missing_ok=True)
 
 
+# ── chunk (流式读取) ────────────────────────────────────────────────────
+
+
+async def test_chunk_basic():
+    """chunk 基本流式读取"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        chunks = []
+        async with ayafileio.open(path, "rb") as f:
+            async for c in f.chunk(3):
+                assert isinstance(c, memoryview)
+                chunks.append(bytes(c))
+
+        assert b"".join(chunks) == content
+        # chunk_size=3 → 4 个 chunk: 012, 345, 678, 9
+        assert len(chunks) == 4
+        assert chunks[0] == b"012"
+        assert chunks[3] == b"9"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_chunk_custom_buf():
+    """chunk 使用预分配缓冲区 —— 零额外分配"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"A" * 100
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        buf = bytearray(4096)
+        first_chunk_ptr = None
+        chunk_count = 0
+
+        async with ayafileio.open(path, "rb") as f:
+            async for c in f.chunk(32, buf=buf):
+                chunk_count += 1
+                # 每个 chunk 的 memoryview 应指向同一底层缓冲区
+                if first_chunk_ptr is None:
+                    first_chunk_ptr = c.obj
+                else:
+                    assert c.obj is first_chunk_ptr, (
+                        "预分配缓冲区应在所有迭代间复用同一对象"
+                    )
+                # memoryview 切片也应指向同一缓冲区
+                assert c.obj is buf
+
+        assert chunk_count > 1
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_chunk_small_buf():
+    """chunk 的缓冲区小于 chunk_size 时自动收窄"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        # 缓冲区只有 4 字节，chunk_size 设为 4096 → 实际每次最多读 4 字节
+        buf = bytearray(4)
+        chunks = []
+        async with ayafileio.open(path, "rb") as f:
+            async for c in f.chunk(4096, buf=buf):
+                assert len(c) <= 4
+                chunks.append(bytes(c))
+
+        assert b"".join(chunks) == content
+        # 10 字节 ÷ 4 = 3 个 chunk
+        assert len(chunks) == 3
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_chunk_empty_file():
+    """空文件 chunk 不产生任何迭代"""
+    path = get_temp_path(".bin")
+    try:
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(b"")
+
+        chunk_count = 0
+        async with ayafileio.open(path, "rb") as f:
+            async for _ in f.chunk(4096):
+                chunk_count += 1
+
+        assert chunk_count == 0
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_chunk_text_mode_raises():
+    """文本模式 chunk 抛出异常"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write("test")
+
+        try:
+            async with ayafileio.open(path, "r", encoding="utf-8") as f:
+                async for _ in f.chunk(4096):
+                    pass
+            assert False, "应该抛出 ValueError"
+        except ValueError:
+            pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_chunk_exact_fit():
+    """chunk 文件大小正好是 chunk_size 整数倍"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"X" * 4096
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        chunks = []
+        async with ayafileio.open(path, "rb") as f:
+            async for c in f.chunk(1024):
+                chunks.append(bytes(c))
+
+        assert len(chunks) == 4
+        assert b"".join(chunks) == content
+        assert all(len(c) == 1024 for c in chunks)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_chunk_memoryview_validity():
+    """chunk 返回的 memoryview 在下次迭代前有效"""
+    path = get_temp_path(".bin")
+    try:
+        content = b"0123456789ABCDEF"
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "rb") as f:
+            it = f.chunk(4)
+            c0 = await anext(it)
+            assert bytes(c0) == b"0123"
+            # 在下一次迭代前 c0 仍然有效
+            assert c0[0] == 48  # ord('0')
+
+            c1 = await anext(it)
+            assert bytes(c1) == b"4567"
+            # c1 有效，c0 可能已被覆盖（同一内部缓冲区）
+            assert c1[0] == 52  # ord('4')
+
+            # 消费剩余
+            c2 = await anext(it)
+            c3 = await anext(it)
+            assert bytes(c2) == b"89AB"
+            assert bytes(c3) == b"CDEF"
+
+            # 确认 EOF
+            try:
+                await anext(it)
+                assert False, "应 StopAsyncIteration"
+            except StopAsyncIteration:
+                pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
 # ── isatty ────────────────────────────────────────────────────────────
 
 
@@ -1371,6 +1541,15 @@ def main():
     runner.run_async("readinto 部分读取", test_readinto_partial)
     runner.run_async("readinto 空文件", test_readinto_empty_file)
     runner.run_async("readinto 文本模式报错", test_readinto_text_mode_raises)
+
+    print("\n📋 chunk 流式读取测试:")
+    runner.run_async("chunk 基本", test_chunk_basic)
+    runner.run_async("chunk 预分配缓冲区", test_chunk_custom_buf)
+    runner.run_async("chunk 小缓冲区自动收窄", test_chunk_small_buf)
+    runner.run_async("chunk 空文件", test_chunk_empty_file)
+    runner.run_async("chunk 文本模式报错", test_chunk_text_mode_raises)
+    runner.run_async("chunk 精确对齐", test_chunk_exact_fit)
+    runner.run_async("chunk memoryview 有效性", test_chunk_memoryview_validity)
 
     print("\n📋 isatty / mode 测试:")
     runner.run_async("isatty", test_isatty)
