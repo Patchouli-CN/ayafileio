@@ -59,28 +59,6 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: build_wheels
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write   # OIDC 需要
-      contents: read
-    
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
-          path: wheels
-        
-      - name: Collect all wheels
-        shell: bash
-        run: |
-          mkdir -p dist
-          find wheels -name "*.whl" -type f -exec cp {} dist/ \;
-          echo "=== Collected wheels ==="
-          ls -la dist/
-      
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
-          skip-existing: true
-          verbose: true
+    uses: ./.github/workflows/publish-to-pypi.yml
+    with:
+      artifact-pattern: 'wheels-*'
