@@ -22,11 +22,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 #   -DCMAKE_BUILD_TYPE=Release        — 发布构建（优化、无调试符号）
 #   -DCMAKE_BUILD_TYPE=RelWithDebInfo — 带调试符号的发布构建
 # pip install -e . --config-settings="cmake.args=-DCMAKE_BUILD_TYPE=Debug"
-option(ENABLE_ASAN "Enable AddressSanitizer for memory error detection" OFF)
+option(ENABLE_YUYUKO "Enable Yuyuko memory tracker (default ON for MSVC)" OFF)
 option(ENABLE_VERBOSE_LOGGING "Enable verbose runtime logging" OFF)
 
-if(DEFINED ENV{AYAFILEIO_ASAN})
-    set(ENABLE_ASAN ON)
+# Windows MSVC: ASAN 支持不完善，默认开启幽幽子
+if(MSVC AND NOT DEFINED ENABLE_YUYUKO)
+    set(ENABLE_YUYUKO ON CACHE BOOL "Enable Yuyuko memory tracker" FORCE)
 endif()
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -195,8 +196,8 @@ if(MSVC)
     target_link_libraries(_ayafileio PRIVATE ws2_32)
 
     # Yuyuko memory tracker (MSVC)
-    if(ENABLE_ASAN)
-        target_compile_definitions(_ayafileio PRIVATE ENABLE_ASAN=1) #  windows上ASAN支持不好，使用定制化yuyuko内存追踪器
+    if(ENABLE_YUYUKO)
+        target_compile_definitions(_ayafileio PRIVATE ENABLE_YUYUKO=1)
         message(STATUS "Yuyuko memory tracker enabled (MSVC)")
     endif()
 else()
@@ -213,13 +214,11 @@ else()
         target_compile_options(_ayafileio PRIVATE -O3 -Wpedantic)
     endif()
 
-    # AddressSanitizer
-    if(ENABLE_ASAN)
-        target_compile_options(_ayafileio PRIVATE
-            -fsanitize=address -fno-omit-frame-pointer
-        )
-        target_link_options(_ayafileio PRIVATE -fsanitize=address) # 使用真正的asan
-        message(STATUS "AddressSanitizer enabled")
+    # Linux/macOS 有原生的 ASAN，幽幽子默认关闭
+    # 如需开启: cmake -DENABLE_YUYUKO=ON ...
+    if(ENABLE_YUYUKO)
+        target_compile_definitions(_ayafileio PRIVATE ENABLE_YUYUKO=1)
+        message(STATUS "Yuyuko memory tracker enabled (GCC/Clang)")
     endif()
 
     if(NOT WIN32)
@@ -253,7 +252,7 @@ message(STATUS "  Build type:  ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Platform:     ${CMAKE_SYSTEM_NAME}")
-message(STATUS "  ASan:         ${ENABLE_ASAN}")
+message(STATUS "  Yuyuko:       ${ENABLE_YUYUKO}")
 message(STATUS "  Verbose log:  ${ENABLE_VERBOSE_LOGGING}")
 if(APPLE)
     message(STATUS "  Backend: Dispatch I/O (GCD) + Thread Pool fallback")

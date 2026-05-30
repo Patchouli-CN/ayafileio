@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-05-30
+
+### Added
+- **`AsyncFile.chunk(chunk_size, *, buf=None)` — streaming chunk iterator**: Zero-copy fixed-size chunked reading built on `readinto`. Each iteration yields a `memoryview` into the filled portion of the buffer — no per-chunk allocation. Ideal for large-file streaming, network upload segmentation, and similar patterns.
+  ```python
+  # Built-in buffer
+  async for chunk in f.chunk(4096):
+      process(chunk)
+
+  # Pre-allocated buffer (more efficient for hot paths)
+  buf = bytearray(65536)
+  async for chunk in f.chunk(4096, buf=buf):
+      sock.send(chunk)
+  ```
+  Binary mode only (text mode raises `ValueError` — use `readline` instead). When the user-provided `buf` is smaller than `chunk_size`, the effective read size is automatically clamped to the buffer capacity.
+
+### Changed
+- **Yuyuko `yuyuko_memlife.hpp` fixes**:
+  - `static` globals → `inline` (fixes header-only ODR issue: multiple translation units no longer get independent copies of global state)
+  - `static` free functions → `inline` (eliminates per-TU code bloat)
+  - Fixed `snprintf` truncation bug in `yuyuko_logln` that could read past valid data in `buf`
+  - `find_soul` / `find_containing_soul` return `const SoulRecord*`, eliminating `const_cast` hack
+  - Added explicit `<thread>` include
+- **Yuyuko incremental CRC update**: Added `mem_snapshot_update(ptr, offset, len)` — when modifying small ranges within large tracked buffers, only affected chunks are recomputed. 4-byte write to a 1GB buffer: full recompute ~130ms → incremental ~0.5μs (260,000× faster). Convenience macro `MEM_SNAPSHOT_UPDATE`.
+- **Yuyuko upgraded to C++20**: Async log engine `std::thread` → `std::jthread` with RAII auto-join, simplifying shutdown. `__cpp_lib_jthread` feature detection for AppleClang 15 compatibility.
+- **`ENABLE_ASAN` → `ENABLE_YUYUKO`**: Compile definition renamed to accurately reflect what it controls (Yuyuko memory tracker, not AddressSanitizer). Auto-enabled on Windows MSVC (where ASAN support is poor). Disabled by default on Linux/macOS (where real ASAN is available); opt-in via `-DENABLE_YUYUKO=ON`.
+- **`ignore/yuyuko` ↔ `src/utils` version sync**: Both copies of `yuyuko_memlife.hpp` are now functionally identical, differing only in the production version's `ENABLE_YUYUKO` conditional compilation and zero-overhead stubs.
+
 ## [1.4.2] - 2026-05-29
 
 ### Fixed

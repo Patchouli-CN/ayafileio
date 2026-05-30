@@ -5,6 +5,34 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.3] - 2026-05-30
+
+### 新增
+- **`AsyncFile.chunk(chunk_size, *, buf=None)` — 流式读取迭代器**: 基于 `readinto` 的零拷贝流式分块读取。每次迭代返回一个 `memoryview` 指向填充了本次读取数据的缓冲区切片，避免每次分块分配新内存。适用于大文件流式处理、网络上传分片等场景。
+  ```python
+  # 内置缓冲区
+  async for chunk in f.chunk(4096):
+      process(chunk)
+
+  # 预分配缓冲区（高频场景更高效）
+  buf = bytearray(65536)
+  async for chunk in f.chunk(4096, buf=buf):
+      sock.send(chunk)
+  ```
+  仅支持二进制模式（文本模式抛出 `ValueError`，请使用 `readline`）。当用户提供的 `buf` 容量小于 `chunk_size` 时自动收窄为缓冲区容量。
+
+### 变更
+- **幽幽子 `yuyuko_memlife.hpp` 修复**:
+  - `static` 全局变量 → `inline`（修复 header-only ODR 问题：多编译单元包含时全局状态不再分裂为独立副本）
+  - `static` 自由函数 → `inline`（消除每编译单元的代码膨胀）
+  - 修复 `yuyuko_logln` 中 `snprintf` 截断时越界读取 `buf` 的 bug
+  - `find_soul` / `find_containing_soul` 返回 `const SoulRecord*`，消除 `const_cast` hack
+  - 补 `<thread>` 头文件显式 include
+- **幽幽子增量 CRC 更新**: 新增 `mem_snapshot_update(ptr, offset, len)` — 小幅修改大块内存时只重算受影响的 chunk。1GB 缓冲区修改 4B：全量重算 ~130ms → 增量更新 ~0.5μs（快 26 万倍）。配套宏 `MEM_SNAPSHOT_UPDATE`。
+- **幽幽子升级 C++20**: 异步日志引擎 `std::thread` → `std::jthread`，RAII 自动 join 简化关闭逻辑。`__cpp_lib_jthread` 特性检测兼容 AppleClang 15。
+- **`ENABLE_ASAN` → `ENABLE_YUYUKO`**: 编译宏重命名以准确反映功能（幽幽子内存追踪器，非 AddressSanitizer）。Windows MSVC 默认开启（ASAN 支持不完善），Linux/macOS 默认关闭（有原生 ASAN 可用），可手动 `-DENABLE_YUYUKO=ON` 开启。
+- **`ignore/yuyuko` ↔ `src/utils` 版本同步**: 两处 `yuyuko_memlife.hpp` 功能代码完全一致，仅保留生产版的 `ENABLE_YUYUKO` 条件编译和零开销 stub。
+
 ## [1.4.2] - 2026-05-29
 
 ### 修复

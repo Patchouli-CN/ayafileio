@@ -1,6 +1,6 @@
 // yuyuko_memlife.hpp — 幽幽子内存生命周期追踪系统
 //
-// 编译：定义 ENABLE_ASAN → 全功能。不定义 → 零开销 stub。
+// 编译：定义 ENABLE_YUYUKO → 全功能。不定义 → 零开销 stub。
 //
 // 特性：
 //   - 追踪 new/delete 和 malloc/free 的完整生命周期
@@ -21,9 +21,10 @@
 //   TRACKED_PLACEMENT_NEW_ARGS(type, raw, ...) → placement new + 注册（带参构造）
 //   Yuyuko::check_access(ptr)      → 手动检查地址是否已被释放（基于魂簿）
 //   Yuyuko::check_bounds(ptr,sz)   → 越界写入检测
-//   Yuyuko::mem_snapshot(ptr)      → 保存内存 CRC 快照（4KB 粒度）
-//   Yuyuko::mem_snapshot_ex(ptr,N) → 保存内存 CRC 快照（自定义 N 字节粒度）
-//   Yuyuko::mem_check(ptr)         → 校验 CRC 快照，检测内存损坏
+//   Yuyuko::mem_snapshot(ptr)          → 保存内存 CRC 快照（4KB 粒度）
+//   Yuyuko::mem_snapshot_ex(ptr,N)     → 保存内存 CRC 快照（自定义 N 字节粒度）
+//   Yuyuko::mem_snapshot_update(p,o,n) → 增量 CRC 更新（只重算受影响的 chunk）
+//   Yuyuko::mem_check(ptr)             → 校验 CRC 快照，检测内存损坏
 //   Yuyuko::mem_check_ex(ptr,N)    → 校验 CRC 快照（自定义粒度）
 //   Yuyuko::leak_check()           → 程序退出时检测泄漏
 //   Yuyuko::reserve_souls(alive, released) → 调整魂簿容量
@@ -53,6 +54,7 @@
 #endif
 #include <chrono>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -61,7 +63,7 @@
 // 幽幽子命名空间
 // ════════════════════════════════════════════════════════════════════════════
 
-#ifdef ENABLE_ASAN
+#ifdef ENABLE_YUYUKO
 
 namespace Yuyuko {
 
@@ -103,7 +105,7 @@ inline const char* cached_thread_name() {
 }
 
 /// 获取当前时间戳（微秒级，相对于启动时间）
-static uint64_t current_time_us() {
+inline uint64_t current_time_us() {
     using namespace std::chrono;
     return static_cast<uint64_t>(
         duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count()
@@ -150,31 +152,31 @@ struct LogBuffer {
 };
 
 // 双缓冲区 — 用指针交换代替 memcpy 256KB
-static LogBuffer  g_buf_A, g_buf_B;
-static LogBuffer* g_active = &g_buf_A;   // 业务线程写入
-static LogBuffer* g_flush  = &g_buf_B;   // 后台线程刷盘
-static std::mutex g_log_mtx;             // 保护 g_active 写入 + 指针交换
+inline LogBuffer  g_buf_A, g_buf_B;
+inline LogBuffer* g_active = &g_buf_A;   // 业务线程写入
+inline LogBuffer* g_flush  = &g_buf_B;   // 后台线程刷盘
+inline std::mutex g_log_mtx;             // 保护 g_active 写入 + 指针交换
 
 // 后台线程控制
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
-static std::jthread g_log_thread;
+inline std::jthread g_log_thread;
 #else
-static std::thread g_log_thread;
+inline std::thread g_log_thread;
 #endif
-static std::atomic<bool> g_log_stop{false};
-static std::condition_variable g_log_cv;
-static std::mutex g_log_cv_mtx;
-static FILE* g_log_file = nullptr;
-static bool g_async_mode = false;
+inline std::atomic<bool> g_log_stop{false};
+inline std::condition_variable g_log_cv;
+inline std::mutex g_log_cv_mtx;
+inline FILE* g_log_file = nullptr;
+inline bool g_async_mode = false;
 
 /// 指针交换 (只改 2 个指针, 不拷贝 256KB 数据)
-static void swap_log_buffers() {
+inline void swap_log_buffers() {
     LogBuffer* t = g_active; g_active = g_flush; g_flush = t;
     g_active->count = 0;
 }
 
 /// 业务线程推送日志 — g_log_mtx 加锁
-static void push_log(const char* msg, size_t len) {
+inline void push_log(const char* msg, size_t len) {
     if (!g_async_mode) {
         static std::mutex sync_mtx;
         std::lock_guard<std::mutex> lk(sync_mtx);
@@ -196,7 +198,7 @@ static void push_log(const char* msg, size_t len) {
 }
 
 // 后台线程：批量消费日志
-static void log_worker() {
+inline void log_worker() {
     while (!g_log_stop.load(std::memory_order_relaxed)) {
         {
             std::unique_lock<std::mutex> lk(g_log_cv_mtx);
@@ -277,15 +279,20 @@ namespace detail {
 
 // 内部日志函数：格式化并推送到日志系统
 template<typename... Args>
-static void yuyuko_logln(const char* fmt, Args... args) {
+inline void yuyuko_logln(const char* fmt, Args... args) {
     char buf[ASYNC_BUF_CAPACITY];
     int len = snprintf(buf, sizeof(buf), fmt, args...);
-    if (len > 0 && static_cast<size_t>(len) < sizeof(buf) - 2) {
-        buf[len] = '\n';
-        buf[len + 1] = '\0';
-        push_log(buf, static_cast<size_t>(len + 1));
+    if (len < 0) return;  // 编码错误，静默丢弃
+    size_t n = static_cast<size_t>(len);
+    // snprintf 被截断时返回「本应写入的长度」，而非实际写入长度
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    if (n + 2 <= sizeof(buf)) {
+        buf[n] = '\n';
+        buf[n + 1] = '\0';
+        push_log(buf, n + 1);
     } else {
-        push_log(buf, static_cast<size_t>(len));
+        // 缓冲区已满，无空间追加换行
+        push_log(buf, n);
     }
 }
 
@@ -325,21 +332,21 @@ static_assert(sizeof(SoulRecord) <= 256, "SoulRecord too large");
 ///   alive      — 存活分配 (leak_check 扫描此表)
 ///   released   — 已释放历史 (UAF / Double-Free 检测)
 ///   permanent  — 常驻对象标记 (排除出 leak_check, 如连接池/全局缓存)
-static std::shared_mutex g_soul_mtx;
-static std::unordered_map<void*, SoulRecord> g_soul_alive;
-static std::unordered_map<void*, SoulRecord> g_soul_released;
-static std::unordered_set<void*> g_soul_permanent;
+inline std::shared_mutex g_soul_mtx;
+inline std::unordered_map<void*, SoulRecord> g_soul_alive;
+inline std::unordered_map<void*, SoulRecord> g_soul_released;
+inline std::unordered_set<void*> g_soul_permanent;
 /// 按地址排序的索引 — check_bounds 二分查找用 (O(log n))
-static std::set<uintptr_t> g_soul_alive_range;
-static std::set<uintptr_t> g_soul_released_range;
-static bool _soul_book_init = []{
+inline std::set<uintptr_t> g_soul_alive_range;
+inline std::set<uintptr_t> g_soul_released_range;
+inline bool _soul_book_init = []{
     g_soul_alive.reserve(65536);
     g_soul_released.reserve(16384);
     return true;
 }();
 
 /// 在魂簿中查找记录（先查 alive 再查 released，调用方需持有 g_soul_mtx）
-static SoulRecord* find_soul(void* ptr) {
+inline const SoulRecord* find_soul(void* ptr) {
     auto it = g_soul_alive.find(ptr);
     if (it != g_soul_alive.end()) return &it->second;
     auto rit = g_soul_released.find(ptr);
@@ -357,7 +364,7 @@ inline void str_copy(char* dst, size_t cap, const char* src) {
 }
 
 /// 注册一次内存分配（内部函数）
-static void register_soul_impl(void* ptr, size_t size, AllocSource source,
+inline void register_soul_impl(void* ptr, size_t size, AllocSource source,
                                 const char* file, int line, const char* func) {
     SoulRecord sr;
     sr.ptr=ptr; sr.size=size;
@@ -393,7 +400,7 @@ static void register_soul_impl(void* ptr, size_t size, AllocSource source,
 /// 记录一次内存释放（内部函数）
 /// 将记录从 g_soul_alive 移送至 g_soul_released
 /// @return true if the caller should free the memory
-static bool release_soul_impl(void* ptr, AllocSource source,
+inline bool release_soul_impl(void* ptr, AllocSource source,
                                const char* file, int line, const char* func) {
     if (!ptr) return false;
     const char* tn = cached_thread_name();
@@ -481,9 +488,9 @@ inline bool check_access(void* ptr, const char* file, int line, const char* func
 
 /// 在已分配块中查找包含地址范围 [ps, pe) 的 SoulRecord (O(log n))
 /// 先查 alive 再查 released。调用方需持有 g_soul_mtx
-static SoulRecord* find_containing_soul(uintptr_t ps, uintptr_t pe) {
+inline const SoulRecord* find_containing_soul(uintptr_t ps, uintptr_t pe) {
     auto lookup = [&](const std::set<uintptr_t>& range,
-                     const std::unordered_map<void*, SoulRecord>& map) -> SoulRecord* {
+                     const std::unordered_map<void*, SoulRecord>& map) -> const SoulRecord* {
         if (range.empty()) return nullptr;
         auto it = range.upper_bound(ps);
         if (it == range.begin()) return nullptr;
@@ -491,9 +498,9 @@ static SoulRecord* find_containing_soul(uintptr_t ps, uintptr_t pe) {
         auto sit = map.find(reinterpret_cast<void*>(*it));
         if (sit == map.end()) return nullptr;
         uintptr_t as = reinterpret_cast<uintptr_t>(sit->second.ptr);
-        return (ps >= as && pe <= as + sit->second.size) ? const_cast<SoulRecord*>(&sit->second) : nullptr;
+        return (ps >= as && pe <= as + sit->second.size) ? &sit->second : nullptr;
     };
-    SoulRecord* s = lookup(g_soul_alive_range, g_soul_alive);
+    const SoulRecord* s = lookup(g_soul_alive_range, g_soul_alive);
     return s ? s : lookup(g_soul_released_range, g_soul_released);
 }
 
@@ -518,7 +525,7 @@ inline bool check_bounds(void* ptr, size_t size, const char* file, int line, con
     }
 
     // ── 慢路径：ptr 在已分配块的内部或前方 — 二分查找 (O(log n)) ──
-    SoulRecord* s = find_containing_soul(ps, pe);
+    const SoulRecord* s = find_containing_soul(ps, pe);
     if (!s) {
         // 不属于任何已知分配 — 可能是野指针
         detail::yuyuko_logln("[Yuyuko] WILD-WRITE %p+%zu @ %s:%d — not in any tracked allocation",
@@ -649,8 +656,8 @@ struct MemCheckpoint {
 // 全局 CRC 检查点存储
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static std::unordered_map<void*, MemCheckpoint> g_checkpoints;
-static std::shared_mutex g_cp_mtx;
+inline std::unordered_map<void*, MemCheckpoint> g_checkpoints;
+inline std::shared_mutex g_cp_mtx;
 
 /// 保存 CRC 快照 (线程安全)，指定 chunk_size
 inline void mem_snapshot_ex(void* ptr, size_t chunk_size, const char* tag = "default") {
@@ -672,6 +679,53 @@ inline void mem_snapshot_ex(void* ptr, size_t chunk_size, const char* tag = "def
 /// 保存 CRC 快照 (线程安全)，默认 4KB 粒度
 inline void mem_snapshot(void* ptr, const char* tag = "default") {
     mem_snapshot_ex(ptr, CRC_CHUNK_SIZE, tag);
+}
+
+/// 增量更新 CRC 快照：仅重新计算覆盖 [offset, offset+len) 的 chunk
+///
+/// 适用场景：频繁小幅修改的大块内存——例如游戏状态 tick 更新几个字段、
+/// 大缓冲区的局部写入、环形缓冲区的生产者指针更新等。
+///
+/// 性能对比（1GB 缓冲区，修改 4B，4KB chunk）：
+///   全量 mem_snapshot:  ~262,144 次 CRC 计算 (~130ms @ 1 cycle/B)
+///   增量 mem_snapshot_update:  1 次 CRC 计算     (~0.5μs)
+///
+/// @param ptr    内存块指针（必须已通过 mem_snapshot 创建过快照）
+/// @param offset 修改起始偏移（字节），从 ptr 开始计
+/// @param len    修改长度（字节）
+/// @return true=更新成功, false=无快照/已释放/参数无效
+inline bool mem_snapshot_update(void* ptr, size_t offset, size_t len) {
+    if (!ptr || len == 0) return false;
+
+    std::shared_lock<std::shared_mutex> slk(g_soul_mtx);
+    auto ait = g_soul_alive.find(ptr);
+    if (ait == g_soul_alive.end()) return false;
+    size_t sz = ait->second.size;
+    if (offset >= sz) return false;
+    slk.unlock();
+
+    std::unique_lock<std::shared_mutex> clk(g_cp_mtx);
+    auto cit = g_checkpoints.find(ptr);
+    if (cit == g_checkpoints.end()) return false;
+
+    size_t cs = cit->second.chunk_size ? cit->second.chunk_size : CRC_CHUNK_SIZE;
+    auto& crcs = cit->second.crcs;
+    if (crcs.empty()) return false;
+
+    // 计算受影响的 chunk 范围 [chunk_start, chunk_end)
+    size_t chunk_start = offset / cs;
+    size_t chunk_end   = (offset + len + cs - 1) / cs;
+    if (chunk_end > crcs.size()) chunk_end = crcs.size();
+    if (chunk_start >= crcs.size()) return false;
+
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(ptr);
+    for (size_t i = chunk_start; i < chunk_end; ++i) {
+        size_t chunk_off  = i * cs;
+        size_t chunk_len  = (chunk_off + cs <= sz) ? cs : (sz - chunk_off);
+        crcs[i] = crc32c_update(0xFFFFFFFFu, data + chunk_off, chunk_len);
+    }
+    cit->second.timestamp = current_time_us();
+    return true;
 }
 
 /// 校验快照 — 返回 true=一致 (使用快照时保存的 chunk_size)
@@ -1128,7 +1182,7 @@ function sortTable(c){
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 便捷宏 (ENABLE_ASAN 启用时)
+// 便捷宏 (ENABLE_YUYUKO 启用时)
 // ════════════════════════════════════════════════════════════════════════════
 
 #define TRACKED_NEW(type) \
@@ -1212,9 +1266,10 @@ function sortTable(c){
 #define TRACKED_STRCPY(dst, src) \
     TRACKED_MEMCPY((dst), (src), std::strlen(src) + 1)
 
-#define MEM_SNAPSHOT(ptr, tag) Yuyuko::mem_snapshot((ptr), (tag))
-#define MEM_VERIFY(ptr)        Yuyuko::mem_verify(ptr)
-#define MEM_CHECK(ptr)         Yuyuko::mem_check((ptr), __FILE__, __LINE__, __FUNCTION__)
+#define MEM_SNAPSHOT(ptr, tag)           Yuyuko::mem_snapshot((ptr), (tag))
+#define MEM_SNAPSHOT_UPDATE(ptr, off, n) Yuyuko::mem_snapshot_update((ptr), (off), (n))
+#define MEM_VERIFY(ptr)                  Yuyuko::mem_verify(ptr)
+#define MEM_CHECK(ptr)                   Yuyuko::mem_check((ptr), __FILE__, __LINE__, __FUNCTION__)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RAII 守卫: 构造快照, 析构校验 — 零手动负担
@@ -1316,6 +1371,7 @@ namespace Yuyuko {
 #define TRACKED_STRCPY(dst, src)         std::strcpy((dst), (src))
 #define TRACKED_STRNCPY(dst, src, n)     std::strncpy((dst), (src), (n))
 #define MEM_SNAPSHOT(ptr, tag) ((void)0)
+#define MEM_SNAPSHOT_UPDATE(ptr, off, n) (false)
 #define MEM_VERIFY(ptr)        (true)
 #define MEM_CHECK(ptr)         (true)
 #define MEM_GUARD(ptr)         ((void)0)
@@ -1326,4 +1382,4 @@ namespace Yuyuko {
 #define MEM_GUARD_BATCH_ADD(name, ptr, tag) ((void)0)
 #define PERMANENT_SOUL(ptr) ((void)0)
 
-#endif // ENABLE_ASAN
+#endif // ENABLE_YUYUKO

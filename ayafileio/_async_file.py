@@ -3,6 +3,7 @@
 import os
 import locale
 from pathlib import Path
+from collections.abc import AsyncGenerator
 from typing import Generic, TypeVar
 from ._ayafileio import AsyncFile as _AsyncFile
 
@@ -188,6 +189,63 @@ class AsyncFile(Generic[T]):
         if self._is_text:
             raise ValueError("readinto() only supports binary mode")
         return await self._impl.readinto(buf)
+
+    async def chunk(
+        self,
+        chunk_size: int,
+        *,
+        buf: bytearray | memoryview | None = None,
+    ) -> AsyncGenerator[memoryview, None]:
+        """流式读取文件，每次返回一个固定大小的内存块（零拷贝）。
+
+        底层使用 ``readinto`` 直接写入缓冲区，避免每次迭代分配新内存。
+        适用于大文件流式处理、网络上传分片等场景。
+
+        Args:
+            chunk_size: 每次读取的最大字节数。若 ``buf`` 容量更小则自动取两者最小值。
+            buf: 可选的预分配缓冲区（``bytearray`` 或可写 ``memoryview``）。
+                 提供时在所有迭代间复用此缓冲区（零额外分配）；
+                 为 ``None`` 时内部自动分配 ``bytearray(chunk_size)``。
+
+        Yields:
+            ``memoryview`` — 指向缓冲区中本次读取数据的内存视图。
+            该视图仅在**下一次迭代前**有效——请及时消费每个 chunk，
+            不要跨迭代持有引用。
+
+        Raises:
+            ValueError: 文本模式、文件已关闭、或 chunk_size <= 0。
+
+        Example:
+            >>> # 内置缓冲区（最简单）
+            >>> async for chunk in f.chunk(4096):
+            ...     process(chunk)  # chunk is memoryview
+
+            >>> # 预分配缓冲区（高频场景更高效）
+            >>> buf = bytearray(65536)
+            >>> async for chunk in f.chunk(4096, buf=buf):
+            ...     sock.send(chunk)  # 零拷贝发送
+        """
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        if self._is_text:
+            raise ValueError("chunk() only supports binary mode. Use readline() for text.")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        if buf is None:
+            buf = bytearray(chunk_size)
+        else:
+            # 若用户提供的缓冲区小于 chunk_size，以缓冲区容量为准
+            buf_len = len(buf)  # type: ignore[arg-type]
+            if buf_len < chunk_size:
+                chunk_size = buf_len
+
+        mv = memoryview(buf)
+        while True:
+            n = await self._impl.readinto(buf)
+            if n == 0:
+                return
+            yield mv[:n]
 
     # ── write ─────────────────────────────────────────────────────────────────
 
