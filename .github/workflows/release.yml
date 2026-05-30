@@ -60,5 +60,8 @@ jobs:
     name: Publish to PyPI
     needs: build_wheels
     uses: ./.github/workflows/publish-to-pypi.yml
+    permissions:
+      id-token: write
+      contents: read
     with:
       artifact-pattern: 'wheels-*'

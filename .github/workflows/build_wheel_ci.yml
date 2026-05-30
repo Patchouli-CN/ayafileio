@@ -58,5 +58,8 @@ jobs:
     name: Publish to PyPI
     needs: build
     uses: ./.github/workflows/publish-to-pypi.yml
+    permissions:
+      id-token: write
+      contents: read
     with:
       artifact-pattern: 'cibw-wheels-*'
