@@ -242,7 +242,8 @@ class AsyncFile(Generic[T]):
 
         mv = memoryview(buf)
         while True:
-            n = await self._impl.readinto(buf)
+            # 用切片限制 readinto 最多写入 chunk_size 字节
+            n = await self._impl.readinto(mv[:chunk_size])
             if n == 0:
                 return
             yield mv[:n]
