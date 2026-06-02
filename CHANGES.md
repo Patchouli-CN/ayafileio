@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] - 2026-06-02
+
+### Fixed
+- **macOS GCD fd reuse race condition**: `dispatch_io_create` takes ownership of the file descriptor and closes it asynchronously during `dispatch_io_close`. The `dispatch_barrier_sync` previously used only guarantees dispatch queue drain, not kernel-level fd close completion. When a subsequent `open()` reused the same fd number before GCD's delayed close completed, GCD would close the **new** file's fd, causing `OSError: [Errno 9] EBADF` (bad file descriptor) on macOS. Fixed by `dup()`-ing the fd before passing to `dispatch_io_create` — GCD operates on the dup'd copy while the original fd remains fully under our control, eliminating the race entirely.
+
+### Changed
+- **CI: consolidated `release.yml` into `build_wheel_ci.yml`**: The two workflows had identical triggers but different build matrices. `build_wheel_ci.yml` is a strict superset (more architectures: riscv64, aarch64, x86, universal2; more runners: macos-15-intel; more Python versions: includes cp313t). Removed `release.yml` and added PyPI publish job and explicit `CIBW_BUILD` version pinning to `build_wheel_ci.yml`.
+
 ## [1.4.3] - 2026-05-30
 
 ### Added

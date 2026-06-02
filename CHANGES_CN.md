@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.4] - 2026-06-02
+
+### 修复
+- **macOS GCD fd 复用竞态条件**: `dispatch_io_create` 会接管文件描述符的所有权，并在 `dispatch_io_close` 时异步关闭它。之前使用的 `dispatch_barrier_sync` 只能保证 dispatch queue 排空，无法保证内核层 fd 关闭已完成。当后续 `open()` 在 GCD 延迟关闭完成前复用了同一个 fd 号时，GCD 会误关**新**文件的 fd，导致 macOS 上偶发 `OSError: [Errno 9] EBADF`（错误的文件描述符）。通过在传给 `dispatch_io_create` 前 `dup()` fd 修复——GCD 操作 dup 副本，原始 fd 完全由我们控制，从根本上消除竞态。
+
+### 变更
+- **CI：合并 `release.yml` 到 `build_wheel_ci.yml`**: 两个 workflow 触发器相同但构建矩阵不同。`build_wheel_ci.yml` 是严格超集（更多架构：riscv64、aarch64、x86、universal2；更多 runner：macos-15-intel；更多 Python 版本：含 cp313t）。删除 `release.yml`，在 `build_wheel_ci.yml` 中新增 PyPI 发布 job 和显式 `CIBW_BUILD` 版本指定。
+
 ## [1.4.3] - 2026-05-30
 
 ### 新增

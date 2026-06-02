@@ -79,25 +79,40 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
         throw_os_error("Failed to open file", path.c_str());
     }
     UR_DEBUG_LOG("MacOSGCDBackend: file opened, fd=%d", m_fd);
-    
+
+    // dup fd 隔离：dispatch_io_create 会接管 fd 并在 dispatch_io_close 时
+    // 异步关闭它。如果 fd 号在 GCD 内核层 close 完成前被复用，GCD 的延迟
+    // close 会误关新文件。dup 一份副本给 GCD，原始 fd 由我们完全控制。
+    int gcd_fd = dup(m_fd);
+    if (gcd_fd == -1) {
+        UR_DEBUG_LOG("MacOSGCDBackend: dup failed, errno=%d", errno);
+        int saved_errno = errno;
+        ::close(m_fd);
+        m_fd = -1;
+        throw_os_error(saved_errno, "Failed to dup file descriptor for GCD", path.c_str());
+    }
+    UR_DEBUG_LOG("MacOSGCDBackend: dup'd fd=%d for GCD", gcd_fd);
+
     // 创建 GCD 串行队列
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
     m_queue = dispatch_queue_create("com.ayafileio.gcd", attr);
     UR_DEBUG_LOG("MacOSGCDBackend: GCD queue created, queue=%p", (void*)m_queue);
-    
+
     // 创建 Dispatch I/O 通道（随机访问模式，支持 seek）
+    // 传入 dup 的 fd，GCD 接管其生命周期
     m_channel = dispatch_io_create(
         DISPATCH_IO_RANDOM,
-        m_fd,
+        gcd_fd,
         m_queue,
         ^(int error) {
             UR_DEBUG_LOG("MacOSGCDBackend: dispatch_io_create cleanup handler, error=%d", error);
         }
     );
-    
+
     if (!m_channel) {
         UR_DEBUG_LOG0("MacOSGCDBackend: dispatch_io_create failed");
+        ::close(gcd_fd);  // GCD 未接管，自己关 dup fd
         ::close(m_fd);
         m_fd = -1;
         throw std::runtime_error("Failed to create dispatch I/O channel");
@@ -129,40 +144,50 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
     : m_path("<fd>") {
     
     UR_DEBUG_LOG("MacOSGCDBackend: fd constructor start, fd=%d", fd);
-    
+
     m_fd = fd;
     m_owns_fd = owns_fd;
-    
+
     auto& cfg = ayafileio::config();
     m_cached_buffer_size = cfg.buffer_size();
     m_cached_buffer_pool_max = cfg.buffer_pool_max();
     m_cached_close_timeout_ms = cfg.close_timeout_ms();
-    
+
     ModeInfo mi;
     try {
         mi = parse_mode(mode);
     } catch (const std::invalid_argument& e) {
         throw py::value_error(e.what());
     }
-    
+
     m_appendMode = mi.appendMode;
-    
+
+    // dup fd 隔离：防止 GCD 异步 close 与 fd 复用产生竞态
+    int gcd_fd = dup(m_fd);
+    if (gcd_fd == -1) {
+        UR_DEBUG_LOG("MacOSGCDBackend: dup failed in fd ctor, errno=%d", errno);
+        throw_os_error("Failed to dup file descriptor for GCD", "<fd>");
+    }
+    UR_DEBUG_LOG("MacOSGCDBackend: dup'd fd=%d for GCD", gcd_fd);
+
     // 创建 GCD 串行队列
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
     m_queue = dispatch_queue_create("com.ayafileio.gcd", attr);
-    
-    // 创建 Dispatch I/O 通道（用现有 fd）
+
+    // 创建 Dispatch I/O 通道（用 dup 的 fd，GCD 接管其生命周期）
     m_channel = dispatch_io_create(
         DISPATCH_IO_RANDOM,
-        m_fd,
+        gcd_fd,
         m_queue,
         ^(int error) {
             UR_DEBUG_LOG("MacOSGCDBackend: fd channel cleanup, error=%d", error);
         }
     );
-    
+
     if (!m_channel) {
+        UR_DEBUG_LOG0("MacOSGCDBackend: fd dispatch_io_create failed");
+        ::close(gcd_fd);  // GCD 未接管，自己关 dup fd
         throw std::runtime_error("Failed to create dispatch I/O channel from fd");
     }
     
