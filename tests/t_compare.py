@@ -15,11 +15,18 @@ Usage:
 """
 
 import asyncio
+import io
 import locale
 import os
+import sys
 import tempfile
 import time
 from collections import Counter
+
+# Windows console: force UTF-8 so box-drawing chars don't crash on cp1252 terminals
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 try:
     import ayafileio
@@ -45,7 +52,7 @@ def _detect_lang() -> str:
         if src.lower().startswith("zh"):
             return "zh"
     try:
-        lc, _ = locale.getdefaultlocale()
+        lc = locale.getlocale()[0]
         if lc and lc.lower().startswith("zh"):
             return "zh"
     except (ValueError, locale.Error):
