@@ -165,6 +165,7 @@ class AsyncFile(Generic[T]):
     async def readlines(hint: int = -1) -> list[T]: ...
     async def readall() -> T: ...                        # read(-1) 别名
     async def readinto(buf: bytearray | memoryview) -> int: ...  # 零拷贝 [仅二进制]
+    async def chunk(chunk_size: int, *, buf: bytearray | memoryview | None = None) -> AsyncGenerator[memoryview, None]: ...  # 流式分块 [仅二进制]
 
     # 写入
     async def write(self, data: str | bytes) -> int: ...
