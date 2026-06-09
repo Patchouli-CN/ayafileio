@@ -240,7 +240,9 @@ Use `drain_handle_pool()` / `drain_buffer_pool()` to release pooled resources at
 
 ## 🧪 Performance Comparison
 
-Simulating Crawlee's Dataset append pattern (5,000 records, 50 concurrent):
+### Scenario 1: Crawlee-style Dataset Append (open/write/close per record)
+
+Simulating Crawlee's Dataset append pattern — 5,000 records, 50 concurrent writers, each writing a single line and closing the file:
 
 | Platform | ayafileio | aiofiles | Speedup |
 |----------|-----------|----------|---------|
@@ -255,6 +257,54 @@ Simulating Crawlee's Dataset append pattern (5,000 records, 50 concurrent):
 - Even on degraded hardware, ayafileio maintains predictable performance
 
 > *Test environment: Windows 10/11, Ubuntu 22.04, macOS 14; GitHub Actions enterprise NVMe SSD*
+
+### Scenario 2: Single-file High-concurrency Random Read
+
+The true test of async I/O — 100,000 concurrent tasks performing random 256B reads on a single shared file handle. No open/close overhead, pure I/O path comparison:
+
+| Library | 1K concur | 10K concur | 50K concur | 100K concur |
+|---------|-----------|------------|------------|-------------|
+| **ayafileio (IOCP)** | 7,487 ops/s | **46,616 ops/s** | **28,165 ops/s** | **19,290 ops/s** |
+| aiofiles (threadpool) | 7,706 ops/s | 7,320 ops/s | 2,131 ops/s | 2,130 ops/s |
+| sync threadpool | 9,492 ops/s | 9,469 ops/s | 8,840 ops/s | 8,660 ops/s |
+| **ayafileio vs aiofiles** | 1.0x | **6.4x** | **13.2x** | **9.1x** |
+
+**Key findings:**
+- At low concurrency (1K), all approaches are similar — IOCP setup overhead is amortized
+- At 10K+ concurrency, aiofiles' thread pool saturates; throughput **drops** as concurrency increases — from 7,706 down to 2,130 ops/s (72% degradation)
+- ayafileio with IOCP **gains** throughput at 10K (46,616 ops/s) due to batched completion harvesting via `GetQueuedCompletionStatusEx`
+- At 100K concurrency, ayafileio is **9.1x faster** than aiofiles on the same HDD
+- The synchronous threadpool (mimicking aiofiles' approach) flatlines at ~8,800 ops/s regardless of concurrency — thread contention ceiling
+
+> *Test environment: Windows 10, Python 3.14.5, WDC WD10EZEX 7200RPM HDD, 20MB file, 256B random reads*
+
+### Scenario 3: Extreme Concurrency Stress — 500,000 Concurrent Reads
+
+500,000 asyncio tasks all reading from a single file via IOCP — testing the library's absolute concurrency ceiling:
+
+| Metric | Value |
+|--------|-------|
+| Concurrent tasks | **500,000** |
+| Completion time | 21.6s |
+| Throughput | **23,116 ops/s** |
+| Peak memory (RSS) | ~583 MB |
+| Errors | **0** |
+| Exceptions | **0** |
+
+ayafileio handles half a million concurrent IOCP reads on a single file handle with zero errors. The dual-IOCP worker architecture (2 threads total) processes all 500K completions while aiofiles would require thousands of threads for the same workload — and still be slower.
+
+### Tuning: Default Configuration is Optimal
+
+We tested 14 different configuration combinations (iocp_batch_size, buffer_size, buffer_pool_max, io_worker_count) on the HDD at 100K concurrency. Result: **every configuration scored within ±3% of the default.** The library's auto-tuned defaults already saturate the disk's physical I/O limit — there is no software bottleneck left to tune.
+
+For NVMe SSDs with >500K IOPS capability, increasing `iocp_batch_size` to 128–256 and `buffer_size` to 128KB may yield additional gains. Use `ayafileio.configure()` to experiment:
+
+```python
+ayafileio.configure({
+    "iocp_batch_size": 128,
+    "buffer_size": 131072,
+})
+```
 
 ## 🤝 Contributing
 

@@ -12,6 +12,10 @@ on:
       - '.gitignore'
       - 'MANIFEST.in'
       - '**/*.md'
+      - 'tests/bench_*.py'
+      - 'tests/t_compare.py'
+      - 'tests/test_loguru.py'
+      - 'ignore/*.py'
   pull_request:
     branches: [ main, master ]
     paths-ignore:
@@ -23,6 +27,10 @@ on:
       - '.gitignore'
       - 'MANIFEST.in'
       - '**/*.md'
+      - 'tests/bench_*.py'
+      - 'tests/t_compare.py'
+      - 'tests/test_loguru.py'
+      - 'ignore/*.py'
   workflow_dispatch:
 
 jobs:
