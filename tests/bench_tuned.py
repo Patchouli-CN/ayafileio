@@ -1,7 +1,7 @@
 """
-配置调优对比：默认 vs 调参后的 ayafileio
+Config tuning comparison: default vs tuned ayafileio
 
-在 HDD 上测试不同配置组合对性能的影响。
+Tests the impact of different configuration combinations on HDD performance.
 """
 
 import asyncio
@@ -11,7 +11,6 @@ import os
 import gc
 import tempfile
 import shutil
-import itertools
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -20,6 +19,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from i18n import i18n
 import ayafileio
 
 FILE_SIZE_MB = 20
@@ -54,7 +54,7 @@ async def run_read_test(path, concurrent):
 
 
 async def test_config(name, config_updates, path, concurrent):
-    """应用配置，跑测试，然后恢复默认"""
+    """Apply config, run test, then restore defaults"""
     ayafileio.reset_config()
     if config_updates:
         ayafileio.configure(config_updates)
@@ -78,28 +78,30 @@ async def test_config(name, config_updates, path, concurrent):
 
 
 async def main():
-    print(f"╔══════════════════════════════════════════════════════════════╗")
-    print(f"║   ayafileio 配置调优 — {CONCURRENT//1000}K 并发随机读 (HDD)         ║")
-    print(f"╚══════════════════════════════════════════════════════════════╝")
+    nk = CONCURRENT // 1000
+    title = i18n("ayafileio Config Tuning — {n}K Concurrent Random Read (HDD)").format(n=nk)
+    print(f"╔{'═' * (len(title) + 4)}╗")
+    print(f"║   {title}   ║")
+    print(f"╚{'═' * (len(title) + 4)}╝")
     print(f"Backend: {ayafileio.get_backend_info()['backend']}")
-    print(f"文件: {FILE_SIZE_MB}MB, 块: {CHUNK_SIZE}B, 并发: {CONCURRENT:,}")
+    print(i18n("File: {size}MB, Chunk: {chunk}B, Concurrency: {n}").format(size=FILE_SIZE_MB, chunk=CHUNK_SIZE, n=f"{CONCURRENT:,}"))
 
     tmpdir = tempfile.mkdtemp(prefix="aya_tune_")
     path = os.path.join(tmpdir, "tune_data.bin")
 
     try:
-        print(f"\n准备测试文件...", end=" ", flush=True)
+        msg = i18n("Preparing test file...")
+        print(f"\n{msg}", end=" ", flush=True)
         prepare_file(path, FILE_SIZE_MB)
         print("OK")
 
-        # ── 默认配置基线 ──────────────────────────────────────────────────
-        print(f"\n[1] 默认配置 (基线)")
-        baseline = await test_config("默认", {}, path, CONCURRENT)
+        # ── Baseline ───────────────────────────────────────────────────────
+        print(f"\n{i18n('[1] Default config (baseline)')}")
+        baseline = await test_config(i18n("Default"), {}, path, CONCURRENT)
         print(f"    {baseline['ops']:,.0f} ops/s  ({baseline['time']:.2f}s)")
 
-        # ── 逐参数扫描 ────────────────────────────────────────────────────
+        # ── Config sweep ───────────────────────────────────────────────────
         configs_to_test = [
-            # (名称, 配置)
             ("batch=128",       {"iocp_batch_size": 128}),
             ("batch=256",       {"iocp_batch_size": 256}),
             ("buf=128K",        {"buffer_size": 131072}),
@@ -108,12 +110,10 @@ async def main():
             ("buf_pool=2048",   {"buffer_pool_max": 2048}),
             ("workers=4",       {"io_worker_count": 4}),
             ("workers=8",       {"io_worker_count": 8}),
-            # 组合拳
             ("batch=256 + buf=256K",           {"iocp_batch_size": 256, "buffer_size": 262144}),
             ("batch=256 + buf_pool=2048",      {"iocp_batch_size": 256, "buffer_pool_max": 2048}),
             ("batch=256 + workers=4",          {"iocp_batch_size": 256, "io_worker_count": 4}),
             ("batch=256 + buf=256K + pool=2K", {"iocp_batch_size": 256, "buffer_size": 262144, "buffer_pool_max": 2048}),
-            # 极限组合
             ("MAX: batch=256 + buf=512K + pool=4K + workers=8",
              {"iocp_batch_size": 256, "buffer_size": 524288, "buffer_pool_max": 4096, "io_worker_count": 8}),
         ]
@@ -130,13 +130,20 @@ async def main():
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    # ── 排名 ──────────────────────────────────────────────────────────────
+    # ── Ranking ────────────────────────────────────────────────────────────
     results.sort(key=lambda r: r["ops"], reverse=True)
 
+    rank_title = i18n("📊 Tuning Ranking  (baseline: {n} ops/s)").format(n=f"{baseline['ops']:,.0f}")
+    header_rank = i18n("Rank")
+    header_cfg = i18n("Config")
+    header_time = i18n("Time")
+    header_speedup = i18n("Speedup")
+    header_errs = i18n("Errors")
+
     print(f"\n{'='*95}")
-    print(f"📊 调优排名  (基线: {baseline['ops']:,.0f} ops/s)")
+    print(rank_title)
     print(f"{'='*95}")
-    print(f"{'排名':>4s}  {'配置':<42s}  {'ops/s':>10s}  {'耗时':>7s}  {'加速比':>7s}  {'异常'}")
+    print(f"{header_rank:>4s}  {header_cfg:<42s}  {'ops/s':>10s}  {header_time:>7s}  {header_speedup:>7s}  {header_errs}")
     print("-" * 95)
 
     for rank, r in enumerate(results, 1):
@@ -145,9 +152,10 @@ async def main():
         print(f"{rank:>3d}   {r['name']:<42s}  {r['ops']:>10,.0f}  {r['time']:>6.2f}s  {speedup:>6.2f}x  {r['errs']:>4d}  {bar}")
 
     best = results[0]
-    print(f"\n🏆 最佳配置: {best['name']}")
-    print(f"   吞吐量: {best['ops']:,.0f} ops/s (默认的 {best['ops']/baseline['ops']:.2f}x)")
-    print(f"   有效配置: {best['effective_cfg']}")
+    print()
+    print(i18n("🏆 Best config: {name}").format(name=best['name']))
+    print(i18n("   Throughput: {n} ops/s ({ratio}x of default)").format(n=f"{best['ops']:,.0f}", ratio=f"{best['ops']/baseline['ops']:.2f}"))
+    print(i18n("   Effective config: {cfg}").format(cfg=best['effective_cfg']))
 
 
 if __name__ == "__main__":

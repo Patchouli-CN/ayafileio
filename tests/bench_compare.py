@@ -1,7 +1,7 @@
 """
-性能对比: ayafileio vs aiofiles vs sync(threadpool)
+Performance comparison: ayafileio vs aiofiles vs sync(threadpool)
 
-同等条件，单文件随机读取，测试真正的 I/O 并发能力。
+Single-file random read — testing true async I/O capability.
 """
 
 import asyncio
@@ -20,13 +20,14 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from i18n import i18n
 import ayafileio
 
 FILE_SIZE_MB = 20
 CHUNK_SIZE = 256
 
 # ════════════════════════════════════════════════════════════════════════════
-# 准备
+# Setup
 # ════════════════════════════════════════════════════════════════════════════
 
 def prepare_file(path: str, size_mb: int):
@@ -48,7 +49,7 @@ def mem_str():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 三个选手
+# Three contenders
 # ════════════════════════════════════════════════════════════════════════════
 
 async def bench_ayafileio(path: str, concurrent: int):
@@ -103,7 +104,7 @@ async def bench_sync_threadpool(path: str, concurrent: int):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 单个测试运行
+# Single test runner
 # ════════════════════════════════════════════════════════════════════════════
 
 async def run_one(name: str, fn, path: str, concurrent: int):
@@ -127,18 +128,21 @@ async def run_one(name: str, fn, path: str, concurrent: int):
 # ════════════════════════════════════════════════════════════════════════════
 
 async def main(concurrencies):
-    print(f"╔══════════════════════════════════════════════════════════════╗")
-    print(f"║   ayafileio vs aiofiles vs sync(threadpool) 性能对比        ║")
-    print(f"╚══════════════════════════════════════════════════════════════╝")
+    title = i18n("ayafileio vs aiofiles vs sync(threadpool) Performance Comparison")
+    print(f"╔{'═' * (len(title) + 4)}╗")
+    print(f"║   {title}   ║")
+    print(f"╚{'═' * (len(title) + 4)}╝")
     print(f"Python: {sys.version.split()[0]}, Backend: {ayafileio.get_backend_info()['backend']}")
-    print(f"文件: {FILE_SIZE_MB}MB, 块大小: {CHUNK_SIZE}B, 随机读取")
-    print(f"阶梯: {[f'{c//1000}K' for c in concurrencies]}")
+    print(i18n("File: {size}MB, Chunk: {chunk}B, Random Read").format(size=FILE_SIZE_MB, chunk=CHUNK_SIZE))
+    steps_str = ", ".join(f"{c//1000}K" for c in concurrencies)
+    print(i18n("Steps: {steps}").format(steps=steps_str))
 
     tmpdir = tempfile.mkdtemp(prefix="aya_bench_")
     read_path = os.path.join(tmpdir, "bench_data.bin")
 
     try:
-        print(f"\n准备 {FILE_SIZE_MB}MB 测试文件...", end=" ", flush=True)
+        msg = i18n("Preparing {size}MB test file...").format(size=FILE_SIZE_MB)
+        print(f"\n{msg}", end=" ", flush=True)
         t0 = time.perf_counter()
         prepare_file(read_path, FILE_SIZE_MB)
         print(f"{time.perf_counter() - t0:.1f}s")
@@ -151,8 +155,9 @@ async def main(concurrencies):
         ]
 
         for n in concurrencies:
+            k = n // 1000
             print(f"\n{'─'*60}")
-            print(f" 并发: {n:,} ({n//1000}K)")
+            print(i18n(" Concurrency: {n} ({k}K)").format(n=f"{n:,}", k=k))
             print(f"{'─'*60}")
 
             row = {"concurrent": n, "results": []}
@@ -168,11 +173,16 @@ async def main(concurrencies):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    # ── 汇总 ──────────────────────────────────────────────────────────────
+    # ── Summary ────────────────────────────────────────────────────────────
+    summary_title = i18n("📊 Performance Comparison Summary")
+    header_concur = i18n("Concurrency")
+    header_vs_aio = i18n("vs aiofiles")
+    header_vs_sync = i18n("vs sync")
+
     print(f"\n{'='*90}")
-    print("📊 性能对比总表")
+    print(summary_title)
     print(f"{'='*90}")
-    print(f"{'并发':>7s}  {'ayafileio':>12s}  {'aiofiles':>12s}  {'sync(tp)':>12s}  {'vs aiofiles':>13s}  {'vs sync':>12s}")
+    print(f"{header_concur:>7s}  {'ayafileio':>12s}  {'aiofiles':>12s}  {'sync(tp)':>12s}  {header_vs_aio:>13s}  {header_vs_sync:>12s}")
     print("-" * 90)
 
     for row in all_rows:
@@ -196,18 +206,18 @@ async def main(concurrencies):
     aio_last = [r for r in last if "aiofiles" in r["name"]][0]
     if not aya_last.get("error") and not aio_last.get("error") and aio_last["ops"] > 0:
         speedup = aya_last["ops"] / aio_last["ops"]
-        print(f"🏆 在最高并发下, ayafileio 比 aiofiles 快 {speedup:.1f}x")
-        print(f"   ayafileio 的真正优势: 零后台线程、内核 IOCP 完成通知、无 GIL 竞争")
+        print(i18n("🏆 At max concurrency, ayafileio is {x:.1f}x faster than aiofiles").format(x=speedup))
+        print(i18n("   ayafileio advantage: zero background threads, kernel IOCP completion, zero GIL contention"))
 
     aya_errs = any(r["errs"] > 0 for row in all_rows for r in row["results"] if "ayafileio" in r["name"])
     if not aya_errs:
-        print(f"   ayafileio 在所有并发级别下: ✅ 零异常")
+        print(i18n("   ayafileio at all concurrency levels: ✅ zero errors"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--max", type=int, default=100_000,
-                        help="最大并发数 (默认 100K)")
+                        help="Maximum concurrency (default 100K)")
     args = parser.parse_args()
 
     if args.max <= 1000:
