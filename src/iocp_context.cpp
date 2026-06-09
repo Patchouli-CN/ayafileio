@@ -233,7 +233,9 @@ ResultBatcher *IOCPContext::get_batcher(PyObject *loop) {
     // Create new batcher outside lock to avoid nested issues
     auto &cfg = ayafileio::config();
     auto batcher = std::make_unique<ResultBatcher>(
-        loop, cfg.iocp_batch_size(), 5);  // 5ms idle timeout
+        loop, cfg.iocp_batch_size(), 5);  // max_threshold, max_idle_timeout_ms
+    batcher->set_adaptive(cfg.adaptive_batch());
+    batcher->set_target_latency_us(cfg.adaptive_target_latency_us());
     std::lock_guard<std::mutex> lk(m_batchersMtx);
     auto [it, inserted] = m_batchers.emplace(loop, std::move(batcher));
     return it->second.get();

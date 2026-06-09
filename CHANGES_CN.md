@@ -5,6 +5,33 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.5] - 2026-06-09
+
+### 新增
+- **自适应 `ResultBatcher` — 智能批处理阈值**: 完成包批处理器现在通过 128 项环形缓冲区追踪 I/O 完成间隔，利用滚动中位数动态调节批处理阈值：
+
+  ```
+  dynamic_threshold = adaptive_target_latency_us / median_interval_us
+  dynamic_idle_ms    = min(idle_max, median_us * 4 / 1000)
+  ```
+
+  - **快盘 (NVMe, ~10μs 间隔)**: 阈值自动升至 100+，每次 `call_soon_threadsafe` 批量处理更多完成包 — 降低 GIL 压力与调度开销
+  - **慢盘 (HDD, ~10ms 间隔)**: 阈值降至 1，立即 flush — 不为尚未到达的完成包空等
+  - **空闲超时同步自适应**: 按观测到的 I/O 速率等比缩放
+
+  默认启用。新增配置项: `adaptive_batch` (bool, 默认 `True`) 和 `adaptive_target_latency_us` (unsigned, 默认 1000μs, 范围 1-10000)。
+
+- **benchmark 脚本国际化 (i18n)**: `tests/i18n.py` 模块，自动检测系统语言（系统 locale + `AYAFILEIO_LANG` 环境变量），基于 YAML 的翻译文件存放于 `tests/lang/`。所有 benchmark 脚本 (`bench_compare.py`、`bench_tuned.py`、`stress_single_file.py`) 均支持中英文自动切换。
+
+### 变更
+- **README 性能章节大幅扩展**: 新增两个实测场景及详细数据：
+  - **场景二：单文件高并发随机读** — 100K 并发任务共享一个文件句柄。ayafileio vs aiofiles 在 1K/10K/50K/100K 四个并发级别下实测对比。100K 时 ayafileio 比 aiofiles 快 **9.1x**（19,290 vs 2,130 ops/s，同为 HDD）。aiofiles 吞吐量**随并发增加反而下降**（7,706 → 2,130），而 ayafileio **先升后稳**（7,487 → 46,616 at 10K）。
+  - **场景三：50 万并发极限压测** — 50 万个 asyncio 任务从同一文件 IOCP 并发读取。**零异常**，23,116 ops/s，仅 2 个 worker 线程，~583 MB RSS。
+  - **配置调优结论**: 实测 14 种配置组合 — 默认配置最优（HDD 上全部在 ±3% 以内）。瓶颈是物理磁盘而非软件。
+
+### 改进
+- **CI: 扩展 `paths-ignore`**: 新增 `tests/bench_*.py`、`tests/stress_*.py`、`tests/t_compare.py`、`tests/test_loguru.py`、`tests/lang/**`、`tests/i18n.py`、`ignore/*.py` — benchmark 和纯配置变更不再触发完整 CI 构建。
+
 ## [1.4.4] - 2026-06-02
 
 ### 修复

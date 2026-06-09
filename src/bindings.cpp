@@ -127,6 +127,14 @@ static void py_configure(py::dict options) {
     if (options.contains("io_uring_sqpoll")) {
         cfg.io_uring_sqpoll = py::cast<bool>(options["io_uring_sqpoll"]);
     }
+    if (options.contains("adaptive_batch")) {
+        cfg.adaptive_batch = py::cast<bool>(options["adaptive_batch"]);
+    }
+    if (options.contains("adaptive_target_latency_us")) {
+        unsigned val = py::cast<unsigned>(options["adaptive_target_latency_us"]);
+        if (val < 1 || val > 10000) throw py::value_error("adaptive_target_latency_us must be 1-10000");
+        cfg.adaptive_target_latency_us = val;
+    }
 
     ayafileio::config().update(cfg);
 
@@ -150,6 +158,8 @@ static py::dict py_get_config() {
     result["iocp_batch_size"] = cfg.iocp_batch_size;
     result["io_uring_queue_depth"] = cfg.io_uring_queue_depth;
     result["io_uring_sqpoll"] = cfg.io_uring_sqpoll;
+    result["adaptive_batch"] = cfg.adaptive_batch;
+    result["adaptive_target_latency_us"] = cfg.adaptive_target_latency_us;
     return result;
 }
 

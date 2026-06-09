@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.5] - 2026-06-09
+
+### Added
+- **Adaptive `ResultBatcher` — self-tuning batch threshold**: The completion batcher now tracks inter-completion intervals via a 128-entry ring buffer and dynamically adjusts the effective batch threshold using the rolling median interval:
+
+  ```
+  dynamic_threshold = adaptive_target_latency_us / median_interval_us
+  dynamic_idle_ms    = min(idle_max, median_us * 4 / 1000)
+  ```
+
+  - **Fast disk (NVMe, ~10μs intervals)**: threshold auto-rises to 100+, batching more completions per `call_soon_threadsafe` call — reduces GIL pressure and scheduling overhead
+  - **Slow disk (HDD, ~10ms intervals)**: threshold drops to 1, flushing immediately — no wasted waiting for completions that haven't arrived
+  - **Idle timeout also adapts**: scales proportionally to the observed I/O rate
+
+  Enabled by default. New config options: `adaptive_batch` (bool, default `True`) and `adaptive_target_latency_us` (unsigned, default 1000μs, range 1-10000).
+
+- **i18n for benchmark scripts**: `tests/i18n.py` module with automatic language detection (system locale + `AYAFILEIO_LANG` env var) and YAML-based translation files in `tests/lang/`. All benchmark scripts (`bench_compare.py`, `bench_tuned.py`, `stress_single_file.py`) now support Chinese and English output.
+
+### Changed
+- **Extended performance benchmarks in README**: Added two new real-world test scenarios with detailed data:
+  - **Scenario 2: Single-file high-concurrency random read** — 100K concurrent tasks sharing one file handle. ayafileio vs aiofiles measured at 1K/10K/50K/100K concurrency levels. At 100K, ayafileio is **9.1x faster** than aiofiles on HDD (19,290 vs 2,130 ops/s). aiofiles throughput *degrades* with higher concurrency (7,706 → 2,130) while ayafileio *improves* (7,487 → 46,616 at 10K).
+  - **Scenario 3: 500K concurrent stress test** — 500,000 asyncio tasks reading from a single file via IOCP. **Zero errors**, 23,116 ops/s, only 2 worker threads, ~583 MB RSS.
+  - **Config tuning results**: 14 config combinations tested — default config is optimal (all within ±3% on HDD). The bottleneck is the physical disk, not the software.
+
+### Improved
+- **CI: expanded `paths-ignore`**: Added `tests/bench_*.py`, `tests/stress_*.py`, `tests/t_compare.py`, `tests/test_loguru.py`, `tests/lang/**`, `tests/i18n.py`, `ignore/*.py` — benchmark/config-only changes no longer trigger full CI builds.
+
 ## [1.4.4] - 2026-06-02
 
 ### Fixed

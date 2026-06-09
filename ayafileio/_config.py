@@ -44,6 +44,10 @@ class AyafileioConfig(TypedDict, total=False):
     io_uring_queue_depth: NotRequired[int]
     io_uring_sqpoll: NotRequired[bool]
 
+    # ── ResultBatcher / 自适应批处理 ────────────────────────────────
+    adaptive_batch: NotRequired[bool]
+    adaptive_target_latency_us: NotRequired[int]
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # 公开 API
@@ -78,6 +82,15 @@ def configure(options: AyafileioConfig) -> None:
         提交队列深度（默认 256，范围 1-4096）。
     ``io_uring_sqpoll``
         是否启用 SQPOLL 模式（默认 ``False``）。
+
+    **ResultBatcher / 自适应批处理**
+    ``adaptive_batch``
+        是否启用自适应批次大小（默认 ``True``）。
+        开启后，ResultBatcher 根据 I/O 完成速率动态调整批处理阈值，
+        快盘自动增大批次减少调度开销，慢盘自动减小批次避免延迟。
+    ``adaptive_target_latency_us``
+        目标最大额外延迟，微秒（默认 1000，范围 1-10000）。
+        值越小延迟越低但批处理机会越少，值越大批处理越激进但延迟越高。
 
     Example::
 
