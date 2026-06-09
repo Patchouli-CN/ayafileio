@@ -19,6 +19,7 @@ on:
       - 'tests/lang/**'
       - 'tests/i18n.py'
       - 'ignore/*.py'
+      - '.github/workflows/build_wheel_ci.yml'
   pull_request:
     branches: [ main, master ]
     paths-ignore:
@@ -37,9 +38,7 @@ on:
       - 'tests/lang/**'
       - 'tests/i18n.py'
       - 'ignore/*.py'
-      - 'tests/t_compare.py'
-      - 'tests/test_loguru.py'
-      - 'ignore/*.py'
+      - '.github/workflows/build_wheel_ci.yml'
   workflow_dispatch:
 
 jobs:

@@ -83,4 +83,5 @@ jobs:
         with:
           packages-dir: dist/
           skip-existing: true
+          attestations: false  # 48 wheels × sigstore 签名 > OIDC token lifetime
           verbose: true
