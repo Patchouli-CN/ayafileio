@@ -5,6 +5,25 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.6] - 2026-06-16
+
+### 新增
+- **文本模式完整 `newline` 语义**：`AsyncFile` 现在遵循 Python 内置 `open()` 的换行符行为：
+  - `newline=None`（默认）：通用换行模式 — 读取时把 `\r\n`、`\r` 都转为 `\n`；写入时把 `\n` 转为 `os.linesep`。
+  - `newline=""`：通用换行但不翻译 — 识别 `\r\n`、`\r`、`\n` 为行尾并原样返回。
+  - `newline="\n"`、`"\r"`、`"\r\n"`：固定行尾；写入时将 `\n` 翻译为指定行尾。
+  - 二进制模式现在会拒绝 `newline` 参数，与标准库一致。
+
+### 修复
+- **`AsyncFile.open` 类方法签名**：补齐缺失的 `auto_flush` 参数，使其与模块级 `open()` 函数一致。
+- **构建配置清理**：
+  - `CMakeLists.txt` 与 `pyproject.toml` 统一使用 C++20。
+  - 删除 `pyproject.toml` 中冗余的 `[tool.setuptools]` 配置（由 scikit-build-core 处理打包）。
+  - 将已弃用的 `cmake.minimum-version` 替换为 `cmake.version`，适配 scikit-build-core >= 0.8。
+
+### 变更
+- **README 措辞**：收敛了“唯一真异步”等过于绝对的营销表述，保留所有东方/幻想乡元素不变。
+
 ## [1.4.5] - 2026-06-09
 
 ### 新增

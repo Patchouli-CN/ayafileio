@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
-[![Version](https://img.shields.io/badge/version-1.4.5-red.svg)]()
+[![Version](https://img.shields.io/badge/version-1.4.6-red.svg)]()
 
 **当前是中文** | [**english version**](README.md)
 
@@ -20,7 +20,7 @@ Windows 上借 **IOCP**（I/O 完成端口）之力，Linux 上用 **io_uring**�
 
 **请看此处** -> [**变动**](CHANGES_CN.md)
 
-## 🏆 独一无二的三平台真异步
+## 🏆 三平台真异步
 
 | 平台 | 后端 | 真异步 | 说明 |
 |------|------|--------|------|
@@ -28,7 +28,7 @@ Windows 上借 **IOCP**（I/O 完成端口）之力，Linux 上用 **io_uring**�
 | **Linux** | io_uring | ✅ | Linux 5.1+ 下一代异步 I/O |
 | **macOS** | Dispatch I/O | ✅ | GCD 内核级异步 I/O |
 
-**ayafileio 是 Python 生态中唯一同时支持三大平台真异步的文件 I/O 库。**
+**ayafileio 致力于以统一 API 在 Windows、Linux、macOS 三大平台提供真正的内核级异步文件 I/O。**
 
 ## 📸 核心特性
 

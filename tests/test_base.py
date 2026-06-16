@@ -535,7 +535,9 @@ async def test_write_read_text():
 
         async with ayafileio.open(path, "w", encoding="utf-8") as f:
             written = await f.write(content)
-            assert written == len(content.encode("utf-8"))
+            # newline=None 在 Windows 上会把 \n 翻译为 \r\n，因此写入字节数会变长。
+            expected_bytes = content.replace("\n", os.linesep).encode("utf-8")
+            assert written == len(expected_bytes)
 
         async with ayafileio.open(path, "r", encoding="utf-8") as f:
             read_content = await f.read()
@@ -599,6 +601,104 @@ async def test_readline():
                 read_lines.append(line)
 
             assert read_lines == lines
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readline_crlf_universal():
+    """newline=None 时 \\r\\n 应被识别并翻译为 \\n"""
+    path = get_temp_path(".txt")
+    try:
+        raw = "line1\r\nline2\r\nline3"
+        with open(path, "wb") as f:
+            f.write(raw.encode("utf-8"))
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            assert await f.readline() == "line1\n"
+            assert await f.readline() == "line2\n"
+            assert await f.readline() == "line3"
+            assert await f.readline() == ""
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readline_crlf_passthrough():
+    """newline='' 时 \\r\\n 应被原样返回"""
+    path = get_temp_path(".txt")
+    try:
+        raw = "line1\r\nline2\r\nline3"
+        with open(path, "wb") as f:
+            f.write(raw.encode("utf-8"))
+
+        async with ayafileio.open(path, "r", encoding="utf-8", newline="") as f:
+            assert await f.readline() == "line1\r\n"
+            assert await f.readline() == "line2\r\n"
+            assert await f.readline() == "line3"
+            assert await f.readline() == ""
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_readline_cr_only():
+    """newline=None 时单独的 \\r 也应被识别为行尾"""
+    path = get_temp_path(".txt")
+    try:
+        raw = "line1\rline2\rline3"
+        with open(path, "wb") as f:
+            f.write(raw.encode("utf-8"))
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            assert await f.readline() == "line1\n"
+            assert await f.readline() == "line2\n"
+            assert await f.readline() == "line3"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_write_newline_crlf():
+    """写入时 newline='\\r\\n' 应把 \\n 翻译为 \\r\\n"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8", newline="\r\n") as f:
+            await f.write("a\nb\n")
+
+        with open(path, "rb") as f:
+            assert f.read() == b"a\r\nb\r\n"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_write_newline_cr():
+    """写入时 newline='\\r' 应把 \\n 翻译为 \\r"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8", newline="\r") as f:
+            await f.write("a\nb\n")
+
+        with open(path, "rb") as f:
+            assert f.read() == b"a\rb\r"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_binary_rejects_newline():
+    """二进制模式不允许传入 newline"""
+    try:
+        ayafileio.open("test.bin", "rb", newline="\n")  # type: ignore
+        assert False, "应该抛出 ValueError"
+    except ValueError:
+        pass
+
+
+async def test_read_universal_newlines():
+    """read() 在 newline=None 时应统一换行符"""
+    path = get_temp_path(".txt")
+    try:
+        with open(path, "wb") as f:
+            f.write(b"a\r\nb\rc\n")
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            assert await f.read() == "a\nb\nc\n"
     finally:
         path.unlink(missing_ok=True)
 
@@ -1452,7 +1552,16 @@ def main():
     runner.run_async("二进制写入读取", test_write_read_binary)
     runner.run_async("分块读取", test_read_chunks)
     runner.run_async("按行读取", test_readline)
+    runner.run_async("按行读取 CRLF (universal)", test_readline_crlf_universal)
+    runner.run_async("按行读取 CRLF (原样返回)", test_readline_crlf_passthrough)
+    runner.run_async("按行读取 CR-only", test_readline_cr_only)
     runner.run_async("读取所有行", test_readlines)
+
+    print("\n📋 newline 处理测试:")
+    runner.run_async("写入 newline=\\r\\n", test_write_newline_crlf)
+    runner.run_async("写入 newline=\\r", test_write_newline_cr)
+    runner.run_async("二进制模式拒绝 newline", test_binary_rejects_newline)
+    runner.run_async("read 统一换行符", test_read_universal_newlines)
 
     print("\n📋 追加模式测试:")
     runner.run_async("文本追加", test_append_text)

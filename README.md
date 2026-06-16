@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
-[![Version](https://img.shields.io/badge/version-1.4.5-red.svg)]()
+[![Version](https://img.shields.io/badge/version-1.4.6-red.svg)]()
 
 **当前是英文** | [**chinese version**](README_CN.md)
 
@@ -20,7 +20,7 @@ Windows leverages **IOCP** (I/O Completion Ports), Linux uses **io_uring** (kern
 
 **see** -> [**CHANGES**](CHANGES.md)
 
-## 🏆 The Only True Async on All Three Major Platforms
+## 🏆 True Async on All Three Major Platforms
 
 | Platform | Backend | True Async | Description |
 |----------|---------|------------|-------------|
@@ -28,7 +28,7 @@ Windows leverages **IOCP** (I/O Completion Ports), Linux uses **io_uring** (kern
 | **Linux** | io_uring | ✅ | Next-gen async I/O (kernel 5.1+) |
 | **macOS** | Dispatch I/O | ✅ | GCD kernel-level async I/O |
 
-**ayafileio is the only Python library providing true async file I/O on Windows, Linux, and macOS.**
+**ayafileio aims to be a single, unified async file API that delivers true kernel-level async I/O across Windows, Linux, and macOS.**
 
 ## 📸 Key Features
 

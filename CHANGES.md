@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.6] - 2026-06-16
+
+### Added
+- **Full `newline` semantics for text mode**: `AsyncFile` now follows Python's built-in `open()` newline behavior:
+  - `newline=None` (default): universal newline mode — translates `\r\n` and `\r` to `\n` on read, and writes `\n` as `os.linesep`.
+  - `newline=""`: universal newline mode without translation — recognizes `\r\n`, `\r`, and `\n` as line terminators and returns them as-is.
+  - `newline="\n"`, `"\r"`, `"\r\n"`: fixed terminator; write translates `\n` to the specified line ending.
+  - Binary mode now rejects the `newline` argument, matching the standard library.
+
+### Fixed
+- **`AsyncFile.open` class method signature**: added the missing `auto_flush` parameter so it matches the module-level `open()` function.
+- **Build configuration cleanup**:
+  - Unified C++ standard to C++20 across `CMakeLists.txt` and `pyproject.toml`.
+  - Removed redundant `[tool.setuptools]` section from `pyproject.toml` (scikit-build-core handles packaging).
+  - Replaced deprecated `cmake.minimum-version` with `cmake.version` for scikit-build-core >= 0.8.
+
+### Changed
+- **README wording**: softened the "only true async" marketing claim to a more accurate description while keeping all Touhou/Gensokyo flavor intact.
+
 ## [1.4.5] - 2026-06-09
 
 ### Added

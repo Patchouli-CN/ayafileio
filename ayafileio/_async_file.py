@@ -12,11 +12,85 @@ _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 T = TypeVar("T", str, bytes)
 
 
+# ── newline helpers ─────────────────────────────────────────────────────────
+# Python open() newline semantics:
+#   None  : universal mode; translate any of \r\n, \r, \n to \n on input,
+#           and translate \n to os.linesep on output.
+#   ""    : universal mode; recognize \r\n, \r, \n as line terminators but
+#           do not translate them.
+#   "\n"  : line terminator is \n only; no translation.
+#   "\r"  : line terminator is \r only; write translates \n -> \r.
+#   "\r\n": line terminator is \r\n only; write translates \n -> \r\n.
+
+
+def _find_line_end(buf: bytearray, newline: str | None, eof: bool) -> tuple[int, int]:
+    """Locate the first complete line ending in *buf*.
+
+    Returns ``(sep_start, sep_len)``. ``sep_start`` is the index of the first
+    byte of the separator; ``sep_len`` is its length. Returns ``(-1, 0)`` when
+    no complete terminator is present.
+
+    For universal newline modes, a trailing ``\\r`` at the very end of *buf*
+    is not treated as a line ending unless *eof* is ``True``, because it may
+    be the first half of a ``\\r\\n`` pair split across read chunks.
+    """
+    if newline == "\n":
+        idx = buf.find(b"\n")
+        return (idx, 1) if idx != -1 else (-1, 0)
+    if newline == "\r":
+        idx = buf.find(b"\r")
+        return (idx, 1) if idx != -1 else (-1, 0)
+    if newline == "\r\n":
+        idx = buf.find(b"\r\n")
+        return (idx, 2) if idx != -1 else (-1, 0)
+
+    # Universal newline mode (newline is None or "").
+    for i, b in enumerate(buf):
+        if b == 10:  # \n
+            return i, 1
+        if b == 13:  # \r
+            if i + 1 < len(buf) and buf[i + 1] == 10:
+                return i, 2
+            # A lone \r at the buffer end may be a split \r\n.
+            if i == len(buf) - 1 and not eof:
+                return -1, 0
+            return i, 1
+    return -1, 0
+
+
+def _translate_for_read(text: str, newline: str | None) -> str:
+    """Apply input newline translation for text mode."""
+    if newline is None:
+        # Universal mode: normalize all line endings to \n.
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+    return text
+
+
+def _translate_for_write(text: str, newline: str | None) -> str:
+    """Apply output newline translation for text mode."""
+    if newline is None:
+        return text.replace("\n", os.linesep)
+    if newline == "\r":
+        return text.replace("\n", "\r")
+    if newline == "\r\n":
+        return text.replace("\n", "\r\n")
+    return text
+
+
 class AsyncFile(Generic[T]):
     """跨平台异步文件对象。
 
     支持模式: r/rb/w/wb/a/ab/x/xb 及 + 组合。
     指定 encoding 时自动处理文本编解码（底层始终以二进制操作）。
+
+    ``newline`` 参数遵循 Python 内置 ``open()`` 的约定：
+
+    - ``None``（默认）：通用换行模式；读取时把 ``\\r\\n``、``\\r`` 都转为 ``\\n``，
+      写入时把 ``\\n`` 转为 ``os.linesep``。
+    - ``""``：通用换行模式但不翻译；``\\r\\n``、``\\r``、``\\n`` 都被识别为行尾，
+      但原样返回。
+    - ``"\\n"``、``"\\r"``、``"\\r\\n"``：只把对应字符串当作行尾；写入时会把
+      ``\\n`` 翻译为指定的行尾。
     """
 
     __slots__ = (
@@ -59,6 +133,8 @@ class AsyncFile(Generic[T]):
         else:
             if encoding is not None:
                 raise ValueError("Binary mode does not accept an encoding argument.")
+            if newline is not None:
+                raise ValueError("Binary mode does not accept a newline argument.")
             self._encoding = "utf-8"
 
         # ── 规范化传给 C++ 的模式（始终二进制）────────────────────────────
@@ -109,46 +185,41 @@ class AsyncFile(Generic[T]):
         if not data:
             return "" if self._is_text else b""  # type: ignore[return-value]
         if self._is_text:
-            return data.decode(self._encoding, errors=self._errors)  # type: ignore[return-value]
+            text = data.decode(self._encoding, errors=self._errors)
+            return _translate_for_read(text, self._newline)  # type: ignore[return-value]
         return data  # type: ignore[return-value]
 
     async def readline(self) -> str | bytes:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
 
-        sep = b"\n"
         while True:
-            idx = self._line_buffer.find(sep)
-            if idx != -1:
+            sep_start, sep_len = _find_line_end(
+                self._line_buffer, self._newline, eof=False
+            )
+            if sep_start != -1:
+                # Include the separator in the returned line.
+                end = sep_start + sep_len
                 line, self._line_buffer = (
-                    self._line_buffer[: idx + 1],
-                    self._line_buffer[idx + 1 :],
+                    self._line_buffer[:end],
+                    self._line_buffer[end:],
                 )
                 if self._is_text:
                     text = line.decode(self._encoding, errors=self._errors)
-                    # 处理 newline 参数
-                    if self._newline is not None and self._newline != "\n":
-                        text = (
-                            text.replace("\n", self._newline)
-                            if self._newline != ""
-                            else text.replace("\n", "")
-                        )
-                    return text
+                    return _translate_for_read(text, self._newline)
                 return bytes(line)
 
             chunk: bytes = await self._impl.read(_DEFAULT_READLINE_BUF)
             if not chunk:
+                # EOF: flush whatever remains in the line buffer.
                 if self._line_buffer:
                     out, self._line_buffer = self._line_buffer, bytearray()
+                    # On EOF a trailing \\r is definitely a terminator.
+                    if self._newline is None and out and out[-1] == 13:
+                        out.append(10)  # canonicalize to include a \\n
                     if self._is_text:
                         text = out.decode(self._encoding, errors=self._errors)
-                        if self._newline is not None and self._newline != "\n":
-                            text = (
-                                text.replace("\n", self._newline)
-                                if self._newline != ""
-                                else text.replace("\n", "")
-                            )
-                        return text
+                        return _translate_for_read(text, self._newline)
                     return bytes(out)
                 return "" if self._is_text else b""
             self._line_buffer.extend(chunk)
@@ -257,7 +328,9 @@ class AsyncFile(Generic[T]):
         if self._is_text:
             if not isinstance(data, str):
                 raise TypeError("Text mode requires str input.")
-            raw: bytes = data.encode(self._encoding, errors=self._errors)  # type: ignore
+            raw: bytes = _translate_for_write(data, self._newline).encode(
+                self._encoding, errors=self._errors
+            )  # type: ignore
         else:
             if isinstance(data, str):
                 raise TypeError("Binary mode requires bytes-like input, not str.")
@@ -352,9 +425,10 @@ class AsyncFile(Generic[T]):
         encoding: str | None = None,
         newline: str | None = None,
         errors: str | None = None,
+        auto_flush: bool = False,
     ) -> "AsyncFile":
-        """类方法方式打开文件，等同 `AsyncFile(path, mode, encoding)`"""
-        return cls(path, mode, encoding, newline, errors)
+        """类方法方式打开文件，等同 `AsyncFile(path, mode, encoding, ...)`"""
+        return cls(path, mode, encoding, newline, errors, auto_flush)
 
     @classmethod
     def _from_impl(cls, impl: _AsyncFile) -> "AsyncFile[T]":
