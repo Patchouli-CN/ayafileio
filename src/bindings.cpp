@@ -294,7 +294,7 @@ NB_MODULE(_ayafileio, m) {
     try {
         init_iocp();
     } catch (const std::exception& e) {
-        printf("Warning: Failed to init IOCP:", e.what());
+        printf("Warning: Failed to init IOCP: %s\n", e.what());
     }
 #endif
 

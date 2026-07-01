@@ -479,6 +479,27 @@ IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
 // I/O submission helpers
 // ════════════════════════════════════════════════════════════════════════════
 
+PyObject *IOCPContext::make_failed_future_no_session() {
+    // Session gone — return an already-failed future so the caller never
+    // sees a bare nullptr without an active exception. If loop/future
+    // creation itself fails, a Python exception IS set, so returning nullptr
+    // there is correct (the binding's py::python_error() will pick it up).
+    PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
+    if (!loop) return nullptr;
+    PyObject *cf = PyObject_GetAttr(loop, g_str_create_future);
+    Py_DECREF(loop);
+    if (!cf) return nullptr;
+    PyObject *future = PyObject_CallNoArgs(cf);
+    Py_DECREF(cf);
+    if (!future) return nullptr;
+
+    PyObject *exc = PyObject_CallFunction(g_ValueError, "s", "File not open.");
+    PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
+    PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
+    Py_XDECREF(r); Py_XDECREF(fn); Py_XDECREF(exc);
+    return future;
+}
+
 PyObject *IOCPContext::check_session_closed(const std::shared_ptr<Session> &s) {
     if (!s->running.load(std::memory_order_relaxed) ||
         s->handle == INVALID_HANDLE_VALUE) {
@@ -702,7 +723,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view) {
 
 PyObject *IOCPContext::submit_seek(uint64_t session_id, int64_t offset, int whence) {
     auto s = get_session(session_id);
-    if (!s) return nullptr;
+    if (!s) return make_failed_future_no_session();
 
     PyObject *future = check_session_closed(s);
     if (future) return future;
@@ -739,7 +760,7 @@ PyObject *IOCPContext::submit_seek(uint64_t session_id, int64_t offset, int when
 
 PyObject *IOCPContext::submit_flush(uint64_t session_id) {
     auto s = get_session(session_id);
-    if (!s) return nullptr;
+    if (!s) return make_failed_future_no_session();
 
     PyObject *future = check_session_closed(s);
     if (future) return future;
@@ -767,7 +788,7 @@ PyObject *IOCPContext::submit_flush(uint64_t session_id) {
 
 PyObject *IOCPContext::submit_tell(uint64_t session_id) {
     auto s = get_session(session_id);
-    if (!s) return nullptr;
+    if (!s) return make_failed_future_no_session();
 
     PyObject *future = check_session_closed(s);
     if (future) return future;
@@ -793,7 +814,7 @@ PyObject *IOCPContext::submit_tell(uint64_t session_id) {
 
 PyObject *IOCPContext::submit_truncate(uint64_t session_id, int64_t size) {
     auto s = get_session(session_id);
-    if (!s) return nullptr;
+    if (!s) return make_failed_future_no_session();
 
     PyObject *future = check_session_closed(s);
     if (future) return future;
@@ -861,7 +882,7 @@ PyObject *IOCPContext::submit_truncate(uint64_t session_id, int64_t size) {
 
 PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
     auto s = get_session(session_id);
-    if (!s) return nullptr;
+    if (!s) return make_failed_future_no_session();
 
     PyObject *future = check_session_closed(s);
     if (future) return future;

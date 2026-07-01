@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.7] - 2026-07-01
+
+### Fixed
+- **`submit_*` returned a bare `NULL` without setting an exception (Windows/IOCP)**: When a session was already gone (e.g. an operation racing with `close()`), `submit_seek`, `submit_flush`, `submit_tell`, `submit_truncate`, and `submit_readinto` returned `nullptr` without an active Python exception. The nanobind binding's `throw py::python_error()` then surfaced this as a confusing `SystemError: <built-in> returned NULL without setting an error`. These paths now return an already-failed future carrying `ValueError("File not open.")`, consistent with `submit_read`/`submit_write`. Notably `seek()`/`tell()` have no Python-layer `_closed` guard, so they actually exercised this C++ path.
+- **Missing format specifier in IOCP init warning**: the `printf` for a failed `init_iocp()` used `"Warning: Failed to init IOCP:"` with no `%s`, silently discarding `e.what()`. The failure reason is now printed.
+
 ## [1.4.6] - 2026-06-16
 
 ### Added

@@ -132,6 +132,11 @@ private:
     // ── internal helpers ──────────────────────────────────────────────────
     PyObject* check_session_closed(const std::shared_ptr<Session> &s);
     HANDLE iocp_for_session(const std::shared_ptr<Session> &s);
+
+    // Build an already-failed future (ValueError) for the case where the
+    // session no longer exists. Used by submit_* so we never return nullptr
+    // without an active Python exception (which would surface as SystemError).
+    PyObject* make_failed_future_no_session();
 };
 
 #endif // _WIN32

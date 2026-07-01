@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.7] - 2026-07-01
+
+### 修复
+- **`submit_*` 返回裸 `NULL` 却未设置异常（Windows/IOCP）**：当 session 已不存在时（例如操作与 `close()` 竞态），`submit_seek`、`submit_flush`、`submit_tell`、`submit_truncate`、`submit_readinto` 会在没有活跃 Python 异常的情况下返回 `nullptr`。nanobind 绑定层的 `throw py::python_error()` 随后把它暴露成令人困惑的 `SystemError: <built-in> returned NULL without setting an error`。现在这些路径统一返回一个携带 `ValueError("File not open.")` 的已失败 future，与 `submit_read`/`submit_write` 保持一致。其中 `seek()`/`tell()` 在 Python 层没有 `_closed` 前置检查，因此确实会走到这条 C++ 路径。
+- **IOCP 初始化警告缺少格式占位符**：`init_iocp()` 失败时的 `printf` 用了 `"Warning: Failed to init IOCP:"` 却没有 `%s`，导致 `e.what()` 被静默丢弃。现在会正确打印失败原因。
+
 ## [1.4.6] - 2026-06-16
 
 ### 新增
