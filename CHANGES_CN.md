@@ -8,6 +8,10 @@
 ## [1.4.8] - 2026-07-02
 
 ### 修复
+- **Windows 上偶发的整进程死锁（CI 卡死）**：`IOCPContext::flush_batchers()` 持着 `m_batchersMtx` 调用 `ResultBatcher` 的 flush，而后者内部会调 `loop.call_soon_threadsafe()`——asyncio 的实现走 socket `send()`，期间会临时释放再重新获取 GIL。如果此刻恰好有另一个线程持着 GIL 在等 `m_batchersMtx`（另一个 IOCP worker 的 `flush_batchers()`，或主线程 open() 文件），两个线程互等对方，整个进程冻结——包括看门狗线程。此 bug 在 1.4.7 及更早版本就存在（两个 IOCP worker 之间即可相撞），表现为 GitHub CI 的 Windows 测试步骤偶发超时。通过对卡死进程的原生栈转储确认根因，并用循环复现验证（修复前 1–3 次内必卡，修复后 100 次全部通过）。修复原则：绝不在持有 C++ 锁时执行可能释放 GIL 的 Python 调用：
+  - `flush_batchers()` 先在锁内拷出 batcher 指针，锁外再 flush。
+  - `get_or_create_batcher()`（非 IOCP 注册表）在 `g_batchersMtx` 锁外构造 batcher。
+  - `remove_session()` 把 `Session` 的析构（内含 `Py_DECREF`）移到 `m_sessionsMtx` 锁外。
 - **`readline()` 与 `read()`/`readinto()`/`chunk()` 混用时丢数据**：`readline()` 会预读最多 64 KB 到行缓冲，但 `read()`/`readinto()`/`chunk()` 直接从 C++ 层读取，预读缓冲里尚未消费的数据被静默跳过。现在所有读取路径都会先消费预读缓冲。
 - **`seek()` 不清空 readline 预读缓冲**：`readline()` 之后 `seek(0)` 再 `readline()` 返回的是旧缓冲里的陈旧数据而不是新位置的行。现在 `seek()` 会清空缓冲，且相对定位（`whence=1`）以用户实际消费到的逻辑位置为基准——与内置 `open()` 语义一致。
 - **`tell()` 返回的是物理（预读）位置**：读一行短行之后 `tell()` 报告 64 KB 而不是行尾位置。现在会减去缓冲中未消费的字节数。`write()` 和 `truncate()` 同样会先把底层位置回退到逻辑位置再执行（对 `r+`/`+` 模式有意义）。

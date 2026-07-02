@@ -217,8 +217,18 @@ std::shared_ptr<Session> IOCPContext::get_session(uint64_t id) const {
 
 void IOCPContext::remove_session(uint64_t id) {
     UR_DEBUG_LOG("remove_session id=%llu", id);
-    std::unique_lock<std::shared_mutex> lk(m_sessionsMtx);
-    m_sessions.erase(id);
+    // 把 shared_ptr 挪到锁外再析构：~Session 会 Py_DECREF(create_future)，
+    // 可能级联触发任意 Python 代码（如 loop.__del__），期间 GIL 可能被
+    // 释放重取 —— 不能发生在持 m_sessionsMtx 时。
+    std::shared_ptr<Session> victim;
+    {
+        std::unique_lock<std::shared_mutex> lk(m_sessionsMtx);
+        auto it = m_sessions.find(id);
+        if (it != m_sessions.end()) {
+            victim = std::move(it->second);
+            m_sessions.erase(it);
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -423,11 +433,22 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
 }
 
 void IOCPContext::flush_batchers() {
-    // Called with GIL held from worker thread
-    std::lock_guard<std::mutex> lk(m_batchersMtx);
-    for (auto &kv : m_batchers) {
-        kv.second->flush_if_idle();
+    // Called with GIL held from worker thread.
+    //
+    // 关键：不能持着 m_batchersMtx 调 flush_if_idle() —— 它内部会调
+    // call_soon_threadsafe，而 asyncio 的实现走 socket send()，期间会
+    // 临时释放并重新获取 GIL。如果此时另一个线程正持着 GIL 等
+    // m_batchersMtx（另一个 worker 的 flush_batchers，或主线程 open()
+    // 里的 get_batcher），就会互等死锁（CI 上偶发的整进程卡死）。
+    // 因此先在锁内拷出指针，锁外再调用。batcher 只在 shutdown 时销毁，
+    // 而 shutdown 会先 join 掉本线程，所以锁外使用这些指针是安全的。
+    std::vector<ResultBatcher*> local;
+    {
+        std::lock_guard<std::mutex> lk(m_batchersMtx);
+        local.reserve(m_batchers.size());
+        for (auto &kv : m_batchers) local.push_back(kv.second.get());
     }
+    for (auto *b : local) b->flush_if_idle();
 }
 
 // ════════════════════════════════════════════════════════════════════════════

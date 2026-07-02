@@ -290,14 +290,27 @@ static std::mutex                                           g_batchersMtx;
 static std::vector<std::pair<PyObject*, ResultBatcher*>>    g_batchers;
 
 ResultBatcher *get_or_create_batcher(PyObject *loop) {
-    std::lock_guard<std::mutex> lk(g_batchersMtx);
-    for (auto &kv : g_batchers) {
-        if (kv.first == loop) return kv.second;
+    {
+        std::lock_guard<std::mutex> lk(g_batchersMtx);
+        for (auto &kv : g_batchers) {
+            if (kv.first == loop) return kv.second;
+        }
     }
+    // 在锁外构造：ResultBatcher 构造函数会执行 Python 调用（GetAttr、
+    // 创建 cpp_function），可能触发 GC 进而释放/重取 GIL —— 不能发生在
+    // 持 g_batchersMtx 时，否则会与其他 GIL 持有者互等死锁。
     auto &cfg = ayafileio::config();
     auto *b = new ResultBatcher(loop, cfg.iocp_batch_size(), 5);
     b->set_adaptive(cfg.adaptive_batch());
     b->set_target_latency_us(cfg.adaptive_target_latency_us());
+
+    std::lock_guard<std::mutex> lk(g_batchersMtx);
+    for (auto &kv : g_batchers) {
+        if (kv.first == loop) {  // 竞态：别的线程已注册
+            delete b;
+            return kv.second;
+        }
+    }
     g_batchers.emplace_back(loop, b);
     return b;
 }
