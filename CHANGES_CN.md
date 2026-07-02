@@ -5,6 +5,25 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.4.8] - 2026-07-02
+
+### 修复
+- **`readline()` 与 `read()`/`readinto()`/`chunk()` 混用时丢数据**：`readline()` 会预读最多 64 KB 到行缓冲，但 `read()`/`readinto()`/`chunk()` 直接从 C++ 层读取，预读缓冲里尚未消费的数据被静默跳过。现在所有读取路径都会先消费预读缓冲。
+- **`seek()` 不清空 readline 预读缓冲**：`readline()` 之后 `seek(0)` 再 `readline()` 返回的是旧缓冲里的陈旧数据而不是新位置的行。现在 `seek()` 会清空缓冲，且相对定位（`whence=1`）以用户实际消费到的逻辑位置为基准——与内置 `open()` 语义一致。
+- **`tell()` 返回的是物理（预读）位置**：读一行短行之后 `tell()` 报告 64 KB 而不是行尾位置。现在会减去缓冲中未消费的字节数。`write()` 和 `truncate()` 同样会先把底层位置回退到逻辑位置再执行（对 `r+`/`+` 模式有意义）。
+- **`async with wrap_file(...)` 退出时崩溃**：`AsyncFile._from_impl` 漏初始化 `_auto_flush` 和 `_mode` 两个 slot，退出上下文管理器时抛 `AttributeError`，包装文件上的 `.mode`/`readable()`/`writable()` 也同样损坏。现在所有 slot 均被初始化，`wrap_file` 会把 mode 透传下去。
+
+### 性能
+- **`readline()` 提速 4–5 倍**（13.4 MB / 20 万行文件，Windows：文本通用换行模式 1640 → 405 ms，二进制 1516 → 293 ms）：
+  - 通用换行模式（默认模式）的行尾扫描原来是逐字节 Python 循环，现在改用 C 级 `find()`，并把 `\r` 的扫描范围限制在第一个 `\n` 之前，保证每次扫描 O(行长)。
+  - 取行原来每行都把整个剩余缓冲切片复制两次（每个块内 O(n²)），现在改为游标偏移消费，每次 64 KB 补块时只压缩一次。
+- **IOCP 完成热路径减负**（实测并发 4 KB 写吞吐 +8%；读取受磁盘限制无变化）：
+  - 每个 `Session` 在打开时缓存自己的 `ResultBatcher*`——完成路径不再每次加锁查哈希表。
+  - 自适应批处理中位数从每次完成都重算改为每 16 次完成重算一次（原来是每个 I/O 都在持批处理锁 + GIL 状态下做 O(128) 的 `nth_element`）。
+  - `flush_batchers()` 改用新增的单次持锁 `ResultBatcher::flush_if_idle()`，替代原来每个 batcher 每轮三次独立加锁。
+  - 所有后端不再在提交时预取 `future.set_exception`；错误路径按需获取，成功路径每个 I/O 省一次属性查找。
+- **BufferPool 改为按 2 的幂尺寸档分配**（最小 4 KB）：原来按精确请求字节数分配，池被大量互不匹配的尺寸碎片化，变长负载下缓冲几乎无法复用。
+
 ## [1.4.7] - 2026-07-01
 
 ### 修复

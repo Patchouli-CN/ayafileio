@@ -29,6 +29,8 @@ struct Session {
     std::mutex      posMtx;
     bool            appendMode = false;
     PyObject       *loop = nullptr;          // borrowed reference
+    ResultBatcher  *batcher = nullptr;       // owned by IOCPContext::m_batchers；
+                                             // 打开时解析缓存，完成热路径免锁免查表
     PyObject       *create_future = nullptr; // owned
     std::atomic<long> pending{0};
     bool            owns_fd = true;

@@ -78,4 +78,4 @@ def wrap_file(file: int | FileObj, mode: str = "rb", *, owns_fd: bool = False) -
         )
 
     impl = _AsyncFile(fd, mode, owns_fd)
-    return AsyncFile._from_impl(impl)
+    return AsyncFile._from_impl(impl, mode)

@@ -166,6 +166,7 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
     s->id                     = m_nextSessionId.fetch_add(1, std::memory_order_relaxed);
     s->handle                 = h;
     s->loop                   = loop;
+    s->batcher                = get_batcher(loop);
     s->create_future          = create_future;
     Py_INCREF(create_future);
     s->appendMode             = appendMode;
@@ -370,7 +371,8 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
     UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu pending %ld→%ld err=%lu",
                  (void*)req, sessionId, prev_pending, prev_pending - 1, (unsigned long)err);
 
-    ResultBatcher *batcher = get_batcher(session->loop);
+    ResultBatcher *batcher = session->batcher;
+    if (!batcher) [[unlikely]] batcher = get_batcher(session->loop);
 
     PyObject *set_fn  = nullptr;
     PyObject *val     = nullptr;
@@ -397,8 +399,13 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         }
     } else {
         // ── error ─────────────────────────────────────────────────────────
+        // set_exception 未在提交时预取（罕见路径），此处持 GIL 按需获取
         set_fn = req->set_exception;
         req->set_exception = nullptr;
+        if (!set_fn) {
+            set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+            if (!set_fn) PyErr_Clear();
+        }
 
         PyObject *exc_class = map_win_error(err);
         val = PyObject_CallFunction(exc_class, "is", (int)err, "I/O operation failed");
@@ -419,10 +426,7 @@ void IOCPContext::flush_batchers() {
     // Called with GIL held from worker thread
     std::lock_guard<std::mutex> lk(m_batchersMtx);
     for (auto &kv : m_batchers) {
-        auto &b = kv.second;
-        if (b->has_pending() && b->idle_expired()) {
-            b->flush();
-        }
+        kv.second->flush_if_idle();
     }
 }
 
@@ -440,7 +444,8 @@ IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
     req->future      = future;
     Py_INCREF(future);
     req->set_result    = PyObject_GetAttr(future, g_str_set_result);
-    req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
+    // set_exception 不预取：错误是罕见路径，process_one 出错时按需获取，
+    // 成功路径每个 I/O 省一次属性查找
     req->reqSize = size;
     req->type    = type;
 
@@ -461,7 +466,7 @@ IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
     req->future      = future;
     Py_INCREF(future);
     req->set_result    = PyObject_GetAttr(future, g_str_set_result);
-    req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
+    // set_exception 不预取，同 make_req_iocp
     req->reqSize   = size;
     req->type      = ReqType::Read;
     req->isReadinto = true;

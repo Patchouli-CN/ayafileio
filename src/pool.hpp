@@ -1,4 +1,5 @@
 #pragma once
+#include <bit>
 #include <cstddef>
 #include <cstdlib>
 #include <mutex>
@@ -10,6 +11,15 @@
 // ════════════════════════════════════════════════════════════════════════════
 // §2  Buffer pool (按大小分桶，支持动态配置)
 // ════════════════════════════════════════════════════════════════════════════
+
+// 把请求尺寸归整到尺寸档（≥4KB 的 2 的幂）。
+// 若按调用方的精确字节数分配，池内会碎片化成大量互不匹配的尺寸，
+// 变长读写下几乎无法复用；归整后同档缓冲可互换，命中率大幅提升。
+inline size_t pool_size_class(size_t n) {
+    constexpr size_t MIN_CLASS = 4096;
+    if (n <= MIN_CLASS) return MIN_CLASS;
+    return std::bit_ceil(n);
+}
 
 struct PoolBuf {
     char* data;
@@ -45,8 +55,8 @@ public:
             return buf;
         }
 
-        // 没有合适的，分配新的 — 冷路径
-        return new PoolBuf(required_size);
+        // 没有合适的，分配新的 — 冷路径。按尺寸档分配，保证回池后可复用
+        return new PoolBuf(pool_size_class(required_size));
     }
 
     void release(PoolBuf* buf) {

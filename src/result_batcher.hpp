@@ -54,6 +54,8 @@ public:
     // ── data path (GIL required) ──────────────────────────────────────────
     bool push(PyObject *set_fn, PyObject *val);
     void flush();
+    void flush_if_idle();   // 单次持锁完成 判空+判超时+置位，等价于
+                            // has_pending() && idle_expired() ? flush() : no-op
 
     // ── queries for worker thread (no GIL, thread-safe) ───────────────────
     bool has_pending() const;
@@ -87,12 +89,15 @@ private:
     std::atomic<unsigned> m_current_idle_ms{5};
 
     static constexpr size_t RING_SIZE = 128;
+    static constexpr size_t ADAPTIVE_UPDATE_INTERVAL = 16;  // 每 N 次 push 重算一次中位数
     std::array<uint64_t, RING_SIZE> m_intervals_us{};  // ring buffer, guarded by m_mtx
     size_t   m_ring_pos{0};
     size_t   m_ring_count{0};
+    size_t   m_pushes_since_update{0};                 // guarded by m_mtx
 
     // ── internal ──────────────────────────────────────────────────────────
     void update_adaptive_locked();
+    void schedule_drain();  // call_soon_threadsafe(m_drain_cb)，锁外调用
 };
 
 // ── Global batcher registry (one per event loop, for non-IOCP backends) ─────

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.8] - 2026-07-02
+
+### Fixed
+- **Data loss when mixing `readline()` with `read()`/`readinto()`/`chunk()`**: `readline()` read-ahead buffers up to 64 KB from the underlying file, but `read()`/`readinto()`/`chunk()` went straight to the C++ layer, silently skipping everything still sitting in the read-ahead buffer. All read paths now drain the read-ahead buffer first.
+- **`seek()` did not invalidate the readline read-ahead buffer**: after a `readline()`, `seek(0)` followed by `readline()` returned stale buffered data instead of the line at the new position. `seek()` now clears the buffer, and relative seeks (`whence=1`) are based on the logical position the user has actually consumed to — matching built-in `open()` semantics.
+- **`tell()` returned the physical (read-ahead) position**: after one `readline()` of a short line, `tell()` reported 64 KB instead of the end of that line. It now subtracts unconsumed buffered bytes. `write()` and `truncate()` likewise rewind the read-ahead so they act at the logical position (relevant for `r+`/`+` modes).
+- **`async with wrap_file(...)` crashed on exit**: `AsyncFile._from_impl` left the `_auto_flush` and `_mode` slots uninitialized, so exiting the context manager raised `AttributeError`, and `.mode`/`readable()`/`writable()` were equally broken on wrapped files. All slots are now initialized and `wrap_file` passes its mode through.
+
+### Performance
+- **`readline()` is 4–5x faster** (13.4 MB / 200k-line file, Windows: text universal-newline 1640 → 405 ms, binary 1516 → 293 ms):
+  - Universal-newline line scanning (the default mode) used a per-byte Python loop; it now uses C-level `find()` with the `\r` scan bounded by the first `\n`, keeping each scan O(line length).
+  - Line extraction copied the entire remaining buffer twice per line (O(n²) per chunk); it now advances a cursor offset and compacts once per 64 KB refill.
+- **IOCP completion hot path trimmed** (measured +8% concurrent 4 KB write throughput; reads disk-bound and unchanged):
+  - Each `Session` caches its `ResultBatcher*` at open — no more mutex + hash lookup per completion.
+  - The adaptive-batching median is recomputed every 16 completions instead of on every completion (previously an O(128) `nth_element` under both the batcher lock and the GIL, per I/O).
+  - `flush_batchers()` uses a new single-lock `ResultBatcher::flush_if_idle()` instead of three separate lock acquisitions per batcher per worker wakeup.
+  - `future.set_exception` is no longer prefetched at submit time on any backend; the error path fetches it on demand, saving one attribute lookup per successful I/O.
+- **BufferPool now allocates in power-of-two size classes** (min 4 KB): previously buffers were allocated at the exact requested byte count, fragmenting the pool into incompatible sizes that rarely got reused under variable-size workloads.
+
 ## [1.4.7] - 2026-07-01
 
 ### Fixed

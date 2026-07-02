@@ -86,6 +86,11 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
     PyObject* exc = PyObject_CallFunction(exc_class, "is", static_cast<int>(err), "I/O operation failed");
 
     PyObject* set_fn = req->set_exception; req->set_exception = nullptr;
+    if (!set_fn) {
+        // set_exception 未预取（罕见路径），此处持 GIL 按需获取
+        set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+        if (!set_fn) PyErr_Clear();
+    }
     Py_DECREF(req->future); req->future = nullptr;
     Py_XDECREF(req->set_result); req->set_result = nullptr;
 
@@ -112,7 +117,7 @@ IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) 
     req->future = future;
     Py_INCREF(future);
     req->set_result = PyObject_GetAttr(future, g_str_set_result);
-    req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
+    // set_exception 不预取：错误是罕见路径，complete_error 持 GIL 时按需获取
     req->reqSize = size;
     req->type = type;
 
@@ -130,7 +135,7 @@ IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size
     req->future = future;
     Py_INCREF(future);
     req->set_result = PyObject_GetAttr(future, g_str_set_result);
-    req->set_exception = PyObject_GetAttr(future, g_str_set_exception);
+    // set_exception 不预取，同 make_req
     req->reqSize = size;
     req->type = ReqType::Read;
 
@@ -158,6 +163,11 @@ void IOBackendBase::complete_error_inline(IORequest* req, DWORD err) {
 #endif
     PyObject* exc = PyObject_CallFunction(exc_class, "is", static_cast<int>(err), "I/O operation failed");
     PyObject* set_fn = req->set_exception; req->set_exception = nullptr;
+    if (!set_fn && req->future) {
+        // set_exception 未预取（罕见路径），此处按需获取（调用方持 GIL）
+        set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+        if (!set_fn) PyErr_Clear();
+    }
     if (set_fn && exc) {
         PyObject* r = PyObject_CallFunctionObjArgs(set_fn, exc, nullptr);
         Py_XDECREF(r);

@@ -9,6 +9,8 @@ from ._ayafileio import AsyncFile as _AsyncFile
 
 _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 
+_VALID_MODE_CHARS = frozenset("rwaxbt+")
+
 T = TypeVar("T", str, bytes)
 
 
@@ -23,8 +25,10 @@ T = TypeVar("T", str, bytes)
 #   "\r\n": line terminator is \r\n only; write translates \n -> \r\n.
 
 
-def _find_line_end(buf: bytearray, newline: str | None, eof: bool) -> tuple[int, int]:
-    """Locate the first complete line ending in *buf*.
+def _find_line_end(
+    buf: bytearray, start: int, newline: str | None, eof: bool
+) -> tuple[int, int]:
+    """Locate the first complete line ending in *buf* at or after *start*.
 
     Returns ``(sep_start, sep_len)``. ``sep_start`` is the index of the first
     byte of the separator; ``sep_len`` is its length. Returns ``(-1, 0)`` when
@@ -34,28 +38,27 @@ def _find_line_end(buf: bytearray, newline: str | None, eof: bool) -> tuple[int,
     is not treated as a line ending unless *eof* is ``True``, because it may
     be the first half of a ``\\r\\n`` pair split across read chunks.
     """
-    if newline == "\n":
-        idx = buf.find(b"\n")
-        return (idx, 1) if idx != -1 else (-1, 0)
-    if newline == "\r":
-        idx = buf.find(b"\r")
-        return (idx, 1) if idx != -1 else (-1, 0)
+    if newline is None or newline == "":
+        # Universal newline mode: the terminator is whichever of \n / \r /
+        # \r\n appears first. Only a \r *before* the first \n can matter, so
+        # bound the \r scan by the \n position to keep both scans O(line).
+        nl = buf.find(b"\n", start)
+        if nl == -1:
+            cr = buf.find(b"\r", start)
+        else:
+            cr = buf.find(b"\r", start, nl)
+        if cr == -1:
+            return (nl, 1) if nl != -1 else (-1, 0)
+        if cr + 1 < len(buf):
+            return (cr, 2) if buf[cr + 1] == 10 else (cr, 1)
+        # A lone \r at the buffer end may be a split \r\n.
+        return (cr, 1) if eof else (-1, 0)
     if newline == "\r\n":
-        idx = buf.find(b"\r\n")
+        idx = buf.find(b"\r\n", start)
         return (idx, 2) if idx != -1 else (-1, 0)
-
-    # Universal newline mode (newline is None or "").
-    for i, b in enumerate(buf):
-        if b == 10:  # \n
-            return i, 1
-        if b == 13:  # \r
-            if i + 1 < len(buf) and buf[i + 1] == 10:
-                return i, 2
-            # A lone \r at the buffer end may be a split \r\n.
-            if i == len(buf) - 1 and not eof:
-                return -1, 0
-            return i, 1
-    return -1, 0
+    # newline == "\n" or "\r"
+    idx = buf.find(b"\n" if newline == "\n" else b"\r", start)
+    return (idx, 1) if idx != -1 else (-1, 0)
 
 
 def _translate_for_read(text: str, newline: str | None) -> str:
@@ -99,6 +102,7 @@ class AsyncFile(Generic[T]):
         "_is_text",
         "_encoding",
         "_line_buffer",
+        "_line_pos",
         "_closed",
         "_newline",
         "_errors",
@@ -138,8 +142,7 @@ class AsyncFile(Generic[T]):
             self._encoding = "utf-8"
 
         # ── 规范化传给 C++ 的模式（始终二进制）────────────────────────────
-        valid_chars = set("rwaxbt+")
-        if any(c not in valid_chars for c in mode):
+        if any(c not in _VALID_MODE_CHARS for c in mode):
             raise ValueError(f"Invalid mode: '{mode}'")
 
         clean_mode = mode.replace("t", "")
@@ -153,6 +156,7 @@ class AsyncFile(Generic[T]):
         self._mode = clean_mode
         self._impl = _AsyncFile(self._path, clean_mode)
         self._line_buffer = bytearray()
+        self._line_pos = 0
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -178,10 +182,47 @@ class AsyncFile(Generic[T]):
 
     # ── read ──────────────────────────────────────────────────────────────────
 
+    def _buffered(self) -> int:
+        """readline 预读缓冲中尚未消费的字节数。"""
+        return len(self._line_buffer) - self._line_pos
+
+    def _take_buffered(self, n: int = -1) -> bytearray:
+        """从预读缓冲取出最多 *n* 字节（-1 = 全部）并推进消费位置。"""
+        buf, pos = self._line_buffer, self._line_pos
+        end = len(buf) if n < 0 else min(pos + n, len(buf))
+        out = buf[pos:end]
+        if end == len(buf):
+            del buf[:]
+            self._line_pos = 0
+        else:
+            self._line_pos = end
+        return out
+
+    async def _rewind_readahead(self) -> None:
+        """丢弃预读缓冲，并把底层文件位置回退到逻辑位置。
+
+        在 write/truncate 前调用，保证混用 readline 与写操作时
+        位置语义与内置 ``open()`` 一致。
+        """
+        n = self._buffered()
+        if n:
+            del self._line_buffer[:]
+            self._line_pos = 0
+            await self._impl.seek(-n, 1)
+
     async def read(self, size: int = -1) -> T:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        data: bytes = await self._impl.read(size)
+        if self._buffered():
+            # 先消费 readline 的预读缓冲，避免丢数据
+            prefix = self._take_buffered(size)
+            if size < 0 or len(prefix) < size:
+                rest = await self._impl.read(-1 if size < 0 else size - len(prefix))
+                data = bytes(prefix) + rest
+            else:
+                data = bytes(prefix)
+        else:
+            data = await self._impl.read(size)
         if not data:
             return "" if self._is_text else b""  # type: ignore[return-value]
         if self._is_text:
@@ -193,36 +234,38 @@ class AsyncFile(Generic[T]):
         if self._closed:
             raise ValueError("I/O operation on closed file.")
 
+        buf = self._line_buffer
+        newline = self._newline
         while True:
             sep_start, sep_len = _find_line_end(
-                self._line_buffer, self._newline, eof=False
+                buf, self._line_pos, newline, eof=False
             )
             if sep_start != -1:
                 # Include the separator in the returned line.
-                end = sep_start + sep_len
-                line, self._line_buffer = (
-                    self._line_buffer[:end],
-                    self._line_buffer[end:],
-                )
+                line = self._take_buffered(sep_start + sep_len - self._line_pos)
                 if self._is_text:
                     text = line.decode(self._encoding, errors=self._errors)
-                    return _translate_for_read(text, self._newline)
+                    return _translate_for_read(text, newline)
                 return bytes(line)
 
             chunk: bytes = await self._impl.read(_DEFAULT_READLINE_BUF)
             if not chunk:
                 # EOF: flush whatever remains in the line buffer.
-                if self._line_buffer:
-                    out, self._line_buffer = self._line_buffer, bytearray()
+                if self._buffered():
+                    out = self._take_buffered()
                     # On EOF a trailing \\r is definitely a terminator.
-                    if self._newline is None and out and out[-1] == 13:
+                    if newline is None and out and out[-1] == 13:
                         out.append(10)  # canonicalize to include a \\n
                     if self._is_text:
                         text = out.decode(self._encoding, errors=self._errors)
-                        return _translate_for_read(text, self._newline)
+                        return _translate_for_read(text, newline)
                     return bytes(out)
                 return "" if self._is_text else b""
-            self._line_buffer.extend(chunk)
+            # 追加新数据前先丢弃已消费的前缀，避免缓冲无限增长
+            if self._line_pos:
+                del buf[: self._line_pos]
+                self._line_pos = 0
+            buf.extend(chunk)
 
     async def readlines(self, hint: int = -1) -> list[str | bytes]:
         if self._closed:
@@ -259,6 +302,12 @@ class AsyncFile(Generic[T]):
             raise ValueError("I/O operation on closed file.")
         if self._is_text:
             raise ValueError("readinto() only supports binary mode")
+        if self._buffered():
+            # 先吐出 readline 的预读数据，保持流位置一致
+            pending = self._take_buffered(len(buf))
+            n = len(pending)
+            memoryview(buf)[:n] = pending
+            return n
         return await self._impl.readinto(buf)
 
     async def chunk(
@@ -314,7 +363,7 @@ class AsyncFile(Generic[T]):
         mv = memoryview(buf)
         while True:
             # 用切片限制 readinto 最多写入 chunk_size 字节
-            n = await self._impl.readinto(mv[:chunk_size])
+            n = await self.readinto(mv[:chunk_size])
             if n == 0:
                 return
             yield mv[:n]
@@ -336,11 +385,21 @@ class AsyncFile(Generic[T]):
                 raise TypeError("Binary mode requires bytes-like input, not str.")
             # Pass memoryview/bytearray directly – C++ accepts any buffer protocol
             raw = data  # type: ignore[assignment]
+        await self._rewind_readahead()
         return await self._impl.write(raw)
 
     # ── seek / flush / close / tell 等 ──────────────────────────────────────────────────
 
     async def seek(self, offset: int, whence: int = 0) -> int:
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        n = self._buffered()
+        if n:
+            if whence == 1:
+                # 相对定位以逻辑位置（用户已消费到的位置）为基准
+                offset -= n
+            del self._line_buffer[:]
+            self._line_pos = 0
         return await self._impl.seek(offset, whence)
 
     async def flush(self) -> None:
@@ -355,7 +414,7 @@ class AsyncFile(Generic[T]):
 
     async def tell(self) -> int:
         """返回当前文件位置。"""
-        return await self._impl.tell()
+        return await self._impl.tell() - self._buffered()
 
     async def truncate(self, size: int) -> None:
         """截断文件到指定大小。"""
@@ -363,6 +422,7 @@ class AsyncFile(Generic[T]):
             raise ValueError("I/O operation on closed file.")
         if size < 0:
             raise ValueError("negative size not allowed")
+        await self._rewind_readahead()
         await self._impl.truncate(size)
 
     def _close_impl(self) -> None:
@@ -431,7 +491,7 @@ class AsyncFile(Generic[T]):
         return cls(path, mode, encoding, newline, errors, auto_flush)
 
     @classmethod
-    def _from_impl(cls, impl: _AsyncFile) -> "AsyncFile[T]":
+    def _from_impl(cls, impl: _AsyncFile, mode: str = "rb") -> "AsyncFile[T]":
         """从 C++ 层对象创建 AsyncFile（内部使用）"""
         instance = object.__new__(cls)
         instance._impl = impl
@@ -439,7 +499,10 @@ class AsyncFile(Generic[T]):
         instance._is_text = False
         instance._encoding = None
         instance._line_buffer = bytearray()
+        instance._line_pos = 0
         instance._closed = False
         instance._newline = None
         instance._errors = "strict"
+        instance._mode = mode
+        instance._auto_flush = False
         return instance

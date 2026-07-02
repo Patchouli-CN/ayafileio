@@ -153,7 +153,12 @@ bool ResultBatcher::push(PyObject *set_fn, PyObject *val) {
         m_batch.push_back({set_fn, val});
 
         // ── Update adaptive threshold ─────────────────────────────────────
-        update_adaptive_locked();
+        // 中位数是慢变量：每 ADAPTIVE_UPDATE_INTERVAL 次完成重算一次即可，
+        // 避免每个完成都在持锁 + 持 GIL 状态下做 O(RING_SIZE) 的 nth_element
+        if (++m_pushes_since_update >= ADAPTIVE_UPDATE_INTERVAL) {
+            m_pushes_since_update = 0;
+            update_adaptive_locked();
+        }
 
         size_t effective_threshold = m_adaptive.load(std::memory_order_relaxed)
             ? m_current_threshold.load(std::memory_order_relaxed)
@@ -178,15 +183,43 @@ void ResultBatcher::flush() {
         }
     }
 
-    if (need_schedule) {
-        PyObject *r = PyObject_CallFunctionObjArgs(m_call_soon_ts, m_drain_cb, nullptr);
-        if (!r) {
-            PyErr_Print();
-            std::lock_guard<std::mutex> lk(m_mtx);
-            m_dispatch_pending.store(false, std::memory_order_relaxed);
-        } else {
-            Py_DECREF(r);
+    if (need_schedule) schedule_drain();
+}
+
+void ResultBatcher::flush_if_idle() {
+    // 与 has_pending() + idle_expired() + flush() 等价，但只加一次锁，
+    // 供 worker 每轮批处理后的 flush_batchers() 热路径使用。
+    bool need_schedule = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        if (!m_has_pending || m_batch.empty()) return;
+
+        unsigned effective_idle_ms = m_adaptive.load(std::memory_order_relaxed)
+            ? m_current_idle_ms.load(std::memory_order_relaxed)
+            : m_idle_timeout_max_ms;
+
+        auto elapsed = std::chrono::steady_clock::now() - m_first_push;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+                < static_cast<long long>(effective_idle_ms))
+            return;
+
+        if (!m_dispatch_pending.load(std::memory_order_relaxed)) {
+            m_dispatch_pending.store(true, std::memory_order_relaxed);
+            need_schedule = true;
         }
+    }
+
+    if (need_schedule) schedule_drain();
+}
+
+void ResultBatcher::schedule_drain() {
+    PyObject *r = PyObject_CallFunctionObjArgs(m_call_soon_ts, m_drain_cb, nullptr);
+    if (!r) {
+        PyErr_Print();
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_dispatch_pending.store(false, std::memory_order_relaxed);
+    } else {
+        Py_DECREF(r);
     }
 }
 
