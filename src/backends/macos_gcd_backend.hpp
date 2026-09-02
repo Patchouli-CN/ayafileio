@@ -18,6 +18,7 @@ public:
     ~MacOSGCDBackend() override;
 
     PyObject* read(int64_t size = -1) override;
+    PyObject* read_at(int64_t offset, int64_t size) override;
     PyObject* write(Py_buffer* view) override;
     PyObject* seek(int64_t offset, int whence = 0) override;
     PyObject* flush() override;

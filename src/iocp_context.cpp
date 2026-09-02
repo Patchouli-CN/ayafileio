@@ -650,6 +650,102 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// submit_read_at — 位置读（pread 语义）
+//
+// 与 submit_read 的唯一区别：offset 来自参数而非 s->filePos，
+// 且绝不触碰 s->filePos —— 与并发的 read()/seek() 无竞争。
+// ════════════════════════════════════════════════════════════════════════════
+
+PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64_t size) {
+    auto s = get_session(session_id);
+    if (!s) return make_failed_future_no_session();
+
+    PyObject *future = check_session_closed(s);
+    if (future) return future;
+
+    future = PyObject_CallNoArgs(s->create_future);
+    if (!future) return nullptr;
+
+    if (offset < 0) {
+        PyObject *exc = PyObject_CallFunction(g_ValueError, "s", "negative offset not allowed");
+        PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
+        PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
+        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
+        return future;
+    }
+
+    if (is_ctrlc_triggered() ||
+        !s->running.load(std::memory_order_relaxed)) {
+        PyObject *exc = PyObject_CallFunction(g_KeyboardInterrupt, "s", "interrupted");
+        PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
+        PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
+        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
+        return future;
+    }
+
+    uint64_t roffset = static_cast<uint64_t>(offset);
+    size_t   readSize;
+    {
+        // posMtx 仅为与 write/truncate 的 cachedFileSize 更新保持一致而持有；
+        // 不读取也不修改 s->filePos。
+        std::lock_guard<std::mutex> lk(s->posMtx);
+        int64_t rem = static_cast<int64_t>(s->cachedFileSize) - offset;
+        if (rem <= 0) {
+            // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
+            PyObject *b = PyBytes_FromStringAndSize(nullptr, 0);
+            PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
+            PyObject *r  = PyObject_CallFunctionObjArgs(fn, b, nullptr);
+            Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(b);
+            return future;
+        }
+        readSize = (size < 0 || (size_t)size > (size_t)rem)
+                       ? (size_t)rem : (size_t)size;
+        if (readSize == 0) {
+            PyObject *b = PyBytes_FromStringAndSize(nullptr, 0);
+            PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
+            PyObject *r  = PyObject_CallFunctionObjArgs(fn, b, nullptr);
+            Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(b);
+            return future;
+        }
+    }
+
+    IORequest *req = make_req_iocp(readSize, future, ReqType::Read,
+                                   s->cached_buffer_size, s->cached_buffer_pool_max);
+    req->ov.Offset     = (DWORD)(roffset & 0xFFFFFFFF);
+    req->ov.OffsetHigh = (DWORD)(roffset >> 32);
+
+    long prev = s->pending.fetch_add(1, std::memory_order_relaxed);
+    DWORD got = 0;
+    BOOL ok = ReadFile(s->handle, req->buf(), (DWORD)readSize, &got, &req->ov);
+    if (ok) {
+        // Synchronous completion — resolve inline, delete by IOCP worker.
+        // Do NOT decrement pending here; the worker handles it so that
+        // close() sees pending > 0 until all completions are drained.
+        UR_DEBUG_LOG("submit_read_at SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
+        PyObject *val = PyBytes_FromStringAndSize(req->buf(), got);
+        PyObject *fn  = PyObject_GetAttr(future, g_str_set_result);
+        PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
+        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(val);
+        mark_sync_done(req);
+    } else {
+        DWORD err = GetLastError();
+        if (err != ERROR_IO_PENDING) {
+            s->pending.fetch_sub(1, std::memory_order_relaxed);
+            UR_DEBUG_LOG("submit_read_at FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
+            PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
+            PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
+            PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
+            Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
+            req->state.store(IOState::REJECTED, std::memory_order_relaxed);
+            TRACKED_DELETE(req);
+        } else {
+            UR_DEBUG_LOG("submit_read_at ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
+        }
+    }
+    return future;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // submit_write
 // ════════════════════════════════════════════════════════════════════════════
 

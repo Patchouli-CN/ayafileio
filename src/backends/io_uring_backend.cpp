@@ -315,6 +315,44 @@ PyObject* IOUringBackend::read(int64_t size) {
     return future;
 }
 
+PyObject* IOUringBackend::read_at(int64_t offset, int64_t size) {
+    try { ensure_loop_initialized(); }
+    catch (const std::runtime_error&) {
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
+    }
+
+    PyObject* future = PyObject_CallNoArgs(m_create_future);
+    if (!future) [[unlikely]] return nullptr;
+
+    PyObject* closed_future = check_closed_and_return_future(
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+    if (closed_future) [[unlikely]] { Py_DECREF(future); return closed_future; }
+
+    if (offset < 0) [[unlikely]] {
+        resolve_exc(future, g_ValueError, 0, "negative offset not allowed");
+        return future;
+    }
+
+    size_t readSize;
+    {
+        // m_posMtx 仅为与 write/truncate 的 cachedFileSize 更新保持一致；
+        // 不读取也不修改 m_filePos —— 位置读与并发 read()/seek() 无竞争
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        int64_t rem = static_cast<int64_t>(m_cachedFileSize) - offset;
+        if (rem <= 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
+        readSize = (size < 0) ? static_cast<size_t>(rem)
+                 : std::min(static_cast<size_t>(size), static_cast<size_t>(rem));
+        if (readSize == 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
+    }
+
+    IORequest* req = make_req(readSize, future, ReqType::Read);
+    m_pending.fetch_add(1, std::memory_order_relaxed);
+    // io_uring_prep_read 显式偏移，不动文件指针
+    submit_io(req, IORING_OP_READ, m_fd,
+              std::as_bytes(std::span{req->buf(), readSize}), static_cast<off_t>(offset));
+    return future;
+}
+
 PyObject* IOUringBackend::write(Py_buffer* view) {
     try { ensure_loop_initialized(); }
     catch (const std::runtime_error&) {

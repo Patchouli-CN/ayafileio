@@ -17,6 +17,10 @@ public:
     virtual ~IOBackendBase() = default;
 
     virtual PyObject* read(int64_t size = -1) = 0;
+    // 位置读（pread 语义）：从显式 offset 读取，不触碰文件逻辑位置，
+    // 与并发的 read()/seek() 无竞争。offset < 0 → 带 ValueError 的失败 future；
+    // size < 0 → 读到 EOF；offset 越界 → resolve 空 bytes。
+    virtual PyObject* read_at(int64_t offset, int64_t size) = 0;
     virtual PyObject* write(Py_buffer* view) = 0;
     virtual PyObject* seek(int64_t offset, int whence = 0) = 0;
     virtual PyObject* flush() = 0;

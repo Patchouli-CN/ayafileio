@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
-[![Version](https://img.shields.io/badge/version-1.4.8-red.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.0-red.svg)]()
 
 **当前是英文** | [**chinese version**](README_CN.md)
 
@@ -168,6 +168,8 @@ class AsyncFile(Generic[T]):
     async def readall() -> T: ...                        # read(-1) 别名
     async def readinto(buf: bytearray | memoryview) -> int: ...  # 零拷贝 [仅二进制]
     async def chunk(chunk_size: int, *, buf: bytearray | memoryview | None = None) -> AsyncGenerator[memoryview, None]: ...  # 流式分块 [仅二进制]
+    async def read_at(offset: int, size: int = -1) -> bytes: ...  # 位置读（pread 语义），不动文件位置 [仅二进制]
+    async def read_many(spans: Iterable[tuple[int, int]]) -> list[bytes]: ...  # 批量位置读，单事件循环周期提交 [仅二进制]
 
     # 写入
     async def write(self, data: str | bytes) -> int: ...

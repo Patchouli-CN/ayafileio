@@ -369,6 +369,118 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
     return future;
 }
 
+PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
+    UR_DEBUG_LOG("MacOSGCDBackend::read_at start, this=%p, offset=%lld, size=%lld",
+                 (void*)this, (long long)offset, (long long)size);
+
+    try {
+        ensure_loop_initialized();
+    } catch (const std::runtime_error& e) {
+        UR_DEBUG_LOG("MacOSGCDBackend::read_at ensure_loop failed: %s", e.what());
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
+    }
+
+    PyObject* future = PyObject_CallNoArgs(m_create_future);
+    if (!future) {
+        UR_DEBUG_LOG0("MacOSGCDBackend::read_at failed to create future");
+        return nullptr;
+    }
+
+    PyObject* closed_future = check_closed_and_return_future(
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+    if (closed_future) {
+        UR_DEBUG_LOG0("MacOSGCDBackend::read_at file is closed");
+        Py_DECREF(future);
+        return closed_future;
+    }
+
+    if (offset < 0) {
+        resolve_exc(future, g_ValueError, 0, "negative offset not allowed");
+        return future;
+    }
+
+    size_t readSize;
+    {
+        // m_posMtx 仅为与写路径的并发 fstat 保持一致；不读取也不修改 m_filePos
+        std::lock_guard<std::mutex> lk(m_posMtx);
+
+        struct stat st;
+        if (fstat(m_fd, &st) != 0) {
+            UR_DEBUG_LOG("MacOSGCDBackend::read_at fstat failed, errno=%d", errno);
+            set_os_error("fstat failed");
+            resolve_exc(future, g_OSError, errno, "fstat failed");
+            return future;
+        }
+
+        int64_t rem = static_cast<int64_t>(st.st_size) - offset;
+        if (rem <= 0) {
+            // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
+            UR_DEBUG_LOG0("MacOSGCDBackend::read_at offset beyond EOF");
+            resolve_bytes(future, nullptr, 0);
+            return future;
+        }
+
+        if (size < 0) {
+            readSize = static_cast<size_t>(rem);
+        } else {
+            size_t sz = static_cast<size_t>(size);
+            size_t r = static_cast<size_t>(rem);
+            readSize = (sz > r) ? r : sz;
+        }
+
+        if (readSize == 0) {
+            resolve_bytes(future, nullptr, 0);
+            return future;
+        }
+    }
+
+    IORequest* req = make_req(readSize, future, ReqType::Read);
+    UR_DEBUG_LOG("MacOSGCDBackend::read_at req=%p, offset=%lld, size=%zu",
+                 (void*)req, (long long)offset, readSize);
+
+    m_pending.fetch_add(1, std::memory_order_relaxed);
+
+    // 通道为 DISPATCH_IO_RANDOM，dispatch_io_read 带显式 offset，不动文件指针
+    auto self = this;
+    __block size_t total_copied = 0;
+    dispatch_io_read(
+        m_channel,
+        offset,
+        readSize,
+        m_queue,
+        ^(bool done, dispatch_data_t data, int error) {
+            UR_DEBUG_LOG("MacOSGCDBackend::read_at callback: done=%d, data=%p, error=%d, req=%p",
+                         done, (void*)data, error, (void*)req);
+
+            if (error) {
+                UR_DEBUG_LOG("MacOSGCDBackend::read_at callback error=%d", error);
+                self->complete_error(req, static_cast<DWORD>(error));
+                return;
+            }
+
+            if (data) {
+                size_t chunk_size = dispatch_data_get_size(data);
+                UR_DEBUG_LOG("MacOSGCDBackend::read_at callback got data, size=%zu", chunk_size);
+
+                dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t off, const void* buf, size_t len) {
+                    UR_DEBUG_LOG("MacOSGCDBackend::read_at callback copying region: off=%zu, len=%zu", off, len);
+                    memcpy(req->buf() + total_copied + off, buf, len);
+                    return true;
+                });
+                total_copied += chunk_size;
+            }
+
+            if (done) {
+                UR_DEBUG_LOG("MacOSGCDBackend::read_at callback done, total_bytes=%zu", total_copied);
+                self->complete_ok(req, total_copied);
+            }
+        }
+    );
+
+    UR_DEBUG_LOG0("MacOSGCDBackend::read_at returning future");
+    return future;
+}
+
 PyObject* MacOSGCDBackend::write(Py_buffer* view) {
     UR_DEBUG_LOG("MacOSGCDBackend::write start, this=%p, size=%zd", (void*)this, view->len);
     

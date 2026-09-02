@@ -1,9 +1,10 @@
 """异步文件对象"""
 
+import asyncio
 import os
 import locale
 from pathlib import Path
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
 from typing import Generic, TypeVar
 from ._ayafileio import AsyncFile as _AsyncFile
 
@@ -295,6 +296,50 @@ class AsyncFile(Generic[T]):
     async def readall(self) -> str | bytes:
         """读取整个文件。"""
         return await self.read(-1)
+
+    async def read_at(self, offset: int, size: int = -1) -> bytes:
+        """位置读（POSIX pread 语义）：从 *offset* 读取最多 *size* 字节。
+
+        不改变文件的逻辑位置——``tell()`` 在调用前后不变，与并发的
+        ``read()``/``seek()`` 无竞争。随机读不再需要 ``seek()`` + ``read()``
+        两步协程往返。
+
+        语义：
+
+        - ``size < 0``：从 *offset* 一直读到文件末尾。
+        - 读到 EOF 时截断返回短数据；``offset`` 超出文件大小返回 ``b""``。
+        - 不触碰 readline 预读缓冲（``_line_buffer``）。
+
+        Raises:
+            ValueError: 文本模式（位置读与解码/换行翻译语义不兼容）、
+                        文件已关闭、或 ``offset < 0``。
+        """
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        if self._is_text:
+            raise ValueError("read_at() only supports binary mode")
+        return await self._impl.read_at(offset, size)
+
+    async def read_many(self, spans: Iterable[tuple[int, int]]) -> list[bytes]:
+        """批量位置读：一次提交多个 ``(offset, size)`` 读请求。
+
+        返回与 *spans* 同序的 ``bytes`` 列表（``asyncio.gather`` 保序）。
+        每个 span 的语义同 :meth:`read_at`；``size < 0`` 表示读到 EOF。
+
+        设计意图：对标模型权重流式加载的按层批量读场景。``gather`` 让所有
+        I/O 在首个挂起点之前全部提交给后端，共享同一个事件循环周期；C++ 层
+        的 ResultBatcher 会把一批完成通知聚合成少量
+        ``loop.call_soon_threadsafe`` 回调，比逐个 ``await read_at(...)``
+        少 N-1 次协程往返。
+
+        Raises:
+            ValueError: 文本模式、文件已关闭、或任一 ``offset < 0``。
+        """
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        if self._is_text:
+            raise ValueError("read_many() only supports binary mode")
+        return list(await asyncio.gather(*(self.read_at(o, s) for o, s in spans)))
 
     async def readinto(self, buf: bytearray | memoryview) -> int:
         """零拷贝读取到预分配缓冲区，返回读取字节数。"""

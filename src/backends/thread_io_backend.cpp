@@ -282,6 +282,92 @@ PyObject *ThreadIOBackend::read(int64_t size) {
     return future;
 }
 
+PyObject *ThreadIOBackend::read_at(int64_t offset, int64_t size) {
+    UR_DEBUG_LOG("ThreadIOBackend::read_at start, this=%p, offset=%lld, size=%lld",
+                 (void*)this, (long long)offset, (long long)size);
+
+    try {
+        ensure_loop_initialized();
+    } catch (const std::runtime_error& e) {
+        UR_DEBUG_LOG("ThreadIOBackend::read_at ensure_loop failed: %s", e.what());
+        return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
+    }
+
+    PyObject* future = PyObject_CallNoArgs(m_create_future);
+    if (!future) {
+        UR_DEBUG_LOG0("ThreadIOBackend::read_at failed to create future");
+        return nullptr;
+    }
+
+    PyObject* closed_future = check_closed_and_return_future(
+        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+    if (closed_future) {
+        UR_DEBUG_LOG0("ThreadIOBackend::read_at file is closed");
+        Py_DECREF(future);
+        return closed_future;
+    }
+
+    if (offset < 0) {
+        resolve_exc(future, g_ValueError, 0, "negative offset not allowed");
+        return future;
+    }
+
+    size_t readSize;
+    {
+        // m_posMtx 仅为与写/截断路径的并发 fstat 保持一致；不读取也不修改 m_filePos
+        std::lock_guard<std::mutex> lk(m_posMtx);
+        struct stat st;
+        if (fstat(m_fd, &st) != 0) {
+            UR_DEBUG_LOG("ThreadIOBackend::read_at fstat failed, errno=%d", errno);
+            set_os_error("fstat failed");
+            resolve_exc(future, g_OSError, errno, "fstat failed");
+            return future;
+        }
+        int64_t rem = (int64_t)st.st_size - offset;
+        if (rem <= 0) {
+            // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
+            UR_DEBUG_LOG0("ThreadIOBackend::read_at offset beyond EOF");
+            resolve_bytes(future, nullptr, 0);
+            return future;
+        }
+
+        if (size < 0) {
+            readSize = static_cast<size_t>(rem);
+        } else {
+            size_t sz = static_cast<size_t>(size);
+            size_t r = static_cast<size_t>(rem);
+            readSize = (sz > r) ? r : sz;
+        }
+
+        if (readSize == 0) {
+            resolve_bytes(future, nullptr, 0);
+            return future;
+        }
+    }
+
+    IORequest *req = make_req(readSize, future, ReqType::Read);
+    UR_DEBUG_LOG("ThreadIOBackend::read_at req=%p, offset=%lld, size=%zu",
+                 (void*)req, (long long)offset, readSize);
+
+    // pread 显式偏移，不动文件指针 —— 与并发 read()/seek() 无竞争
+    m_pending.fetch_add(1, std::memory_order_relaxed);
+    enqueue_task([this, req, offset, readSize]() {
+        UR_DEBUG_LOG("ThreadIOBackend::read_at task executing, fd=%d, offset=%lld, size=%zu",
+                     m_fd, (long long)offset, readSize);
+        ssize_t got = pread(m_fd, req->buf(), readSize, static_cast<off_t>(offset));
+        UR_DEBUG_LOG("ThreadIOBackend::read_at task done, got=%zd", got);
+        if (got >= 0) {
+            complete_ok(req, static_cast<size_t>(got));
+        } else {
+            UR_DEBUG_LOG("ThreadIOBackend::read_at task failed, errno=%d", errno);
+            complete_error(req, errno);
+        }
+    });
+
+    UR_DEBUG_LOG0("ThreadIOBackend::read_at returning future");
+    return future;
+}
+
 PyObject *ThreadIOBackend::write(Py_buffer *view) {
     UR_DEBUG_LOG("ThreadIOBackend::write start, this=%p, size=%zd", (void*)this, view->len);
     

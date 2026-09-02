@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-02
+
+### Added
+- **Positional read API — `AsyncFile.read_at(offset, size=-1)`**: reads up to `size` bytes starting at an explicit file `offset` without touching the logical file position (`tell()` is unchanged before and after, and there is no race with concurrent `read()`/`seek()`). Random access no longer needs the two coroutine round-trips of `await seek(off)` + `await read(n)`. Semantics follow POSIX `pread`: `size < 0` reads to EOF, reads are truncated at EOF, an out-of-range `offset` returns `b""`, and `offset < 0` raises `ValueError`. Binary mode only (text mode raises `ValueError` — positional reads are incompatible with decoding/newline translation). Implemented end-to-end on all four backends:
+  - **Windows (IOCP)**: new `IOCPContext::submit_read_at` issues `ReadFile` with `OVERLAPPED.Offset/OffsetHigh` taken from the argument and never touches `Session::filePos`.
+  - **Thread-pool fallback (POSIX)**: worker performs a true positional `pread` (no `lseek`+`read`, which would race with other operations).
+  - **Linux (io_uring)**: `io_uring_prep_read` with an explicit offset.
+  - **macOS (Dispatch I/O)**: `dispatch_io_read` with an explicit offset on the `DISPATCH_IO_RANDOM` channel.
+- **Batch positional read — `AsyncFile.read_many(spans)`**: submits a batch of `(offset, size)` reads in one event-loop turn via `asyncio.gather`, returning the results in span order. Aimed at streaming model-weight loading (per-layer batched reads): all I/Os are submitted before the first suspension point, and the C++ `ResultBatcher` coalesces their completion notifications into few `loop.call_soon_threadsafe` callbacks — N-1 fewer coroutine round-trips than awaiting `read_at` one by one.
+
 ## [1.4.8] - 2026-07-02
 
 ### Fixed

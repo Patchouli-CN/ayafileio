@@ -80,6 +80,7 @@ public:
 
     // ── I/O submission (called from WindowsIOBackend) ─────────────────────
     PyObject* submit_read(uint64_t session_id, int64_t size);
+    PyObject* submit_read_at(uint64_t session_id, int64_t offset, int64_t size);
     PyObject* submit_write(uint64_t session_id, Py_buffer *view);
     PyObject* submit_seek(uint64_t session_id, int64_t offset, int whence);
     PyObject* submit_flush(uint64_t session_id);

@@ -198,6 +198,10 @@ PyObject *WindowsIOBackend::read(int64_t size) {
     return IOCPContext::instance().submit_read(m_sessionId, size);
 }
 
+PyObject *WindowsIOBackend::read_at(int64_t offset, int64_t size) {
+    return IOCPContext::instance().submit_read_at(m_sessionId, offset, size);
+}
+
 PyObject *WindowsIOBackend::write(Py_buffer *view) {
     return IOCPContext::instance().submit_write(m_sessionId, view);
 }

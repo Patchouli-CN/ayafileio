@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.5.0] - 2026-09-02
+
+### 新增
+- **位置读 API —— `AsyncFile.read_at(offset, size=-1)`**：从显式 `offset` 读取最多 `size` 字节，不触碰文件逻辑位置（`tell()` 前后不变，与并发的 `read()`/`seek()` 无竞争）。随机读不再需要 `await seek(off)` + `await read(n)` 两次协程往返。语义对齐 POSIX `pread`：`size < 0` 读到 EOF；读到 EOF 截断返回短数据；`offset` 越界返回 `b""`；`offset < 0` 抛 `ValueError`。仅二进制模式（文本模式抛 `ValueError`——位置读与解码/换行翻译语义不兼容）。四个后端全部端到端实现：
+  - **Windows (IOCP)**：新增 `IOCPContext::submit_read_at`，`ReadFile` 的 `OVERLAPPED.Offset/OffsetHigh` 直接取参数，绝不触碰 `Session::filePos`。
+  - **线程池回退（POSIX）**：worker 内做真正的位置读 `pread`（不用 `lseek`+`read`，避免与其他操作竞争）。
+  - **Linux (io_uring)**：`io_uring_prep_read` 显式偏移。
+  - **macOS (Dispatch I/O)**：`DISPATCH_IO_RANDOM` 通道上 `dispatch_io_read` 显式偏移。
+- **批量位置读 —— `AsyncFile.read_many(spans)`**：通过 `asyncio.gather` 在一个事件循环周期内提交一批 `(offset, size)` 读请求，返回与 spans 同序的结果。面向模型权重流式加载的按层批量读场景：所有 I/O 在首个挂起点前全部提交，C++ 层 `ResultBatcher` 会把一批完成通知聚合成少量 `loop.call_soon_threadsafe` 回调——比逐个 `await read_at(...)` 少 N-1 次协程往返。
+
 ## [1.4.8] - 2026-07-02
 
 ### 修复

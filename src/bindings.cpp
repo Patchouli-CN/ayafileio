@@ -38,6 +38,11 @@ struct PyAsyncFile {
         if (!r) throw py::python_error();
         return py::steal<py::object>(py::handle(r));
     }
+    py::object read_at(int64_t offset, int64_t size = -1) {
+        PyObject *r = fh->read_at(offset, size);
+        if (!r) throw py::python_error();
+        return py::steal<py::object>(py::handle(r));
+    }
     py::object write(py::object data) {
         // 使用 Python C API 获取 buffer
         Py_buffer view;
@@ -325,6 +330,8 @@ NB_MODULE(_ayafileio, m) {
              py::arg("fd"), py::arg("mode") = "rb", 
              py::arg("owns_fd") = false)
         .def("read",  &PyAsyncFile::read,  py::arg("size") = -1)
+        .def("read_at", &PyAsyncFile::read_at,
+             py::arg("offset"), py::arg("size") = -1)
         .def("write", &PyAsyncFile::write)
         .def("seek",  &PyAsyncFile::seek,  py::arg("offset"), py::arg("whence") = 0)
         .def("flush", &PyAsyncFile::flush)
