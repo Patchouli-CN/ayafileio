@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-16
+
+### Added
+- **Positioned write API — `AsyncFile.write_at(offset, data)`**: writes bytes at an explicit offset without changing the logical file position. Supported by the Windows IOCP, Linux io_uring/thread-pool, and macOS Dispatch I/O backends.
+- **Batch positioned writes — `AsyncFile.write_many(writes)`**: submits multiple `(offset, data)` writes concurrently and returns byte counts in input order.
+
+### Changed
+- Batch reads now gather native futures directly, avoiding one Python task per request.
+- Long-line scanning avoids rescanning the already inspected portion of the read-ahead buffer.
+
+### Fixed
+- Windows file objects no longer attempt to close a stale IOCP session during destruction after the event loop has shut down.
+
 ## [1.5.0] - 2026-09-02
 
 ### Added
