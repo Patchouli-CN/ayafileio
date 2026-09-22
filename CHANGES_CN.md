@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.5.3] - 2026-09-22
+
+### 修复
+- **文本模式 `read(n)` 不再对半切多字节字符**：此前 `size` 被直接当作原始字节数交给底层，`read(7)` 读 UTF-8 中文会切在汉字中间抛 `UnicodeDecodeError`——或在 `errors="replace"` 下静默插入 U+FFFD（最危险的形态：数据被悄悄换掉而不报错）。文本模式 `read(size)` 现在把 `size` 视为**字节预算**：strict 探测结尾的残缺字符，把残缺字节推回（impl 位置回退 / 预读缓冲回退），只解码完整字符部分；预算连一个字符都装不下时（如 `read(1)` 遇 3 字节汉字）有界补读，至少返回一个完整字符。ASCII 下行为不变（字节=字符）；`read(-1)` 与 `readline()` 本来就按边界解码，不受影响。
+
 ## [1.5.2] - 2026-09-22
 
 ### 变更

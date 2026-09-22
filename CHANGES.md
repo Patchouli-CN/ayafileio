@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-09-22
+
+### Fixed
+- **Text-mode `read(n)` no longer splits multi-byte characters**: `size` was passed straight to the underlying layer as a raw byte count, so `read(7)` on UTF-8 Chinese text sliced mid-character and raised `UnicodeDecodeError` — or, under `errors="replace"`, silently inserted U+FFFD (the dangerous variant: data corrupted with no error). Text-mode `read(size)` now treats `size` as a **byte budget**: a strict probe detects an incomplete trailing character, pushes those bytes back (impl re-seek / read-ahead buffer rewind), and decodes only the character-complete prefix. A budget too small for one character (e.g. `read(1)` on a 3-byte Hanzi) is topped up (bounded) so at least one whole character is returned. ASCII behavior is unchanged (byte == char); `read(-1)` and `readline()` were already boundary-safe and are untouched.
+
 ## [1.5.2] - 2026-09-22
 
 ### Changed

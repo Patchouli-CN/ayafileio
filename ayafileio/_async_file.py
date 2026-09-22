@@ -81,6 +81,32 @@ def _translate_for_write(text: str, newline: str | None) -> str:
     return text
 
 
+def _split_complete_tail(raw: bytes, encoding: str) -> tuple[bytes, bytes]:
+    """把 *raw* 切成「字符完整部分」与「结尾残缺字符部分」。
+
+    用 strict 解码探测：只有结尾处被 chunk 边界切出来的残缺字符
+    （`unexpected end of data`）算残缺、需要回推；数据本身非法
+    （`invalid start byte` 等）不算残缺——整体交还，由调用方的
+    errors 模式处理。空输入返回 `(b"", b"")`。
+
+    Args:
+        raw: 一段原始字节（可能以残缺字符结尾）
+        encoding: 编码名
+
+    Returns:
+        tuple[bytes, bytes]: (完整部分, 结尾残缺部分)
+    """
+    if not raw:
+        return b"", b""
+    try:
+        raw.decode(encoding, "strict")
+        return raw, b""
+    except UnicodeDecodeError as error:
+        if error.reason == "unexpected end of data":
+            return raw[: error.start], raw[error.start :]
+        return raw, b""
+
+
 async def _gather_io(requests):
     """Submit native Futures directly; drain submitted I/O before reporting errors."""
     pending = []
@@ -229,8 +255,24 @@ class AsyncFile(Generic[T]):
             await self._impl.seek(-n, 1)
 
     async def read(self, size: int = -1) -> T:
+        """读取内容。
+
+        文本模式下 `size` 是**字节预算**而非字符数（1.5.3 起明确的行为）：
+        返回该预算内**完整字符**对应的文本，绝不在多字节字符中间下刀——
+        结尾残缺的字节会被推回（impl 位置回退 / 预读缓冲回退），后续读取
+        接着用。ASCII 下字节即字符，与旧行为完全一致。需要精确字符数请
+        用 `readline()` 或 `read(-1)`（两者本来就按行/按整体边界解码）。
+
+        Args:
+            size: 字节预算；<0 表示读到 EOF
+
+        Returns:
+            T: 文本（文本模式）或字节（二进制模式）
+        """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if self._is_text and size >= 0:
+            return await self._read_text_bounded(size)  # type: ignore[return-value]
         if self._buffered():
             # 先消费 readline 的预读缓冲，避免丢数据
             prefix = self._take_buffered(size)
@@ -247,6 +289,58 @@ class AsyncFile(Generic[T]):
             text = data.decode(self._encoding, errors=self._errors)
             return _translate_for_read(text, self._newline)  # type: ignore[return-value]
         return data  # type: ignore[return-value]
+
+    async def _read_text_bounded(self, size: int) -> str:
+        """文本模式定长读：size 为字节预算，只返回完整字符（1.5.3 修复）。
+
+        此前直接把 size 字节交给解码器：多字节编码下会切在字符中间，
+        strict 抛 UnicodeDecodeError、replace 则静默插入 U+FFFD（数据被
+        悄悄污染，最危险的形态）。现在：
+
+        1. **窥视**预读缓冲（只推进消费位、不销毁字节），再从 impl 补齐
+           剩余预算；
+        2. 对合并字节做「结尾残缺字符」探测，残缺部分推回——
+           impl 段用 seek 回退，行缓冲段把消费位拨回去（字节还在，
+           后续 readline/read 接着用，不丢数据）；
+        3. 预算连一个字符都装不下时（如 read(1) 遇 3 字节汉字）有界补读，
+           至少返回一个完整字符。
+        """
+        if size <= 0 and not self._buffered():
+            return ""
+
+        avail = self._buffered()
+        line_len = min(avail, size)
+        line_raw = bytes(self._line_buffer[self._line_pos : self._line_pos + line_len])
+        budget = size - line_len
+        impl_raw = await self._impl.read(budget) if budget > 0 else b""
+
+        complete, tail = _split_complete_tail(line_raw + impl_raw, self._encoding)
+        attempt = 0
+        while not complete and (line_raw or impl_raw) and attempt < 2:
+            more = await self._impl.read(4)  # 预算装不下一个字符：补读几个字节
+            if not more:
+                break  # EOF：文件本身以残缺字节结尾
+            impl_raw += more
+            attempt += 1
+            complete, tail = _split_complete_tail(line_raw + impl_raw, self._encoding)
+
+        if tail:
+            impl_push = min(len(tail), len(impl_raw))
+            if impl_push:
+                await self._impl.seek(-impl_push, 1)
+            line_push = len(tail) - impl_push
+        else:
+            line_push = 0
+
+        # 消费位只前进「完整字符」对应的部分（推回的字节留给下次）
+        self._line_pos += line_len - line_push
+        if self._line_pos and self._line_pos >= len(self._line_buffer):
+            del self._line_buffer[:]  # 全部消费完，清理消费过的前缀
+            self._line_pos = 0
+
+        return _translate_for_read(
+            complete.decode(self._encoding, errors=self._errors), self._newline
+        )
 
     async def readline(self) -> str | bytes:
         if self._closed:
