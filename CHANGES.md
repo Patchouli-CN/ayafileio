@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-22
+
+### Changed
+- **Text-mode `read(n)` / `readline()` now follow CPython `open()` semantics character-for-character** (behavior change, hence minor bump). 1.5.x treated `size` as a byte budget; 1.6.0 ports the full three-layer I/O stack idea of `io.TextIOWrapper`:
+  - **Chunked underlying reads**: `read(n)` no longer issues one syscall per call — it pulls 64 KB blocks, so chunked loops get dramatically fewer IOCP/io_uring submissions.
+  - **Incremental decoding**: a `codecs` incremental decoder stitches multi-byte sequences across chunks; incomplete trailing bytes are split out by a strict probe *before* entering the decoder, so the decoder never holds internal state and `errors` modes (strict/replace/ignore) all behave correctly.
+  - **Newline translation on segment feed** (as in CPython: after decoding, before return); a trailing lone `\r` is held one beat so a `\r\n` straddling chunks is never split into two line endings.
+  - `read(n)` counts **post-translation characters** — `read(3)` on UTF-8 Chinese returns exactly 3 characters.
+  - **`tell()` stays a plain byte offset** (better than CPython's opaque cookie): each buffer segment books its source byte count, so unconsumed bytes are always known. Byte-exact for `\n` content; `\r\n`-dense content may drift 1 byte per `\r\n` (inherent to newline compression — CPython gives up exactness entirely here and returns a cookie). Binary mode was never affected.
+  - Text-mode `seek()` policy (1.5.2) is unchanged: only `seek(0)`; positional access stays binary-only (`read_at`/`write_at`).
+
 ## [1.5.3] - 2026-09-22
 
 ### Fixed

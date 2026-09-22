@@ -865,20 +865,39 @@ async def test_binary_mode_seek_unrestricted():
         path.unlink(missing_ok=True)
 
 
-async def test_text_read_size_never_splits_characters():
-    """文本模式 read(n) 绝不对半切字符（1.5.3）：多字节编码分块读不再炸/不再静默污染"""
+async def test_text_read_n_chars_exact():
+    """文本模式 read(n) 返回精确 n 个字符（1.6.0，CPython 语义）"""
     path = get_temp_path(".txt")
     try:
-        text = "幻想乡最速" * 100  # 1500 字节
+        text = "幻想乡最速" * 10
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write(text)
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            assert await f.read(3) == "幻想乡"  # 3 字符 = 9 字节，跨多字节
+            assert await f.read(2) == "最速"
+            assert await f.tell() == 15
+            assert await f.read(-1) == text[5:]
+            assert await f.tell() == len(text.encode("utf-8"))
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_text_read_chunked_reassembly():
+    """多字节编码分块读：read(n) 按字符计，拼回完整且 tell 到 EOF"""
+    path = get_temp_path(".txt")
+    try:
+        text = "幻想乡最速" * 100
         async with ayafileio.open(path, "w", encoding="utf-8") as f:
             await f.write(text)
 
         async with ayafileio.open(path, "r", encoding="utf-8") as f:
             chunks = []
             while True:
-                chunk = await f.read(7)  # 7 字节预算，必切汉字
+                chunk = await f.read(7)  # 7 个字符（21 字节），必跨多字节边界
                 if not chunk:
                     break
+                assert len(chunk) == 7 or await f.tell() == len(text.encode("utf-8"))
                 chunks.append(chunk)
             assert "".join(chunks) == text
             assert await f.tell() == len(text.encode("utf-8")), "读完位置应到 EOF"
@@ -886,24 +905,86 @@ async def test_text_read_size_never_splits_characters():
         path.unlink(missing_ok=True)
 
 
-async def test_text_read_size_pushes_back_boundary():
-    """边界字节推回后，后续读/readline 接着用（不丢字节、不重复）"""
+async def test_text_read_matches_builtin_open():
+    """与 CPython 内置 open() 逐字符一致：同一操作序列，同一条 LF 文本"""
+    path = get_temp_path(".txt")
+    content = "第一行内容\n第二行内容\n第三行内容\n幻想乡最速\n"
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write(content)
+
+        with open(path, "r", encoding="utf-8") as ref:
+            expected = [
+                ref.read(4),
+                ref.readline(),
+                ref.read(2),
+                ref.readline(),
+                ref.read(1000),
+                ref.tell(),
+            ]
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            actual = [
+                await f.read(4),
+                await f.readline(),
+                await f.read(2),
+                await f.readline(),
+                await f.read(1000),
+                await f.tell(),
+            ]
+        assert actual == expected
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_text_read_matches_builtin_open_crlf():
+    """CRLF 文本：通用换行模式下与内置 open() 的输出一致（tell 允许压缩漂移）"""
+    path = get_temp_path(".txt")
+    content = "第一行\r\n第二行\r\n幻想乡\r\n最速\r\n"
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8", newline="") as f:
+            await f.write(content)
+
+        with open(path, "r", encoding="utf-8") as ref:
+            expected = [ref.read(3), ref.readline(), ref.read(6), ref.read(-1)]
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            actual = [await f.read(3), await f.readline(), await f.read(6), await f.read(-1)]
+        assert actual == expected
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_text_readline_crlf_universal():
+    """CRLF 文件通用模式：readline 拿到 \\n 行尾，行内无残留 \\r"""
     path = get_temp_path(".txt")
     try:
-        content = "幻想乡\n最速测试"
+        content = "第一行\r\n第二行\r\n幻想乡"
+        async with ayafileio.open(path, "w", encoding="utf-8", newline="") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            assert await f.readline() == "第一行\n"
+            assert await f.readline() == "第二行\n"
+            assert await f.readline() == "幻想乡"
+            assert await f.readline() == ""
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_text_read_after_readline_interleave():
+    """read 与 readline 混用：字符流内位置连续，无错位无重复"""
+    path = get_temp_path(".txt")
+    try:
+        content = "幻想乡\n最速测试\n结束"
         async with ayafileio.open(path, "w", encoding="utf-8") as f:
             await f.write(content)
 
         async with ayafileio.open(path, "r", encoding="utf-8") as f:
-            first = await f.read(4)  # 3 字节完整字 + 1 字节残缺 -> 只返回「幻」
-            assert first == "幻"
-            rest = await f.read(-1)
-            assert rest == content[1:]
-
-        async with ayafileio.open(path, "r", encoding="utf-8") as f:
-            assert await f.read(4) == "幻"
-            assert await f.readline() == "想乡\n"  # 接着行读，无错位
-            assert await f.read() == "最速测试"
+            assert await f.read(2) == "幻想"  # 半行处截断
+            assert await f.readline() == "乡\n"  # 接着行读
+            assert await f.read(4) == "最速测试"
+            assert await f.readline() == "\n"
+            assert await f.read() == "结束"
+            assert await f.tell() == len(content.encode("utf-8"))
     finally:
         path.unlink(missing_ok=True)
 
@@ -925,25 +1006,24 @@ async def test_text_read_size_ascii_unchanged():
         path.unlink(missing_ok=True)
 
 
-async def test_text_read_size_replace_mode_no_silent_corruption():
-    """errors="replace" 下也不再因 chunk 边界静默插入 U+FFFD"""
+async def test_text_read_replace_mode_no_silent_corruption():
+    """errors="replace" 下 read(n) 也不产生替换字符（完整字符才返回）"""
     path = get_temp_path(".txt")
     try:
         async with ayafileio.open(path, "w", encoding="utf-8") as f:
             await f.write("幻想乡最速")
 
         async with ayafileio.open(path, "r", encoding="utf-8", errors="replace") as f:
-            chunk = await f.read(4)  # 3 字节完整 + 1 字节残缺
-            assert chunk == "幻", f"边界字节应被推回而不是变成替换字符: {chunk!r}"
+            chunk = await f.read(2)
+            assert chunk == "幻想", f"read(2) 应返回两个完整字符: {chunk!r}"
             assert "\ufffd" not in chunk
-            rest = await f.read()
-            assert rest == "想乡最速"
+            assert await f.read() == "乡最速"
     finally:
         path.unlink(missing_ok=True)
 
 
 async def test_text_read_zero_budget():
-    """read(0) 返回空串且不推进位置；预算装不下一字时补齐到字符边界"""
+    """read(0) 返回空串且不推进位置；read(1) 返回一个完整字符"""
     path = get_temp_path(".txt")
     try:
         async with ayafileio.open(path, "w", encoding="utf-8") as f:

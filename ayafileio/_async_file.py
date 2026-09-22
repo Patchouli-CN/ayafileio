@@ -1,9 +1,11 @@
 """异步文件对象"""
 
 import asyncio
+import codecs
 import os
 import locale
 from pathlib import Path
+from collections import deque
 from collections.abc import AsyncGenerator, Iterable
 from typing import Generic, TypeVar
 from ._ayafileio import AsyncFile as _AsyncFile
@@ -107,6 +109,257 @@ def _split_complete_tail(raw: bytes, encoding: str) -> tuple[bytes, bytes]:
         return raw, b""
 
 
+def _translate_stream(text: str, newline: str | None) -> tuple[str, bool]:
+    """流式换行翻译（通用模式 None 专用）：整段翻译，段尾孤立 \\r 挂起。
+
+    挂起的 \\r 不翻译、本段不带出——下一段到达时拼回原文再判断是
+    ``\\r`` 还是 ``\\r\\n``（跨 chunk 的 \\r\\n 不能被切成两个行尾）。
+    非 None 模式不翻译（识别/终止语义由 seek/take_line 负责）。
+
+    Args:
+        text: 本段已解码文本（不含挂起 \\r）
+        newline: 换行模式；仅 None 触发翻译
+
+    Returns:
+        tuple[str, bool]: (翻译后文本, 是否需挂起段尾 \\r)
+    """
+    if newline is not None or not text:
+        return text, False
+    if text.endswith("\r"):
+        body, pending = text[:-1], True
+    else:
+        body, pending = text, False
+    return body.replace("\r\n", "\n").replace("\r", "\n"), pending
+
+
+def _find_line_end_text(text: str, newline: str | None) -> tuple[int, int]:
+    """在已解码文本里找行尾，返回 (起始下标, 长度)；无则 (-1, 0)。
+
+    `newline=None` 时文本已被翻译，行尾统一是 ``\\n``；其余模式按各自
+    终止符查找（``""`` 模式认 ``\\r\\n``/``\\r``/``\\n`` 三种）。
+    """
+    if newline is None or newline == "\n":
+        idx = text.find("\n")
+        return (idx, 1) if idx != -1 else (-1, 0)
+    if newline == "\r":
+        idx = text.find("\r")
+        return (idx, 1) if idx != -1 else (-1, 0)
+    if newline == "\r\n":
+        idx = text.find("\r\n")
+        return (idx, 2) if idx != -1 else (-1, 0)
+    # newline == ""：三种都认，取最先出现者
+    best = (-1, 0)
+    for sep in ("\r\n", "\r", "\n"):
+        idx = text.find(sep)
+        if idx != -1 and (best[0] == -1 or idx < best[0]):
+            best = (idx, len(sep))
+    return best
+
+
+class _CharStream:
+    """文本模式字符流 —— CPython TextIOWrapper 三层 I/O 栈思想的移植。
+
+    部件与对应关系：
+
+    - **增量解码**（对应 CPython 的 decoder）：`codecs` 增量解码器拼接跨
+      chunk 的多字节序列；但残缺字节在进解码器**之前**就被
+      `_split_complete_tail` 切出、留在 `_carry` 与下批拼接——解码器
+      因此永远不持有内部缓冲，各编码行为一致，`errors` 模式
+      （strict/replace/ignore）也全都正确。
+    - **分段字符缓冲**（对应 CPython 的 `_decoded_chars`）：`deque` 段 +
+      字节账本——feed 记入本段来源字节数，消费 k 个字符时按
+      `len(段前缀.encode())` 扣减。未消费字节数始终可知 →
+      `tell()` 保持**普通字节偏移**（CPython 因 \\r\\n→\\n 压缩只能返回
+      不透明 cookie；我们按段记账，人类可读）。纯 \\n 行尾内容字节精确；
+      \\r\\n 密集内容每处可能漂移 1 字节（压缩的固有问题，如实文档化）。
+    - **换行翻译在入段时做**（对应 CPython：解码后、返回用户前）；
+      通用 None / 不翻译的 "" / "\\r\\n" 模式下，段尾孤立 \\r 统一挂起
+      一拍（下一段可能以 \\n 到达构成 \\r\\n）——段因此永不半截行尾，
+      `take_line` 无需跨段拼接。
+    - `read(n)` 按**翻译后字符数**计数，与 CPython 逐字符一致。
+    """
+
+    def __init__(self, encoding: str, errors: str, newline: str | None) -> None:
+        """初始化。
+
+        Args:
+            encoding: 文本编码
+            errors: 解码错误模式
+            newline: 换行模式（同内置 open()）
+        """
+        self._encoding = encoding
+        self._newline = newline
+        self._errors = errors
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors)
+        self._segments: deque[tuple[str, int]] = deque()
+        """ (已翻译文本, 来源字节数) 分段队列 """
+        self._pending_raw = 0
+        """ 未消费字符对应的来源字节总数 """
+        self._carry = b""
+        """ 结尾残缺字节，与下一批读取拼接后再解码 """
+        self._pending_cr = False
+        """ 段尾孤立 \\r 挂起（下一段确认是 \\r 还是 \\r\\n） """
+        self._eof = False
+
+    # ---------------------------------------------------------------- 状态
+
+    @property
+    def eof(self) -> bool:
+        """是否已读到 EOF 并收尾。"""
+        return self._eof
+
+    def buffered(self) -> int:
+        """缓冲中可消费的字符数。"""
+        return sum(len(text) for text, _ in self._segments)
+
+    def byte_pending(self) -> int:
+        """已读但未消费的字节数（carry + 未消费段 + 挂起的 \\r）。"""
+        return self._pending_raw + len(self._carry) + (1 if self._pending_cr else 0)
+
+    # ---------------------------------------------------------------- 喂入
+
+    def feed(self, raw: bytes) -> None:
+        """喂入一批从 impl 读到的原始字节。"""
+        if not raw or self._eof:
+            return
+        if self._carry:
+            raw = self._carry + raw
+            self._carry = b""
+        complete, tail = _split_complete_tail(raw, self._encoding)
+        self._carry = tail
+        if not complete:
+            return
+
+        text = self._decoder.decode(complete)
+        if self._pending_cr:
+            text = "\r" + text
+            self._pending_cr = False
+
+        pending_cr = False
+        if self._newline is None:
+            text, pending_cr = _translate_stream(text, None)
+        elif self._newline in ("", "\r\n") and text.endswith("\r"):
+            # 段尾 \r 歧义（可能是 \r\n 的前半）：挂起，不翻译模式原样带出
+            text, pending_cr = text[:-1], True
+        self._pending_cr = pending_cr
+
+        if text:
+            # 挂起的 \r 字节不计入本段（留在 byte_pending 的 +1 里）
+            seg_raw = len(complete) - (1 if pending_cr else 0)
+            self._segments.append((text, seg_raw))
+            self._pending_raw += seg_raw
+
+    def finish(self) -> str:
+        """EOF 收尾：解出解码器与挂起 \\r 的剩余输出（末尾残缺按 errors 处理）。"""
+        if self._eof:
+            return ""
+        self._eof = True
+        raw_len = len(self._carry)
+        text = self._decoder.decode(self._carry, final=True)
+        self._carry = b""
+        if self._pending_cr:
+            text = "\r" + text
+            self._pending_cr = False
+        text, _ = _translate_stream(text, self._newline)
+        if not text:
+            return ""
+        self._segments.append((text, raw_len))
+        self._pending_raw += raw_len
+        return text
+
+    # ---------------------------------------------------------------- 消费
+
+    def take(self, n: int) -> str:
+        """取至多 *n* 个字符（跨段拼接，按段前缀字节扣账）。"""
+        if n <= 0 or not self._segments:
+            return ""
+        out: list[str] = []
+        remaining = n
+        while remaining > 0 and self._segments:
+            text, raw = self._segments[0]
+            if len(text) <= remaining:
+                out.append(text)
+                remaining -= len(text)
+                self._segments.popleft()
+                self._pending_raw -= raw
+            else:
+                head = text[:remaining]
+                consumed_raw = self._raw_len(head, raw, len(text))
+                out.append(head)
+                self._segments[0] = (text[remaining:], raw - consumed_raw)
+                self._pending_raw -= consumed_raw
+                remaining = 0
+        return "".join(out)
+
+    def take_all(self) -> str:
+        """取走全部缓冲字符。"""
+        out = "".join(text for text, _ in self._segments)
+        self._segments.clear()
+        self._pending_raw = 0
+        return out
+
+    def take_line(self) -> str | None:
+        """取一行（含行尾）；无完整行返回 None。
+
+        段尾不会出现歧义 \\r（feed 时已挂起），故行尾必在单段内找到，
+        无需跨段拼接。
+        """
+        segments = self._segments
+        for index, (text, raw) in enumerate(segments):
+            sep_start, sep_len = _find_line_end_text(text, self._newline)
+            if sep_start == -1:
+                continue
+            cut = sep_start + sep_len
+            head_raw = self._raw_len(text[:cut], raw, len(text))
+            if index == 0:
+                rest = text[cut:]
+                if rest:
+                    segments[0] = (rest, raw - head_raw)
+                else:
+                    segments.popleft()
+                self._pending_raw -= head_raw
+                return text[:cut]
+
+            # 行跨多个段：前 index 段整段 + 本段前缀
+            head_texts = [t for t, _ in list(segments)[:index]]
+            whole_raw = sum(r for _, r in list(segments)[:index])
+            line = "".join(head_texts) + text[:cut]
+            for _ in range(index):
+                segments.popleft()
+            self._pending_raw -= whole_raw + head_raw
+            rest = text[cut:]
+            if rest:
+                segments[0] = (rest, raw - head_raw)
+            else:
+                segments.popleft()
+            return line
+        return None
+
+    # ---------------------------------------------------------------- 重置
+
+    def clear(self) -> None:
+        """丢弃全部缓冲与挂起状态（seek(0) / 写前回退用）。"""
+        self._segments.clear()
+        self._pending_raw = 0
+        self._carry = b""
+        self._pending_cr = False
+        self._eof = False
+        self._decoder = codecs.getincrementaldecoder(self._encoding)(self._errors)
+
+    def _raw_len(self, prefix: str, seg_raw: int, seg_len: int) -> int:
+        """段内前缀 *prefix* 的来源字节数。
+
+        UTF-8 等可 round-trip 的编码用 encode 精确计算；理论上失败的
+        （有状态编码）退化为按字符数比例摊派。
+        """
+        if not prefix:
+            return 0
+        try:
+            return len(prefix.encode(self._encoding, errors="strict"))
+        except UnicodeEncodeError:
+            return round(seg_raw * len(prefix) / seg_len) if seg_len else 0
+
+
 async def _gather_io(requests):
     """Submit native Futures directly; drain submitted I/O before reporting errors."""
     pending = []
@@ -147,6 +400,7 @@ class AsyncFile(Generic[T]):
         "_encoding",
         "_line_buffer",
         "_line_pos",
+        "_chars",
         "_closed",
         "_newline",
         "_errors",
@@ -201,6 +455,10 @@ class AsyncFile(Generic[T]):
         self._impl = _AsyncFile(self._path, clean_mode)
         self._line_buffer = bytearray()
         self._line_pos = 0
+        # 文本模式的字符流（增量解码 + 分段字符缓冲）；二进制模式走裸字节缓冲
+        self._chars = (
+            _CharStream(self._encoding, self._errors, self._newline) if self._is_text else None
+        )
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -243,11 +501,18 @@ class AsyncFile(Generic[T]):
         return out
 
     async def _rewind_readahead(self) -> None:
-        """丢弃预读缓冲，并把底层文件位置回退到逻辑位置。
+        """丢弃预读内容，并把底层文件位置回退到逻辑位置。
 
-        在 write/truncate 前调用，保证混用 readline 与写操作时
-        位置语义与内置 ``open()`` 一致。
+        在 write/truncate 前调用，保证混用读取与写操作时
+        位置语义与内置 ``open()`` 一致。文本模式回退字符流的字节账本，
+        二进制模式回退预读缓冲。
         """
+        if self._chars is not None:
+            pending = self._chars.byte_pending()
+            if pending:
+                await self._impl.seek(-pending, 1)
+            self._chars.clear()
+            return
         n = self._buffered()
         if n:
             del self._line_buffer[:]
@@ -257,22 +522,21 @@ class AsyncFile(Generic[T]):
     async def read(self, size: int = -1) -> T:
         """读取内容。
 
-        文本模式下 `size` 是**字节预算**而非字符数（1.5.3 起明确的行为）：
-        返回该预算内**完整字符**对应的文本，绝不在多字节字符中间下刀——
-        结尾残缺的字节会被推回（impl 位置回退 / 预读缓冲回退），后续读取
-        接着用。ASCII 下字节即字符，与旧行为完全一致。需要精确字符数请
-        用 `readline()` 或 `read(-1)`（两者本来就按行/按整体边界解码）。
+        文本模式下 `size` 是**字符数**（1.6.0 起与 CPython `open()` 逐字符
+        一致）：底层按 64KB 块读、增量解码、分段缓冲，按翻译后字符数
+        计出——绝不在多字节字符中间下刀。`size < 0` 读到 EOF。
+        二进制模式 `size` 为字节数。
 
         Args:
-            size: 字节预算；<0 表示读到 EOF
+            size: 字符数（文本）/ 字节数（二进制）；<0 表示读到 EOF
 
         Returns:
             T: 文本（文本模式）或字节（二进制模式）
         """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        if self._is_text and size >= 0:
-            return await self._read_text_bounded(size)  # type: ignore[return-value]
+        if self._chars is not None:
+            return await self._read_text(size)  # type: ignore[return-value]
         if self._buffered():
             # 先消费 readline 的预读缓冲，避免丢数据
             prefix = self._take_buffered(size)
@@ -290,61 +554,50 @@ class AsyncFile(Generic[T]):
             return _translate_for_read(text, self._newline)  # type: ignore[return-value]
         return data  # type: ignore[return-value]
 
-    async def _read_text_bounded(self, size: int) -> str:
-        """文本模式定长读：size 为字节预算，只返回完整字符（1.5.3 修复）。
+    async def _fill_chars(self, want_chars: int) -> None:
+        """从 impl 读一块喂进字符流；EOF 时自动收尾。
 
-        此前直接把 size 字节交给解码器：多字节编码下会切在字符中间，
-        strict 抛 UnicodeDecodeError、replace 则静默插入 U+FFFD（数据被
-        悄悄污染，最危险的形态）。现在：
-
-        1. **窥视**预读缓冲（只推进消费位、不销毁字节），再从 impl 补齐
-           剩余预算；
-        2. 对合并字节做「结尾残缺字符」探测，残缺部分推回——
-           impl 段用 seek 回退，行缓冲段把消费位拨回去（字节还在，
-           后续 readline/read 接着用，不丢数据）；
-        3. 预算连一个字符都装不下时（如 read(1) 遇 3 字节汉字）有界补读，
-           至少返回一个完整字符。
+        Args:
+            want_chars: 本次期望消费的字符数（决定预读量下限）
         """
-        if size <= 0 and not self._buffered():
-            return ""
-
-        avail = self._buffered()
-        line_len = min(avail, size)
-        line_raw = bytes(self._line_buffer[self._line_pos : self._line_pos + line_len])
-        budget = size - line_len
-        impl_raw = await self._impl.read(budget) if budget > 0 else b""
-
-        complete, tail = _split_complete_tail(line_raw + impl_raw, self._encoding)
-        attempt = 0
-        while not complete and (line_raw or impl_raw) and attempt < 2:
-            more = await self._impl.read(4)  # 预算装不下一个字符：补读几个字节
-            if not more:
-                break  # EOF：文件本身以残缺字节结尾
-            impl_raw += more
-            attempt += 1
-            complete, tail = _split_complete_tail(line_raw + impl_raw, self._encoding)
-
-        if tail:
-            impl_push = min(len(tail), len(impl_raw))
-            if impl_push:
-                await self._impl.seek(-impl_push, 1)
-            line_push = len(tail) - impl_push
+        chars = self._chars
+        assert chars is not None
+        if chars.eof:
+            return
+        raw = await self._impl.read(max(_DEFAULT_READLINE_BUF, want_chars * 4 + 4))
+        if raw:
+            chars.feed(raw)
         else:
-            line_push = 0
+            chars.finish()
 
-        # 消费位只前进「完整字符」对应的部分（推回的字节留给下次）
-        self._line_pos += line_len - line_push
-        if self._line_pos and self._line_pos >= len(self._line_buffer):
-            del self._line_buffer[:]  # 全部消费完，清理消费过的前缀
-            self._line_pos = 0
-
-        return _translate_for_read(
-            complete.decode(self._encoding, errors=self._errors), self._newline
-        )
+    async def _read_text(self, size: int) -> str:
+        """文本模式读：size 为字符数（CPython 语义）。"""
+        chars = self._chars
+        assert chars is not None
+        if size < 0:
+            while not chars.eof:
+                await self._fill_chars(0)
+            return chars.take_all()
+        if size == 0:
+            return ""
+        while chars.buffered() < size and not chars.eof:
+            await self._fill_chars(size)
+        return chars.take(size)
 
     async def readline(self) -> str | bytes:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+
+        # 文本模式：走字符流（已解码、已翻译，行尾按 newline 模式查找）
+        chars = self._chars
+        if chars is not None:
+            while True:
+                line = chars.take_line()
+                if line is not None:
+                    return line
+                if chars.eof:
+                    return chars.take_all()
+                await self._fill_chars(1)
 
         buf = self._line_buffer
         newline = self._newline if self._is_text else "\n"
@@ -616,6 +869,10 @@ class AsyncFile(Generic[T]):
                 "offsets may land mid-character and silently corrupt decoding. "
                 "Open the file in binary mode for positional access."
             )
+        if self._chars is not None:
+            # 文本模式只允许 seek(0)：丢弃字符流全部缓冲与挂起状态
+            self._chars.clear()
+            return await self._impl.seek(0, 0)
         n = self._buffered()
         if n:
             if whence == 1:
@@ -636,8 +893,19 @@ class AsyncFile(Generic[T]):
             await self._impl.close()
 
     async def tell(self) -> int:
-        """返回当前文件位置。"""
-        return await self._impl.tell() - self._buffered()
+        """返回当前文件位置（逻辑位置 = 用户消费到的位置）。
+
+        文本模式：字节偏移。纯 \\n 行尾内容字节精确；\\r\\n 密集内容每处
+        可能漂移 1 字节（换行压缩 \\r\\n→\\n 的固有问题——CPython 同样无法
+        给出简单字节偏移，它返回不透明 cookie）。二进制模式始终字节精确。
+        """
+        return await self._impl.tell() - self._pending_bytes()
+
+    def _pending_bytes(self) -> int:
+        """已读但尚未消费的字节数（文本=字符流账本，二进制=预读缓冲）。"""
+        if self._chars is not None:
+            return self._chars.byte_pending()
+        return len(self._line_buffer) - self._line_pos
 
     async def truncate(self, size: int) -> None:
         """截断文件到指定大小。"""

@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.6.0] - 2026-09-22
+
+### 变更
+- **文本模式 `read(n)` / `readline()` 对齐 CPython `open()` 逐字符语义**（行为变更，故升 minor）。1.5.x 把 `size` 当字节预算；1.6.0 移植 `io.TextIOWrapper` 三层 I/O 栈的完整思想：
+  - **块读底层**：`read(n)` 不再每次调用一次系统调用——按 64KB 块预读，分块读循环的 IOCP/io_uring 提交次数大幅下降。
+  - **增量解码**：`codecs` 增量解码器拼接跨 chunk 的多字节序列；结尾残缺字节在进解码器**之前**被 strict 探测切出，解码器因此永不持有内部状态，`errors` 各模式（strict/replace/ignore）行为全部正确。
+  - **换行翻译改为入段时做**（与 CPython 相同：解码后、返回前）；段尾孤立 `\r` 挂起一拍，跨 chunk 的 `\r\n` 绝不会被切成两个行尾。
+  - `read(n)` 按**翻译后字符数**计数——UTF-8 中文 `read(3)` 精确返回 3 个字符。
+  - **`tell()` 保持普通字节偏移**（比 CPython 的不透明 cookie 更好用）：分段字符缓冲为每段登记来源字节数，未消费字节始终可知。纯 `\n` 内容字节精确；`\r\n` 密集内容每处可能漂移 1 字节（换行压缩的固有问题——CPython 在此彻底放弃精确性改用 cookie）。二进制模式一直不受影响。
+  - 文本模式 `seek()` 策略（1.5.2）不变：仅 `seek(0)`；位置访问仍仅二进制（`read_at`/`write_at`）。
+
 ## [1.5.3] - 2026-09-22
 
 ### 修复
