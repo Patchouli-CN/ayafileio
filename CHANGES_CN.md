@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.5.1] - 2026-09-16
+
+### 新增
+- **位置写 API —— `AsyncFile.write_at(offset, data)`**：在显式 offset 处写入字节，不改变文件逻辑位置。Windows IOCP、Linux io_uring/线程池、macOS Dispatch I/O 后端均支持。
+- **批量位置写 —— `AsyncFile.write_many(writes)`**：并发提交多个 `(offset, data)` 写请求，按输入顺序返回写入字节数。
+
+### 变更
+- 批量读现在直接收集原生 Future，不再为每个请求创建一个 Python Task。
+- 长行扫描不再重复扫描前置读缓冲中已检查过的部分。
+
+### 修复
+- Windows 文件对象在事件循环关闭后的析构过程中，不再尝试关闭已失效的 IOCP 会话。
+
 ## [1.5.0] - 2026-09-02
 
 ### 新增
