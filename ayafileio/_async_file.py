@@ -493,8 +493,35 @@ class AsyncFile(Generic[T]):
     # ── seek / flush / close / tell 等 ──────────────────────────────────────────────────
 
     async def seek(self, offset: int, whence: int = 0) -> int:
+        """移动文件逻辑位置，返回新的绝对位置。
+
+        **文本模式安全策略（1.5.2 起，纯 Python 层，零后端改动）**：
+        只允许 `seek(0)`（whence=0，回到开头）。文本模式的裸字节偏移可能落在
+        多字节字符中间，导致下次 `read()` 抛 `UnicodeDecodeError`（strict）
+        或静默插入 U+FFFD（errors="replace"）——后者尤其危险：数据被悄悄
+        污染而不报错。因此文本模式拒绝一切非零偏移与非 SEEK_SET 模式。
+        二进制模式不受限制（位置访问本就是 `read_at`/`write_at` 的原生场景）；
+        需要位置访问请以二进制模式打开文件。
+
+        Args:
+            offset: 目标偏移（文本模式必须为 0）
+            whence: 0=从开头（SEEK_SET），1=从当前位置，2=从末尾
+                （文本模式只接受 0）
+
+        Returns:
+            int: 新的绝对位置
+
+        Raises:
+            ValueError: 文件已关闭；或文本模式下 seek 到非零位置
+        """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if self._is_text and not (whence == 0 and offset == 0):
+            raise ValueError(
+                "text mode only supports seek(0) (back to start); arbitrary byte "
+                "offsets may land mid-character and silently corrupt decoding. "
+                "Open the file in binary mode for positional access."
+            )
         n = self._buffered()
         if n:
             if whence == 1:

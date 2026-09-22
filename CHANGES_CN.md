@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.5.2] - 2026-09-22
+
+### 变更
+- **文本模式 `seek()` 收敛为仅允许 `seek(0)`**（纯 Python 策略，零后端改动）：文本模式的裸字节偏移可能落在多字节字符中间，污染解码——strict 模式抛 `UnicodeDecodeError`，`errors="replace"` 则静默插入 U+FFFD（更危险：数据被悄悄换掉而不报错）。文本模式现在对一切非零偏移与非 SEEK_SET 模式抛 `ValueError`。二进制模式不受影响（位置访问本就是 `read_at`/`write_at` 的原生场景），需要位置访问请以二进制模式打开。`r+`/`w+` 文本模式下 `seek(0)` 的重写流程不变。
+
 ## [1.5.1] - 2026-09-16
 
 ### 新增

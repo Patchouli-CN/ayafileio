@@ -801,6 +801,70 @@ async def test_seek_from_end():
         path.unlink(missing_ok=True)
 
 
+async def test_text_mode_seek_restricted_to_start():
+    """文本模式只允许 seek(0)（1.5.2 起）：防落在字符中间毁掉解码"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write("幻想乡最速")
+
+        async with ayafileio.open(path, "r", encoding="utf-8") as f:
+            await f.read(2)
+            assert await f.tell() == 6, "两个汉字 = 6 字节"
+
+            await f.seek(0)  # 允许：回开头
+            assert await f.tell() == 0
+            assert (await f.read(2)) == "幻想"
+
+            # 非零偏移 / 非 SEEK_SET 一律拒绝
+            for bad in ((3, 0), (0, 1), (0, 2), (1, 2)):
+                try:
+                    await f.seek(*bad)
+                    raise AssertionError(f"文本模式 seek{bad} 应当被拒绝")
+                except ValueError:
+                    pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_text_mode_seek_zero_roundtrip_still_works():
+    """r+/w+ 文本模式的 seek(0) 重写流程不受策略影响"""
+    path = get_temp_path(".txt")
+    try:
+        async with ayafileio.open(path, "w", encoding="utf-8") as f:
+            await f.write("Hello, World!")
+
+        async with ayafileio.open(path, "r+", encoding="utf-8") as f:
+            content = await f.read()
+            assert content == "Hello, World!"
+
+            await f.seek(0)
+            await f.write("Hi")
+            await f.seek(0)
+            new_content = await f.read()
+            assert new_content == "Hillo, World!"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_binary_mode_seek_unrestricted():
+    """二进制模式位置访问不受文本策略影响（read_at/write_at 的原生场景）"""
+    path = get_temp_path(".bin")
+    try:
+        content = "幻想乡最速".encode("utf-8")
+        async with ayafileio.open(path, "wb") as f:
+            await f.write(content)
+
+        async with ayafileio.open(path, "rb") as f:
+            await f.seek(3)  # 故意落在字符中间也允许（binary 无字符概念）
+            chunk = await f.read(3)
+            assert len(chunk) == 3
+            await f.seek(-3, 2)
+            assert (await f.read()) == content[-3:]
+    finally:
+        path.unlink(missing_ok=True)
+
+
 async def test_auto_close():
     path = get_temp_path(".txt")
     try:

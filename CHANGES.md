@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-09-22
+
+### Changed
+- **Text-mode `seek()` is now restricted to `seek(0)`** (pure Python policy, zero backend changes): an arbitrary byte offset in text mode can land mid-character and corrupt decoding — `UnicodeDecodeError` under strict, silent U+FFFD under `errors="replace"`. Text mode now raises `ValueError` for any non-zero offset or non-SEEK_SET whence. Binary mode is unaffected (positional access remains the native scenario of `read_at`/`write_at`); open in binary mode when you need positional access. The `seek(0)` rewrite flow in `r+`/`w+` text modes is unchanged.
+
 ## [1.5.1] - 2026-09-16
 
 ### Added
