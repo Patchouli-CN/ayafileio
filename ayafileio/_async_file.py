@@ -455,10 +455,10 @@ class AsyncFile(Generic[T]):
         self._impl = _AsyncFile(self._path, clean_mode)
         self._line_buffer = bytearray()
         self._line_pos = 0
-        # 文本模式的字符流（增量解码 + 分段字符缓冲）；二进制模式走裸字节缓冲
-        self._chars = (
-            _CharStream(self._encoding, self._errors, self._newline) if self._is_text else None
-        )
+        # 文本模式的字符流（增量解码 + 分段字符缓冲）；惰性创建——
+        # __init__/_from_impl 之外还有测试替身等构造路径，惰性 + _is_text 分支
+        # 保证任何路径下二进制读取都不会触碰文本状态
+        self._chars: _CharStream | None = None
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -535,7 +535,7 @@ class AsyncFile(Generic[T]):
         """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        if self._chars is not None:
+        if self._is_text:
             return await self._read_text(size)  # type: ignore[return-value]
         if self._buffered():
             # 先消费 readline 的预读缓冲，避免丢数据
@@ -554,14 +554,23 @@ class AsyncFile(Generic[T]):
             return _translate_for_read(text, self._newline)  # type: ignore[return-value]
         return data  # type: ignore[return-value]
 
+    def _char_stream(self) -> "_CharStream":
+        """文本字符流（惰性创建）：首次文本读取时按当前编码/换行模式建立。
+
+        惰性是为了兼容 `_from_impl` 与测试替身等绕过 `__init__` 的构造路径，
+        以及「先建二进制句柄再翻 `_is_text`」的用法。
+        """
+        if self._chars is None:
+            self._chars = _CharStream(self._encoding, self._errors, self._newline)
+        return self._chars
+
     async def _fill_chars(self, want_chars: int) -> None:
         """从 impl 读一块喂进字符流；EOF 时自动收尾。
 
         Args:
             want_chars: 本次期望消费的字符数（决定预读量下限）
         """
-        chars = self._chars
-        assert chars is not None
+        chars = self._char_stream()
         if chars.eof:
             return
         raw = await self._impl.read(max(_DEFAULT_READLINE_BUF, want_chars * 4 + 4))
@@ -572,8 +581,7 @@ class AsyncFile(Generic[T]):
 
     async def _read_text(self, size: int) -> str:
         """文本模式读：size 为字符数（CPython 语义）。"""
-        chars = self._chars
-        assert chars is not None
+        chars = self._char_stream()
         if size < 0:
             while not chars.eof:
                 await self._fill_chars(0)
@@ -589,8 +597,8 @@ class AsyncFile(Generic[T]):
             raise ValueError("I/O operation on closed file.")
 
         # 文本模式：走字符流（已解码、已翻译，行尾按 newline 模式查找）
-        chars = self._chars
-        if chars is not None:
+        if self._is_text:
+            chars = self._char_stream()
             while True:
                 line = chars.take_line()
                 if line is not None:
@@ -991,6 +999,7 @@ class AsyncFile(Generic[T]):
         instance._encoding = None
         instance._line_buffer = bytearray()
         instance._line_pos = 0
+        instance._chars = None  # 惰性创建：文本读取首次触达时才建字符流
         instance._closed = False
         instance._newline = None
         instance._errors = "strict"
