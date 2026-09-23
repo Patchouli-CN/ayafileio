@@ -1,60 +1,49 @@
-
----
-
 # ayafileio
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-Cross--platform-blue.svg)](https://en.wikipedia.org/wiki/Cross-platform)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
 [![Version](https://img.shields.io/badge/version-1.6.0-red.svg)]()
 
-**当前是英文** | [**chinese version**](README_CN.md)
+**English** | [简体中文](README_CN.md)
 
-> **"The fastest file I/O in Gensokyo, swift as the Wind God Maiden."**  
-> *— Aya Shameimaru, always flying at full speed*
+> "The fastest file I/O in Gensokyo, swift as the Wind God Maiden."
+> — Aya Shameimaru, always flying at full speed
 
-**Cross-platform asynchronous file I/O library using native async I/O where available.**  
-Windows leverages **IOCP** (I/O Completion Ports), Linux uses **io_uring** (kernel 5.1+), and macOS uses **Dispatch I/O (GCD)** for truly non-blocking file operations.
+Async file I/O with real kernel backends: **IOCP** on Windows, **io_uring** on Linux (kernel 5.1+), **Dispatch I/O (GCD)** on macOS. No thread pools pretending to be async — one `ayafileio.open()`, and the right backend is picked for you.
 
-## changes
+## Changelog
 
-**see** -> [**CHANGES**](CHANGES.md)
+See [CHANGES.md](CHANGES.md).
 
-## 🏆 True Async on All Three Major Platforms
+## Backends
 
-| Platform | Backend | True Async | Description |
-|----------|---------|------------|-------------|
-| **Windows** | IOCP | ✅ | NT kernel native I/O Completion Ports |
-| **Linux** | io_uring | ✅ | Next-gen async I/O (kernel 5.1+) |
-| **macOS** | Dispatch I/O | ✅ | GCD kernel-level async I/O |
+| Platform | Backend | True async | Notes |
+|----------|---------|:----------:|-------|
+| Windows | IOCP | Yes | NT kernel I/O Completion Ports |
+| Linux | io_uring | Yes | Kernel 5.1+ |
+| macOS | Dispatch I/O | Yes | GCD kernel-level async I/O |
 
-**ayafileio aims to be a single, unified async file API that delivers true kernel-level async I/O across Windows, Linux, and macOS.**
+## Features
 
-## 📸 Key Features
+- Zero thread overhead on true-async platforms — no background threads
+- Kernel-level completion: IOCP / io_uring / Dispatch I/O, direct to the kernel
+- Thousands of concurrent operations on a single file handle
+- aiofiles-compatible API, plain `async/await`
+- Text and binary modes with automatic encoding/decoding
+- Runtime-tunable configuration shared by all backends
+- Python 3.10–3.14, including 3.14t free-threading
 
-| Feature | Description |
-|---------|-------------|
-| 🍃 **Zero thread overhead** | No background threads on true async platforms |
-| 📰 **Kernel-level completion** | IOCP / io_uring / Dispatch I/O direct to kernel |
-| ⚡ **High concurrency** | Handles thousands of concurrent file operations |
-| 🎴 **Familiar API** | aiofiles-compatible, supports `async/await` |
-| 📖 **Text & binary support** | Automatic encoding/decoding in text modes |
-| 🔧 **Unified configuration** | Runtime tunable parameters for all backends |
-| 🌍 **Cross-platform** | Windows, Linux, and macOS |
-| 🐍 **Latest Python** | Supports 3.10–3.14, including 3.14t free-threading |
-
-## 🛠️ Installation
+## Installation
 
 ```bash
 pip install ayafileio
 ```
 
-**System requirements:**
-- Python 3.10+
-- Windows 7+ / Linux (kernel 5.1+ for io_uring) / macOS 10.10+
-- No external dependencies, precompiled wheels available
+Requires Python 3.10+, Windows 7+ / Linux (kernel 5.1+ for io_uring) / macOS 10.10+.
+No external dependencies; precompiled wheels are available.
 
-## 🚀 Quick Start
+## Quick start
 
 ```python
 import asyncio
@@ -78,68 +67,58 @@ async def main():
 asyncio.run(main())
 ```
 
-## ⚡ Performance Best Practice
+## Open once, read many times
 
-ayafileio's file open/close overhead is already in the microsecond range, but for maximum performance, **avoid reopening the same file in a loop**.
+Open/close overhead is already in the microsecond range, but reopening the same
+file in a loop still costs you a coroutine round-trip per iteration:
 
 ```python
-# ❌ DO NOT DO THIS: repeated open/close in a loop
+# Slow: repeated open/close
 for i in range(10000):
     async with ayafileio.open("data.bin", "rb") as f:
         data = await f.read()
 
-# ✅ DO THIS: open once, operate many times
+# Fast: one handle, many operations (~6x faster)
 async with ayafileio.open("data.bin", "rb") as f:
     for i in range(10000):
         await f.seek(0)
         data = await f.read()
 ```
 
-The latter is ~6x faster — it eliminates 9999 unnecessary coroutine scheduling round-trips.
-
-## 🔍 Backend Information
-
-Check which backend is currently in use:
+## Checking the active backend
 
 ```python
 import ayafileio
 
-info = ayafileio.get_backend_info()
-print(info)
+print(ayafileio.get_backend_info())
 # Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True}
 # Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True}
 # macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True}
 ```
 
-## ⚙️ Unified Configuration
+## Configuration
 
-`ayafileio` provides a unified configuration system that allows runtime tuning:
+All backends share one runtime configuration:
 
 ```python
 import ayafileio
 
-# View current configuration
-config = ayafileio.get_config()
-print(config)
+print(ayafileio.get_config())
 
-# Update configuration
 ayafileio.configure({
     "io_worker_count": 8,
-    "buffer_size": 131072,      # 128KB buffer
+    "buffer_size": 131072,      # 128 KB
     "close_timeout_ms": 2000,
 })
 
-# Reset to defaults
-ayafileio.reset_config()
+ayafileio.reset_config()  # back to defaults
 ```
-
-### Configuration Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `handle_pool_max_per_key` | 64 | Max cached handles per file (Windows) |
 | `handle_pool_max_total` | 2048 | Max total cached handles (Windows) |
-| `io_worker_count` | 0 | IO worker threads, 0=auto |
+| `io_worker_count` | 0 | IO worker threads, 0 = auto |
 | `buffer_pool_max` | 512 | Max cached buffers |
 | `buffer_size` | 65536 | Buffer size in bytes |
 | `close_timeout_ms` | 4000 | Close timeout for pending I/O (ms) |
@@ -147,9 +126,9 @@ ayafileio.reset_config()
 | `io_uring_queue_depth` | 256 | io_uring queue depth (Linux) |
 | `io_uring_sqpoll` | False | Enable SQPOLL mode (Linux) |
 
-## 📚 API Reference
+## API reference
 
-### AsyncFile class
+### AsyncFile
 
 ```python
 class AsyncFile(Generic[T]):
@@ -161,32 +140,32 @@ class AsyncFile(Generic[T]):
         auto_flush: bool = False
     ): ...
 
-    # 读取
+    # Reading
     async def read(self, size: int = -1) -> T: ...
     async def readline() -> T: ...
     async def readlines(hint: int = -1) -> list[T]: ...
-    async def readall() -> T: ...                        # read(-1) 别名
-    async def readinto(buf: bytearray | memoryview) -> int: ...  # 零拷贝 [仅二进制]
-    async def chunk(chunk_size: int, *, buf: bytearray | memoryview | None = None) -> AsyncGenerator[memoryview, None]: ...  # 流式分块 [仅二进制]
-    async def read_at(offset: int, size: int = -1) -> bytes: ...  # 位置读（pread 语义），不动文件位置 [仅二进制]
-    async def read_many(spans: Iterable[tuple[int, int]]) -> list[bytes]: ...  # 批量位置读，单事件循环周期提交 [仅二进制]
+    async def readall() -> T: ...                        # alias for read(-1)
+    async def readinto(buf: bytearray | memoryview) -> int: ...  # zero-copy [binary only]
+    async def chunk(chunk_size: int, *, buf: bytearray | memoryview | None = None) -> AsyncGenerator[memoryview, None]: ...  # streaming chunks [binary only]
+    async def read_at(offset: int, size: int = -1) -> bytes: ...  # positioned read (pread), leaves file position untouched [binary only]
+    async def read_many(spans: Iterable[tuple[int, int]]) -> list[bytes]: ...  # batched positioned reads, submitted in one event-loop turn [binary only]
     async def write_at(offset: int, data: bytes | bytearray | memoryview) -> int: ...
     async def write_many(writes: Iterable[tuple[int, bytes | bytearray | memoryview]]) -> list[int]: ...
 
-    # 写入
+    # Writing
     async def write(self, data: str | bytes) -> int: ...
-    async def writelines(lines) -> None: ...              # 批量写入
+    async def writelines(lines) -> None: ...
 
-    # 位置
+    # Position
     async def seek(self, offset: int, whence: int = 0) -> int: ...
     async def tell() -> int: ...
     async def truncate(size: int) -> None: ...
 
-    # 控制
+    # Control
     async def flush(self) -> None: ...
     async def close(self) -> None: ...
 
-    # 属性
+    # Properties
     @property
     def closed(self) -> bool: ...
     @property
@@ -194,19 +173,19 @@ class AsyncFile(Generic[T]):
     @property
     def mode(self) -> str: ...
 
-    # 状态
+    # State
     def readable() -> bool: ...
     def writable() -> bool: ...
     def seekable() -> bool: ...
     def fileno() -> int: ...
     def isatty() -> bool: ...
 
-    # 迭代器
+    # Iteration
     def __aiter__(self) -> AsyncFile[T]: ...
     async def __anext__(self) -> T: ...
 ```
 
-### Supported Modes
+### Supported modes
 
 | Mode | Description |
 |------|-------------|
@@ -215,121 +194,6 @@ class AsyncFile(Generic[T]):
 | `"a"`, `"ab"` | Append (text/binary) |
 | `"x"`, `"xb"` | Exclusive create (text/binary) |
 | `+` added | Read/write combinations |
-
-### Configuration Functions
-
-```python
-def configure(options: dict) -> None: ...      # Unified configuration
-def get_config() -> dict: ...                   # Get current configuration
-def reset_config() -> None: ...                 # Reset to defaults
-def get_backend_info() -> dict: ...             # Get backend information
-```
-
-### File Wrapping
-
-```python
-def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]: ...
-```
-
-Wrap an existing file descriptor (int) or a file-like object with `fileno()` as an `AsyncFile`, backed by the optimal platform backend. Binary mode only.
-
-### Pool Management
-
-```python
-def drain_handle_pool() -> None: ...            # Drain all cached file handles
-def drain_buffer_pool() -> None: ...            # Drain all cached I/O buffers
-```
-
-Use `drain_handle_pool()` / `drain_buffer_pool()` to release pooled resources at runtime — useful after bulk tempfile operations or between benchmark rounds.
-
-## 🧪 Performance Comparison
-
-### Scenario 1: Crawlee-style Dataset Append (open/write/close per record)
-
-Simulating Crawlee's Dataset append pattern — 5,000 records, 50 concurrent writers, each writing a single line and closing the file:
-
-| Platform | ayafileio | aiofiles | Speedup |
-|----------|-----------|----------|---------|
-| **Windows (NVMe SSD)** | **41,336 items/s** | 9,658 items/s | **4.28x** |
-| **Linux (NVMe SSD)** | **17,688 items/s** | 11,455 items/s | **1.54x** |
-| **macOS (NVMe SSD)** | **29,837 items/s** | 25,522 items/s | **1.17x** |
-| **Windows (6yr old HDD)** | **20,251 items/s** | 13,011 items/s | **1.56x** |
-
-**Key findings:**
-- On Windows enterprise SSD, ayafileio achieves **42x lower P99 latency** (0.044ms vs 1.854ms)
-- aiofiles shows **96.7% jitter** under load; ayafileio only **16.2%**
-- Even on degraded hardware, ayafileio maintains predictable performance
-
-> *Test environment: Windows 10/11, Ubuntu 22.04, macOS 14; GitHub Actions enterprise NVMe SSD*
-
-### Scenario 2: Single-file High-concurrency Random Read
-
-The true test of async I/O — 100,000 concurrent tasks performing random 256B reads on a single shared file handle. No open/close overhead, pure I/O path comparison:
-
-| Library | 1K concur | 10K concur | 50K concur | 100K concur |
-|---------|-----------|------------|------------|-------------|
-| **ayafileio (IOCP)** | 7,487 ops/s | **46,616 ops/s** | **28,165 ops/s** | **19,290 ops/s** |
-| aiofiles (threadpool) | 7,706 ops/s | 7,320 ops/s | 2,131 ops/s | 2,130 ops/s |
-| sync threadpool | 9,492 ops/s | 9,469 ops/s | 8,840 ops/s | 8,660 ops/s |
-| **ayafileio vs aiofiles** | 1.0x | **6.4x** | **13.2x** | **9.1x** |
-
-**Key findings:**
-- At low concurrency (1K), all approaches are similar — IOCP setup overhead is amortized
-- At 10K+ concurrency, aiofiles' thread pool saturates; throughput **drops** as concurrency increases — from 7,706 down to 2,130 ops/s (72% degradation)
-- ayafileio with IOCP **gains** throughput at 10K (46,616 ops/s) due to batched completion harvesting via `GetQueuedCompletionStatusEx`
-- At 100K concurrency, ayafileio is **9.1x faster** than aiofiles on the same HDD
-- The synchronous threadpool (mimicking aiofiles' approach) flatlines at ~8,800 ops/s regardless of concurrency — thread contention ceiling
-
-> *Test environment: Windows 10, Python 3.14.5, WDC WD10EZEX 7200RPM HDD, 20MB file, 256B random reads*
-
-### Scenario 3: Extreme Concurrency Stress — 500,000 Concurrent Reads
-
-500,000 asyncio tasks all reading from a single file via IOCP — testing the library's absolute concurrency ceiling:
-
-| Metric | Value |
-|--------|-------|
-| Concurrent tasks | **500,000** |
-| Completion time | 21.6s |
-| Throughput | **23,116 ops/s** |
-| Peak memory (RSS) | ~583 MB |
-| Errors | **0** |
-| Exceptions | **0** |
-
-ayafileio handles half a million concurrent IOCP reads on a single file handle with zero errors. The dual-IOCP worker architecture (2 threads total) processes all 500K completions while aiofiles would require thousands of threads for the same workload — and still be slower.
-
-### Tuning: Default Configuration is Optimal
-
-We tested 14 different configuration combinations (iocp_batch_size, buffer_size, buffer_pool_max, io_worker_count) on the HDD at 100K concurrency. Result: **every configuration scored within ±3% of the default.** The library's auto-tuned defaults already saturate the disk's physical I/O limit — there is no software bottleneck left to tune.
-
-For NVMe SSDs with >500K IOPS capability, increasing `iocp_batch_size` to 128–256 and `buffer_size` to 128KB may yield additional gains. Use `ayafileio.configure()` to experiment:
-
-```python
-ayafileio.configure({
-    "iocp_batch_size": 128,
-    "buffer_size": 131072,
-})
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Add tests
-4. Ensure benchmarks pass
-5. Open a pull request
-
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-**"Slow is a crime, right?"**  
-*— Aya Shameimaru, editor-in-chief of Bunbunmaru News*
-
----
 
 ### Positioned and batched writes
 
@@ -343,12 +207,13 @@ async with ayafileio.open("data.bin", "w+b") as f:
 `write_at(offset, data)` returns the number of bytes written. `write_many(writes)`
 accepts an iterable of `(offset, data)` pairs and returns counts in input order.
 Both require a writable binary file, reject append mode, and preserve the logical
-file position. They accept `bytes`, `bytearray`, and contiguous `memoryview` buffers,
-which the backend copies on submission. Positioned writes rewind and discard any
-`readline()` read-ahead so subsequent reads see the updated content.
-An empty batch returns `[]`; an empty buffer returns `0`. Offsets must be nonnegative,
-offset plus length must fit a signed 64-bit integer, and each buffer is limited to
-4 GiB minus 1 byte. As with `write()`, callers must check for short writes.
+file position. They accept `bytes`, `bytearray`, and contiguous `memoryview`
+buffers, which the backend copies on submission. Positioned writes rewind and
+discard any `readline()` read-ahead so subsequent reads see the updated content.
+An empty batch returns `[]`; an empty buffer returns `0`. Offsets must be
+nonnegative, offset plus length must fit a signed 64-bit integer, and each buffer
+is limited to 4 GiB minus 1 byte. As with `write()`, callers must check for short
+writes.
 
 Batch operations gather native Futures directly, avoiding a Python Task per item;
 `read_many()` uses the same optimization. Submitted requests are drained before
@@ -356,3 +221,118 @@ reporting submission or I/O errors, but batches are not atomic: some writes may
 have succeeded when an error is raised. Concurrent overlapping writes have
 unspecified ordering; await each `write_at(...)` separately when ordering matters.
 Cancelling the wait does not undo already submitted system I/O.
+
+### Configuration functions
+
+```python
+def configure(options: dict) -> None: ...      # apply unified configuration
+def get_config() -> dict: ...                  # current configuration
+def reset_config() -> None: ...                # reset to defaults
+def get_backend_info() -> dict: ...            # active backend information
+```
+
+### Wrapping an existing file
+
+```python
+def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]: ...
+```
+
+Wraps an existing file descriptor (int) or a file-like object with `fileno()` as
+an `AsyncFile`, backed by the optimal platform backend. Binary mode only.
+
+### Pool management
+
+```python
+def drain_handle_pool() -> None: ...           # release all cached file handles
+def drain_buffer_pool() -> None: ...           # release all cached I/O buffers
+```
+
+Useful after bulk tempfile operations or between benchmark rounds.
+
+## Benchmarks
+
+### Crawlee-style dataset append (open/write/close per record)
+
+5,000 records, 50 concurrent writers, each writing a single line and closing the
+file — simulating Crawlee's Dataset append pattern:
+
+| Platform | ayafileio | aiofiles | Speedup |
+|----------|-----------|----------|---------|
+| Windows (NVMe SSD) | **41,336 items/s** | 9,658 items/s | **4.28x** |
+| Linux (NVMe SSD) | **17,688 items/s** | 11,455 items/s | **1.54x** |
+| macOS (NVMe SSD) | **29,837 items/s** | 25,522 items/s | **1.17x** |
+| Windows (6yr old HDD) | **20,251 items/s** | 13,011 items/s | **1.56x** |
+
+On the Windows NVMe run, ayafileio's P99 latency is 42x lower (0.044 ms vs
+1.854 ms), and jitter under load is 16.2% against aiofiles' 96.7%. Even on the
+old HDD the numbers stay predictable.
+
+*Test environment: Windows 10/11, Ubuntu 22.04, macOS 14; GitHub Actions NVMe SSD.*
+
+### Single-file random read at high concurrency
+
+100,000 concurrent tasks doing random 256-byte reads on one shared file handle —
+no open/close overhead, pure I/O path:
+
+| Library | 1K concur | 10K concur | 50K concur | 100K concur |
+|---------|-----------|------------|------------|-------------|
+| **ayafileio (IOCP)** | 7,487 ops/s | **46,616 ops/s** | **28,165 ops/s** | **19,290 ops/s** |
+| aiofiles (threadpool) | 7,706 ops/s | 7,320 ops/s | 2,131 ops/s | 2,130 ops/s |
+| sync threadpool | 9,492 ops/s | 9,469 ops/s | 8,840 ops/s | 8,660 ops/s |
+| **ayafileio vs aiofiles** | 1.0x | **6.4x** | **13.2x** | **9.1x** |
+
+At 1K concurrency everything is about equal — the IOCP setup cost is still being
+amortized. Past 10K, aiofiles' thread pool saturates and throughput *drops* with
+more concurrency (7,706 → 2,130 ops/s, a 72% loss), while IOCP *gains* throughput
+thanks to batched completion harvesting via `GetQueuedCompletionStatusEx`. The
+sync threadpool flatlines around 8,800 ops/s no matter what — that's the thread
+contention ceiling.
+
+*Test environment: Windows 10, Python 3.14.5, WDC WD10EZEX 7200RPM HDD, 20 MB file, 256 B random reads.*
+
+### Stress: 500,000 concurrent reads
+
+Half a million asyncio tasks all reading one file through IOCP:
+
+| Metric | Value |
+|--------|-------|
+| Concurrent tasks | 500,000 |
+| Completion time | 21.6 s |
+| Throughput | 23,116 ops/s |
+| Peak memory (RSS) | ~583 MB |
+| Errors / exceptions | 0 |
+
+The dual-IOCP worker architecture (2 threads total) drains all 500K completions.
+aiofiles would need thousands of threads for the same workload — and would still
+be slower.
+
+### A note on tuning
+
+We benchmarked 14 configuration combinations (`iocp_batch_size`, `buffer_size`,
+`buffer_pool_max`, `io_worker_count`) on the HDD at 100K concurrency. Every single
+one landed within ±3% of the defaults — the auto-tuned defaults already saturate
+the disk's physical I/O limit, so there is nothing left to tune by hand.
+
+On NVMe drives with >500K IOPS, raising `iocp_batch_size` to 128–256 and
+`buffer_size` to 128 KB may squeeze out a bit more:
+
+```python
+ayafileio.configure({
+    "iocp_batch_size": 128,
+    "buffer_size": 131072,
+})
+```
+
+## Contributing
+
+Contributions welcome: fork, branch, add tests, make sure the benchmarks still
+pass, open a PR.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+**"Slow is a crime, right?"**
+*— Aya Shameimaru, editor-in-chief of Bunbunmaru News*
