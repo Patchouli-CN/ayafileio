@@ -1,10 +1,14 @@
 name: build wheel with ci
 
 on:
+  # Fires only when "Build and Test" actually ran and succeeded on main.
+  # Non-code pushes (docs, assets, ...) never reach here, because test.yml
+  # is gated by a paths whitelist and simply doesn't run for them.
   workflow_run:
     workflows: ["Build and Test"]
     types: [completed]
     branches: [main]
+  # Tags always build and publish — that's the release flow.
   push:
     tags: ['v*']
   workflow_dispatch:
