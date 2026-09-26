@@ -168,6 +168,31 @@ IORequest* IOBackendBase::make_req_read_bytes(size_t size, PyObject* future) {
     return req;
 }
 
+// 零拷贝写：持有调用方缓冲区视图，I/O 直接读用户内存
+IORequest* IOBackendBase::make_req_held_write(Py_buffer* view, PyObject* future) {
+    auto* req = TRACKED_NEW(IORequest);
+    req->file = this;
+    req->batcher = m_batcher;
+    if (m_batcher) m_batcher->op_submitted();
+    req->future = future;
+    Py_INCREF(future);
+    req->set_result = PyObject_GetAttr(future, g_str_set_result);
+    req->reqSize = static_cast<size_t>(view->len);
+    req->type = ReqType::Write;
+    req->holdsWriteBuf = true;
+
+    // 自行 GetBuffer 持有视图 —— 调用方在 write() 返回后会释放自己的
+    // 那份 Py_buffer，我们必须持有独立的视图引用
+    if (PyObject_GetBuffer(view->obj, &req->userBufView, PyBUF_SIMPLE) < 0) {
+        if (m_batcher) m_batcher->op_completed();
+        TRACKED_DELETE(req);
+        return nullptr;
+    }
+    req->userBuf = view->obj;
+    Py_INCREF(view->obj);
+    return req;
+}
+
 IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size_t size, PyObject* future) {
     auto* req = TRACKED_NEW(IORequest);
     req->file = this;

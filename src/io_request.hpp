@@ -44,8 +44,11 @@ struct IORequest {
 
     // readinto 专用字段
     PyObject      *userBuf       = nullptr;  // 用户提供的缓冲区对象（owned）
-    Py_buffer      userBufView;             // 缓冲区的 Py_buffer（zeroed）
+    Py_buffer      userBufView{};           // 缓冲区的 Py_buffer（零初始化）
     bool           isReadinto    = false;   // 标记：是否为 readinto 请求
+    // 零拷贝写：持调用方缓冲区视图，内核直接读用户内存，省一次完整拷贝。
+    // 与 readinto 共用 userBuf/userBufView，析构同样负责释放。
+    bool           holdsWriteBuf = false;
 
     // 读零拷贝（owned）：非空时 I/O 直接读进这个预建的 PyBytes，
     // 完成路径直接把它作为 future 结果返回，省一次完整数据拷贝。
@@ -53,7 +56,7 @@ struct IORequest {
     PyObject      *preResult     = nullptr;
 
     char *buf() noexcept {
-        if (isReadinto && userBufView.buf) return (char*)userBufView.buf;
+        if ((isReadinto || holdsWriteBuf) && userBufView.buf) return (char*)userBufView.buf;
         if (preResult) return PyBytes_AS_STRING(preResult);
         return poolBuf ? poolBuf->data : heapBuf;
     }
@@ -76,7 +79,7 @@ struct IORequest {
         Py_XDECREF(set_result);
         Py_XDECREF(set_exception);
         Py_XDECREF(preResult);
-        if (isReadinto && userBufView.buf) {
+        if ((isReadinto || holdsWriteBuf) && userBufView.buf) {
             PyBuffer_Release(&userBufView);
         }
         Py_XDECREF(userBuf);

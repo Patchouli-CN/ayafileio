@@ -13,6 +13,7 @@
 #include <cstring>
 #include <chrono>
 #include <thread>
+#include <algorithm>
 
 namespace ayafileio {
 
@@ -260,9 +261,42 @@ void MacOSGCDBackend::ensure_loop_initialized() {
     m_create_future = g_cachedFutureFn;
     Py_INCREF(m_create_future);
     m_batcher = g_cachedLoopHandle;
-    
+
+    // 大请求线程快速路依赖全局线程池（macOS 主路径是 GCD，
+    // ThreadIOBackend 可能从不存在，线程池需自行拉起）
+    auto& cfg = ayafileio::config();
+    m_num_workers = cfg.io_worker_count();
+    if (m_num_workers == 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0) hc = 1;
+        m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
+    }
+    GlobalThreadPool::instance().ensure_started(m_num_workers);
+
     m_loop_initialized = true;
     UR_DEBUG_LOG("MacOSGCDBackend::ensure_loop_initialized done, this=%p", (void*)this);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 大请求线程快速路 — 直接 pread/pwrite 进最终缓冲，零回调零拷贝
+// ════════════════════════════════════════════════════════════════════════════
+
+void MacOSGCDBackend::submit_read_fast(IORequest* req, uint64_t offset, size_t size) {
+    int fd = m_fd;
+    GlobalThreadPool::instance().enqueue([this, req, fd, offset, size]() {
+        ssize_t got = pread(fd, req->buf(), size, static_cast<off_t>(offset));
+        if (got >= 0) complete_ok(req, static_cast<size_t>(got));
+        else complete_error(req, errno);
+    });
+}
+
+void MacOSGCDBackend::submit_write_fast(IORequest* req, uint64_t offset, size_t size) {
+    int fd = m_fd;
+    GlobalThreadPool::instance().enqueue([this, req, fd, offset, size]() {
+        ssize_t wrote = pwrite(fd, req->buf(), size, static_cast<off_t>(offset));
+        if (wrote >= 0) complete_ok(req, static_cast<size_t>(wrote));
+        else complete_error(req, errno);
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -327,9 +361,15 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
     if (!req) [[unlikely]] { Py_DECREF(future); return nullptr; }  // MemoryError
     UR_DEBUG_LOG("MacOSGCDBackend::read req=%p, offset=%llu, size=%zu",
                  (void*)req, (unsigned long long)offset, readSize);
-    
+
     m_pending.fetch_add(1, std::memory_order_relaxed);
-    
+
+    if (readSize >= LARGE_IO_THRESHOLD) {
+        // 大请求：线程快速路，一发 pread 直接进 preResult PyBytes
+        submit_read_fast(req, offset, readSize);
+        return future;
+    }
+
     auto self = this;
     __block size_t total_copied = 0;
     dispatch_io_read(
@@ -434,6 +474,12 @@ PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
 
+    if (readSize >= LARGE_IO_THRESHOLD) {
+        // 大请求：线程快速路，一发 pread 直接进 preResult PyBytes
+        submit_read_fast(req, static_cast<uint64_t>(offset), readSize);
+        return future;
+    }
+
     // 通道为 DISPATCH_IO_RANDOM，dispatch_io_read 带显式 offset，不动文件指针
     auto self = this;
     __block size_t total_copied = 0;
@@ -524,6 +570,17 @@ PyObject* MacOSGCDBackend::write(Py_buffer* view, int64_t position) {
             m_cachedFileSize = offset + size;  // 乐观更新：假设写成功
     }
     
+    if (size >= LARGE_IO_THRESHOLD) {
+        // 大写：线程快速路，持调用方缓冲零拷贝，内核直接读用户内存
+        IORequest* req = make_req_held_write(view, future);
+        if (!req) { Py_DECREF(future); return nullptr; }
+        UR_DEBUG_LOG("MacOSGCDBackend::write fast req=%p, offset=%llu, size=%zu",
+                     (void*)req, (unsigned long long)offset, size);
+        m_pending.fetch_add(1, std::memory_order_relaxed);
+        submit_write_fast(req, offset, size);
+        return future;
+    }
+
     IORequest* req = make_req(size, future, ReqType::Write);
     std::memcpy(req->buf(), view->buf, size);
     UR_DEBUG_LOG("MacOSGCDBackend::write req=%p, offset=%llu, size=%zu",
@@ -828,9 +885,15 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
     }
     
     IORequest* req = make_req_readinto(buf, &view, readSize, future);
-    
+
     m_pending.fetch_add(1, std::memory_order_relaxed);
-    
+
+    if (readSize >= LARGE_IO_THRESHOLD) {
+        // 大请求：线程快速路，一发 pread 直接进用户缓冲区
+        submit_read_fast(req, offset, readSize);
+        return future;
+    }
+
     auto self = this;
     __block size_t total_copied = 0;
     dispatch_io_read(m_channel, offset, readSize, m_queue,

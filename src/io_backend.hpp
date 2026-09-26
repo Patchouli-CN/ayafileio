@@ -48,6 +48,9 @@ protected:
     // 读专用：预建 PyBytes 作为读取目标（零拷贝结果）。OOM 时返回 nullptr
     // 且 MemoryError 已设置，调用方需清理已创建的 future。
     virtual IORequest* make_req_read_bytes(size_t size, PyObject* future);
+    // 零拷贝写：自行 GetBuffer 持有调用方缓冲区视图（调用方返回后释放
+    // 自己的视图不影响我们），内核直接读用户内存。失败返回 nullptr。
+    virtual IORequest* make_req_held_write(Py_buffer* view, PyObject* future);
     virtual void complete_error_inline(IORequest* req, DWORD err);
 
     static void resolve_ok(PyObject* future, PyObject* val);
