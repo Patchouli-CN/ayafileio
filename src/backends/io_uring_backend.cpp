@@ -417,8 +417,8 @@ PyObject* IOUringBackend::write(Py_buffer* view, int64_t position) {
         if (offset + size > m_cachedFileSize) m_cachedFileSize = offset + size;
     }
 
-    IORequest* req = make_req(size, future, ReqType::Write);
-    std::memcpy(req->buf(), view->buf, size);
+    IORequest* req = make_req_held_write(view, future);
+    if (!req) { Py_DECREF(future); return nullptr; }
     m_pending.fetch_add(1, std::memory_order_relaxed);
     submit_io(req, IORING_OP_WRITE, m_fd,
               std::as_bytes(std::span{req->buf(), size}), static_cast<off_t>(offset));

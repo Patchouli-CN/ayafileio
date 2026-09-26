@@ -412,8 +412,8 @@ PyObject *ThreadIOBackend::write(Py_buffer *view, int64_t position) {
             m_cachedFileSize = offset + size;  // 乐观更新：假设写成功
     }
 
-    IORequest *req = make_req(size, future, ReqType::Write);
-    memcpy(req->buf(), view->buf, size);
+    IORequest *req = make_req_held_write(view, future);
+    if (!req) { Py_DECREF(future); return nullptr; }
     UR_DEBUG_LOG("ThreadIOBackend::write req=%p, offset=%llu, size=%zu", 
                  (void*)req, (unsigned long long)offset, size);
 

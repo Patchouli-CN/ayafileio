@@ -524,6 +524,32 @@ IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
     return req;
 }
 
+// 零拷贝写：自行 GetBuffer 持有调用方缓冲区视图（调用方返回后释放自己
+// 的视图不影响我们），WriteFile 直接读用户内存，省一次完整拷贝。
+// 失败返回 nullptr（Python 异常已设置）。
+IORequest *make_req_write_iocp_held(Py_buffer *view, PyObject *future) {
+    auto *req = TRACKED_NEW(IORequest);
+    req->file        = nullptr;
+    req->batcher     = nullptr;
+    req->future      = future;
+    Py_INCREF(future);
+    req->set_result  = PyObject_GetAttr(future, g_str_set_result);
+    // set_exception 不预取，同 make_req_iocp
+    req->reqSize     = static_cast<size_t>(view->len);
+    req->type        = ReqType::Write;
+    req->holdsWriteBuf = true;
+
+    if (PyObject_GetBuffer(view->obj, &req->userBufView, PyBUF_SIMPLE) < 0) {
+        TRACKED_DELETE(req);
+        return nullptr;
+    }
+    req->userBuf = view->obj;
+    Py_INCREF(view->obj);
+
+    UR_DEBUG_LOG("make_req_write_iocp_held req=%p future=%p size=%zu", (void*)req, (void*)future, req->reqSize);
+    return req;
+}
+
 } // anonymous namespace
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -869,10 +895,8 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
         if (offset + wsize > s->cachedFileSize) s->cachedFileSize = offset + wsize;
     }
 
-    IORequest *req = make_req_iocp(wsize, future, ReqType::Write,
-                                   s->cached_buffer_size, s->cached_buffer_pool_max);
-    if (!req) { Py_DECREF(future); return nullptr; }  // MemoryError
-    memcpy(req->buf(), view->buf, wsize);
+    IORequest *req = make_req_write_iocp_held(view, future);
+    if (!req) { Py_DECREF(future); return nullptr; }
     req->ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
     req->ov.OffsetHigh = (DWORD)(offset >> 32);
 
