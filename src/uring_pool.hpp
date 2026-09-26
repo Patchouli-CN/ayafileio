@@ -233,6 +233,14 @@ private:
         // flag 会返回 EINVAL，静默回退到无优化 flag。
         // 注意：刻意不用 IORING_SETUP_SINGLE_ISSUER —— 提交来自多个
         // Python 线程及 reaper 的溢出补提交，违反 single-issuer 约束。
+        // 这两个常量是稳定的内核 UAPI（bit 8/9），但老版本 liburing 头
+        // 文件（如 manylinux 容器里的）尚未定义 —— 编译期补上。
+#ifndef IORING_SETUP_COOP_TASKRUN
+#define IORING_SETUP_COOP_TASKRUN (1U << 8)
+#endif
+#ifndef IORING_SETUP_TASKRUN_FLAG
+#define IORING_SETUP_TASKRUN_FLAG (1U << 9)
+#endif
         int ret = io_uring_queue_init(inst->queue_depth, &inst->ring,
                                       actual_flags | IORING_SETUP_COOP_TASKRUN
                                                    | IORING_SETUP_TASKRUN_FLAG);
