@@ -12,6 +12,8 @@
 #include <condition_variable>
 #include <vector>
 
+namespace ayafileio {
+
 class ThreadIOBackend : public IOBackendBase {
 public:
     ThreadIOBackend(const std::string& path, const std::string& mode);
@@ -35,6 +37,7 @@ private:
     std::atomic<bool> m_running{false};
     std::mutex m_posMtx;
     uint64_t m_filePos = 0;
+    uint64_t m_cachedFileSize = 0;  // open 时缓存，写/截断路径乐观更新
     bool m_appendMode = false;
 
     // 事件循环相关成员 - 延迟初始化
@@ -49,3 +52,5 @@ private:
     void ensure_loop_initialized();
     void enqueue_task(std::function<void()> task);
 };
+
+} // namespace ayafileio

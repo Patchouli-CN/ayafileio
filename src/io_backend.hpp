@@ -7,6 +7,8 @@
 #include <string>
 #include <cstdint>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // §3  IO Backend Base Class
 // ════════════════════════════════════════════════════════════════════════════
@@ -43,6 +45,9 @@ public:
 protected:
     virtual IORequest* make_req(size_t size, PyObject* future, ReqType type);
     virtual IORequest* make_req_readinto(PyObject* buf, Py_buffer* view, size_t size, PyObject* future);
+    // 读专用：预建 PyBytes 作为读取目标（零拷贝结果）。OOM 时返回 nullptr
+    // 且 MemoryError 已设置，调用方需清理已创建的 future。
+    virtual IORequest* make_req_read_bytes(size_t size, PyObject* future);
     virtual void complete_error_inline(IORequest* req, DWORD err);
 
     static void resolve_ok(PyObject* future, PyObject* val);
@@ -62,3 +67,5 @@ protected:
     bool m_cached_io_uring_sqpoll = false;
     bool m_owns_fd = true;
 };
+
+} // namespace ayafileio

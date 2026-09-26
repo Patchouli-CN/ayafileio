@@ -18,7 +18,7 @@ static inline void CloseHandle(HANDLE) { (void)0; }
 
 namespace py = nanobind;
 
-namespace py = nanobind;
+namespace ayafileio {
 
 // ════════════════════════════════════════════════════════════════════════════
 // §1  Cached CPython globals
@@ -125,3 +125,5 @@ inline void set_os_error(const char *msg, const char *filename = nullptr) {
 }
 
 #endif
+
+} // namespace ayafileio

@@ -2,6 +2,8 @@
 #include "global_thread_pool.hpp"
 #include "utils/debug_log.hpp"
 
+namespace ayafileio {
+
 GlobalThreadPool& GlobalThreadPool::instance() {
     static GlobalThreadPool pool;
     return pool;
@@ -90,3 +92,5 @@ void GlobalThreadPool::worker_loop() {
     }
 }
 #endif
+
+} // namespace ayafileio

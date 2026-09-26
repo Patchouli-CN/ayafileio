@@ -2,6 +2,8 @@
 #include "../globals.hpp"
 #include <Python.h>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // 错误处理工具函数
 // ════════════════════════════════════════════════════════════════════════════
@@ -114,3 +116,5 @@ inline PyObject* check_closed_and_return_future(bool is_running, int fd,
     }
     return nullptr;  // 文件未关闭
 }
+
+} // namespace ayafileio

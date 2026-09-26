@@ -6,6 +6,8 @@
 #include <vector>
 #include <unordered_map>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // Handle Pool — the pool implementation is Windows-specific but the
 // interface is exported on all platforms. On non-Windows platforms the
@@ -70,3 +72,5 @@ inline PoolKey make_pool_key(const std::string& path, DWORD access, DWORD disp) 
 inline void set_handle_pool_limits(size_t, size_t) {}
 inline std::pair<size_t, size_t> get_handle_pool_limits() { return {64, 2048}; }
 #endif
+
+} // namespace ayafileio

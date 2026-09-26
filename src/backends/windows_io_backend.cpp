@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <filesystem>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // WindowsIOBackend — constructor (path)
 // ════════════════════════════════════════════════════════════════════════════
@@ -253,3 +255,5 @@ void WindowsIOBackend::close_impl() {
         Py_XDECREF(future);
     }
 }
+
+} // namespace ayafileio

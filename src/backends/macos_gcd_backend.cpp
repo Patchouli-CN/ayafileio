@@ -14,6 +14,8 @@
 #include <chrono>
 #include <thread>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // 全局缓存（线程安全）
 // ════════════════════════════════════════════════════════════════════════════
@@ -129,11 +131,14 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
     
-    if (m_appendMode) {
+    {
         struct stat st;
         if (fstat(m_fd, &st) == 0) {
-            m_filePos = static_cast<uint64_t>(st.st_size);
-            UR_DEBUG_LOG("MacOSGCDBackend: append mode, filePos=%llu", (unsigned long long)m_filePos);
+            m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+            if (m_appendMode) {
+                m_filePos = m_cachedFileSize;
+                UR_DEBUG_LOG("MacOSGCDBackend: append mode, filePos=%llu", (unsigned long long)m_filePos);
+            }
         }
     }
     
@@ -198,10 +203,13 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
     
-    if (m_appendMode) {
+    {
         struct stat st;
         if (fstat(m_fd, &st) == 0) {
-            m_filePos = static_cast<uint64_t>(st.st_size);
+            m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+            if (m_appendMode) {
+                m_filePos = m_cachedFileSize;
+            }
         }
     }
     
@@ -291,15 +299,7 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         
-        struct stat st;
-        if (fstat(m_fd, &st) != 0) {
-            UR_DEBUG_LOG("MacOSGCDBackend::read fstat failed, errno=%d", errno);
-            set_os_error("fstat failed");
-            resolve_exc(future, g_OSError, errno, "fstat failed");
-            return future;
-        }
-        
-        int64_t rem = static_cast<int64_t>(st.st_size) - static_cast<int64_t>(m_filePos);
+        int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
         if (rem <= 0) {
             UR_DEBUG_LOG0("MacOSGCDBackend::read EOF");
             resolve_bytes(future, nullptr, 0);
@@ -323,7 +323,8 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
         m_filePos += readSize;
     }
     
-    IORequest* req = make_req(readSize, future, ReqType::Read);
+    IORequest* req = make_req_read_bytes(readSize, future);
+    if (!req) [[unlikely]] { Py_DECREF(future); return nullptr; }  // MemoryError
     UR_DEBUG_LOG("MacOSGCDBackend::read req=%p, offset=%llu, size=%zu",
                  (void*)req, (unsigned long long)offset, readSize);
     
@@ -401,18 +402,10 @@ PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
 
     size_t readSize;
     {
-        // m_posMtx 仅为与写路径的并发 fstat 保持一致；不读取也不修改 m_filePos
+        // m_posMtx 仅为与写/截断路径的 cachedFileSize 更新保持一致；不读取也不修改 m_filePos
         std::lock_guard<std::mutex> lk(m_posMtx);
 
-        struct stat st;
-        if (fstat(m_fd, &st) != 0) {
-            UR_DEBUG_LOG("MacOSGCDBackend::read_at fstat failed, errno=%d", errno);
-            set_os_error("fstat failed");
-            resolve_exc(future, g_OSError, errno, "fstat failed");
-            return future;
-        }
-
-        int64_t rem = static_cast<int64_t>(st.st_size) - offset;
+        int64_t rem = static_cast<int64_t>(m_cachedFileSize) - offset;
         if (rem <= 0) {
             // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
             UR_DEBUG_LOG0("MacOSGCDBackend::read_at offset beyond EOF");
@@ -434,7 +427,8 @@ PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
         }
     }
 
-    IORequest* req = make_req(readSize, future, ReqType::Read);
+    IORequest* req = make_req_read_bytes(readSize, future);
+    if (!req) [[unlikely]] { Py_DECREF(future); return nullptr; }  // MemoryError
     UR_DEBUG_LOG("MacOSGCDBackend::read_at req=%p, offset=%lld, size=%zu",
                  (void*)req, (long long)offset, readSize);
 
@@ -520,21 +514,14 @@ PyObject* MacOSGCDBackend::write(Py_buffer* view, int64_t position) {
     }
     
     uint64_t offset = static_cast<uint64_t>(position);
-    if (position < 0) {
+    {
         std::lock_guard<std::mutex> lk(m_posMtx);
-        
-        if (m_appendMode) {
-            struct stat st;
-            if (fstat(m_fd, &st) != 0) {
-                set_os_error("fstat failed");
-                resolve_exc(future, g_OSError, errno, "fstat failed");
-                return future;
-            }
-            offset = static_cast<uint64_t>(st.st_size);
-        } else {
-            offset = m_filePos;
+        if (position < 0) {
+            offset = m_appendMode ? m_cachedFileSize : m_filePos;
+            m_filePos = offset + size;
         }
-        m_filePos = offset + size;
+        if (offset + size > m_cachedFileSize)
+            m_cachedFileSize = offset + size;  // 乐观更新：假设写成功
     }
     
     IORequest* req = make_req(size, future, ReqType::Write);
@@ -597,12 +584,7 @@ PyObject* MacOSGCDBackend::seek(int64_t offset, int whence) {
         } else if (whence == 1) {
             new_pos = static_cast<int64_t>(m_filePos) + offset;
         } else if (whence == 2) {
-            struct stat st;
-            if (fstat(m_fd, &st) != 0) {
-                resolve_exc(future, g_OSError, errno, "fstat failed");
-                return future;
-            }
-            new_pos = static_cast<int64_t>(st.st_size) + offset;
+            new_pos = static_cast<int64_t>(m_cachedFileSize) + offset;
         } else {
             resolve_exc(future, g_ValueError, 0, "Invalid whence value");
             return future;
@@ -695,17 +677,20 @@ void MacOSGCDBackend::close_impl() {
         return;
     }
     
-    int elapsed = 0;
-    int wait_time = 1;
-    while (elapsed < static_cast<int>(m_cached_close_timeout_ms) &&
-           m_pending.load(std::memory_order_acquire) > 0) {
-        UR_DEBUG_LOG("MacOSGCDBackend::close_impl waiting for pending I/O, elapsed=%d, pending=%ld",
-                     elapsed, m_pending.load());
+    // 等待 pending I/O 排空：完成路径会 release m_close_wake，收到信号
+    // 立即醒来复查，不再 sleep 指数退避轮询（close 延迟从平均 ~16ms 降到即时）
+    auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(m_cached_close_timeout_ms);
+    while (m_pending.load(std::memory_order_acquire) > 0) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) break;
+        auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        if (remain.count() == 0) break;
+        UR_DEBUG_LOG("MacOSGCDBackend::close_impl waiting for pending I/O, pending=%ld",
+                     m_pending.load());
         Py_BEGIN_ALLOW_THREADS  // Release GIL so GCD callbacks can complete
-        std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
+        m_close_wake.try_acquire_for(remain);
         Py_END_ALLOW_THREADS    // Reacquire GIL
-        elapsed += wait_time;
-        wait_time = std::min(wait_time * 2, 32);
     }
     
     if (m_pending.load() > 0) {
@@ -788,6 +773,7 @@ PyObject* MacOSGCDBackend::truncate(int64_t size) {
     
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
+        m_cachedFileSize = static_cast<uint64_t>(size);
         if (static_cast<uint64_t>(size) < m_filePos) {
             m_filePos = static_cast<uint64_t>(size);
         }
@@ -829,13 +815,7 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
     size_t readSize;
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
-        struct stat st;
-        if (fstat(m_fd, &st) != 0) {
-            PyBuffer_Release(&view);
-            resolve_exc(future, g_OSError, errno, "fstat failed");
-            return future;
-        }
-        int64_t rem = static_cast<int64_t>(st.st_size) - static_cast<int64_t>(m_filePos);
+        int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
         if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject* z = PyLong_FromLong(0);
@@ -872,5 +852,7 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
     
     return future;
 }
+
+} // namespace ayafileio
 
 #endif // __APPLE__

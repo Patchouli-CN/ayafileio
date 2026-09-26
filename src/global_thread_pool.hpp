@@ -13,6 +13,8 @@
 #define AYAFILEIO_HAS_JTHREAD 1
 #endif
 
+namespace ayafileio {
+
 class GlobalThreadPool {
 public:
     static GlobalThreadPool& instance();
@@ -39,3 +41,5 @@ private:
     std::atomic<unsigned> m_running_workers{0};
     std::atomic<bool> m_stop{false};
 };
+
+} // namespace ayafileio

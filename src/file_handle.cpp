@@ -1,4 +1,4 @@
-﻿#include "file_handle.hpp"
+#include "file_handle.hpp"
 #ifdef _WIN32
 #include "backends/windows_io_backend.hpp"
 #elif defined(__APPLE__)
@@ -10,6 +10,8 @@
 #endif
 #include "backends/thread_io_backend.hpp"
 #endif
+
+namespace ayafileio {
 
 // 从路径文件打开
 FileHandle::FileHandle(const std::string &path, const std::string &mode) {
@@ -86,3 +88,5 @@ FileHandle::FileHandle(int fd, const std::string& mode, bool owns_fd) {
     m_backend = new ThreadIOBackend(fd, mode, owns_fd);
 #endif
 }
+
+} // namespace ayafileio

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <chrono>
 
+namespace ayafileio {
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTAINING_RECORD — safe cast from OVERLAPPED* to IORequest*
 // IORequest::ov is the first member, but we use the macro for robustness.
@@ -403,10 +405,16 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
 
         switch (req->type) {
         case ReqType::Read:
-            if (req->isReadinto)
+            if (req->isReadinto) {
                 val = PyLong_FromSsize_t((Py_ssize_t)bytes);
-            else
+            } else if (req->preResult && (size_t)bytes == req->reqSize) {
+                // 零拷贝：预建的 PyBytes 直接作为结果
+                val = req->preResult;
+                req->preResult = nullptr;
+            } else {
+                // 短读：拷贝实际字节数，preResult 随 req 释放
                 val = PyBytes_FromStringAndSize(req->buf(), (Py_ssize_t)bytes);
+            }
             break;
         case ReqType::Write:
             val = PyLong_FromSsize_t((Py_ssize_t)bytes);
@@ -482,7 +490,12 @@ IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
     req->reqSize = size;
     req->type    = type;
 
-    if (size <= buf_size)
+    if (type == ReqType::Read) {
+        // 零拷贝读：直接读进预建的 PyBytes，完成时它就是结果对象，
+        // 省一次完整数据拷贝。OOM 返回 nullptr（MemoryError 已设置）。
+        req->preResult = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)size);
+        if (!req->preResult) { TRACKED_DELETE(req); return nullptr; }
+    } else if (size <= buf_size)
         req->poolBuf = pool_acquire_with_size(size);
     else
         req->heapBuf = static_cast<char *>(std::malloc(size));
@@ -627,6 +640,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
 
     IORequest *req = make_req_iocp(readSize, future, ReqType::Read,
                                    s->cached_buffer_size, s->cached_buffer_pool_max);
+    if (!req) { Py_DECREF(future); return nullptr; }  // MemoryError
     req->ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
     req->ov.OffsetHigh = (DWORD)(offset >> 32);
 
@@ -640,10 +654,19 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
         // Do NOT decrement pending here; the worker handles it so that
         // close() sees pending > 0 until all completions are drained.
         UR_DEBUG_LOG("submit_read SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
-        PyObject *val = PyBytes_FromStringAndSize(req->buf(), got);
-        PyObject *fn  = PyObject_GetAttr(future, g_str_set_result);
+        PyObject *val;
+        if ((size_t)got == readSize) {
+            // 零拷贝：预建的 PyBytes 直接作为结果
+            val = req->preResult;
+            req->preResult = nullptr;
+        } else {
+            // 短读：拷贝实际字节数，preResult 随 req 由 worker 释放
+            val = PyBytes_FromStringAndSize(req->buf(), got);
+        }
+        PyObject *fn  = req->set_result;  // 提交时已预取，复用
+        req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
-        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(val);
+        Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         mark_sync_done(req);
     } else {
         DWORD err = GetLastError();
@@ -726,6 +749,7 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
 
     IORequest *req = make_req_iocp(readSize, future, ReqType::Read,
                                    s->cached_buffer_size, s->cached_buffer_pool_max);
+    if (!req) { Py_DECREF(future); return nullptr; }  // MemoryError
     req->ov.Offset     = (DWORD)(roffset & 0xFFFFFFFF);
     req->ov.OffsetHigh = (DWORD)(roffset >> 32);
 
@@ -739,10 +763,19 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
         // Do NOT decrement pending here; the worker handles it so that
         // close() sees pending > 0 until all completions are drained.
         UR_DEBUG_LOG("submit_read_at SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
-        PyObject *val = PyBytes_FromStringAndSize(req->buf(), got);
-        PyObject *fn  = PyObject_GetAttr(future, g_str_set_result);
+        PyObject *val;
+        if ((size_t)got == readSize) {
+            // 零拷贝：预建的 PyBytes 直接作为结果
+            val = req->preResult;
+            req->preResult = nullptr;
+        } else {
+            // 短读：拷贝实际字节数，preResult 随 req 由 worker 释放
+            val = PyBytes_FromStringAndSize(req->buf(), got);
+        }
+        PyObject *fn  = req->set_result;  // 提交时已预取，复用
+        req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
-        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(val);
+        Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         mark_sync_done(req);
     } else {
         DWORD err = GetLastError();
@@ -838,6 +871,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
 
     IORequest *req = make_req_iocp(wsize, future, ReqType::Write,
                                    s->cached_buffer_size, s->cached_buffer_pool_max);
+    if (!req) { Py_DECREF(future); return nullptr; }  // MemoryError
     memcpy(req->buf(), view->buf, wsize);
     req->ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
     req->ov.OffsetHigh = (DWORD)(offset >> 32);
@@ -852,9 +886,10 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
         // Do NOT decrement pending here; the worker handles it.
         UR_DEBUG_LOG("submit_write SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         PyObject *val = PyLong_FromSsize_t((Py_ssize_t)wrote);
-        PyObject *fn  = PyObject_GetAttr(future, g_str_set_result);
+        PyObject *fn  = req->set_result;  // 提交时已预取，复用
+        req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
-        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(val);
+        Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         mark_sync_done(req);
     } else {
         DWORD err = GetLastError();
@@ -1098,9 +1133,10 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
         // Do NOT decrement pending here; the worker handles it.
         UR_DEBUG_LOG("submit_readinto SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         PyObject *val = PyLong_FromSsize_t((Py_ssize_t)got);
-        PyObject *fn  = PyObject_GetAttr(future, g_str_set_result);
+        PyObject *fn  = req->set_result;  // 提交时已预取，复用
+        req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
-        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(val);
+        Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         mark_sync_done(req);
     } else {
         DWORD err = GetLastError();
@@ -1268,3 +1304,5 @@ void IOCPContext::close_all_sessions() {
     std::unique_lock<std::shared_mutex> lk(m_sessionsMtx);
     m_sessions.clear();
 }
+
+} // namespace ayafileio

@@ -4,6 +4,7 @@
 #include <liburing.h>
 #include <atomic>
 #include <mutex>
+#include <deque>
 #include <unordered_map>
 #include <memory>
 #include <thread>
@@ -14,13 +15,26 @@
 #include <poll.h>
 #include "utils/debug_log.hpp"
 
+namespace ayafileio {
+
 class IOUringBackend;
+struct IORequest;
 
 #define THREAD_ID_HASH() std::hash<std::thread::id>{}(std::this_thread::get_id())
 
 extern std::atomic<bool> g_uring_running;
 extern std::mutex g_uring_instances_mtx;
 extern std::unordered_map<void*, std::shared_ptr<struct UringInstance>> g_uring_instances;
+
+// 一个待提交的 I/O（原始字段形式，可安全跨线程传递）
+struct PendingSubmit {
+    IORequest*  req;
+    int         op;
+    int         fd;
+    const void* buf;
+    unsigned    len;
+    uint64_t    offset;
+};
 
 struct UringInstance {
     struct io_uring ring;
@@ -31,10 +45,17 @@ struct UringInstance {
     std::mutex start_mutex;
     PyObject* loop = nullptr;
     int event_fd = -1;
-    
+
     unsigned queue_depth = 256;
     unsigned flags = 0;
     bool sqpoll = false;
+
+    // SQ 提交序列化 + 溢出队列（背压）：
+    // io_uring 的 SQ 不是多线程安全的，所有 get_sqe/submit 都必须持
+    // submit_mtx。SQ 打满时不再给调用方报 EBUSY，而是排入 overflow，
+    // 由 reaper 在每次 CQE 排空后补提交（uring_drain_overflow）。
+    std::mutex submit_mtx;
+    std::deque<PendingSubmit> overflow;
     
     using ReaperFunc = void (*)(UringInstance*);
     ReaperFunc reaper_func = nullptr;
@@ -206,8 +227,18 @@ private:
         
         unsigned actual_flags = 0;
         if (inst->sqpoll) actual_flags |= IORING_SETUP_SQPOLL;
-        
-        int ret = io_uring_queue_init(inst->queue_depth, &inst->ring, actual_flags);
+
+        // 优先启用 5.19+ 的 COOP_TASKRUN + TASKRUN_FLAG：完成通过协作式
+        // task_work 递送，免去每个完成一次的软中断调度。旧内核不认这些
+        // flag 会返回 EINVAL，静默回退到无优化 flag。
+        // 注意：刻意不用 IORING_SETUP_SINGLE_ISSUER —— 提交来自多个
+        // Python 线程及 reaper 的溢出补提交，违反 single-issuer 约束。
+        int ret = io_uring_queue_init(inst->queue_depth, &inst->ring,
+                                      actual_flags | IORING_SETUP_COOP_TASKRUN
+                                                   | IORING_SETUP_TASKRUN_FLAG);
+        if (ret < 0) {
+            ret = io_uring_queue_init(inst->queue_depth, &inst->ring, actual_flags);
+        }
         if (ret < 0) {
             UR_LOG("UringManager::setup_instance: io_uring_queue_init failed, ret=%d, errno=%d", ret, errno);
             ::close(inst->event_fd);
@@ -253,5 +284,55 @@ inline UringManager& uring_manager() {
 inline void uring_cleanup_all() {
     UringManager::instance().cleanup_all();
 }
+
+// ── SQ 提交辅助（背压模式）────────────────────────────────────────────────
+// 全部须持 inst->submit_mtx 调用（除 uring_submit_or_queue / drain 自持锁）。
+
+inline void uring_prep_sqe(struct io_uring_sqe* sqe, const PendingSubmit& ps) {
+    if (ps.op == IORING_OP_READ) [[likely]]
+        io_uring_prep_read(sqe, ps.fd, const_cast<void*>(ps.buf), ps.len, ps.offset);
+    else if (ps.op == IORING_OP_WRITE) [[likely]]
+        io_uring_prep_write(sqe, ps.fd, ps.buf, ps.len, ps.offset);
+    else if (ps.op == IORING_OP_FSYNC)
+        io_uring_prep_fsync(sqe, ps.fd, 0);
+    io_uring_sqe_set_data(sqe, ps.req);
+}
+
+// 提交一个 I/O；SQ 满或已有排队项时排入溢出队列（保序），由 reaper 补提交
+inline void uring_submit_or_queue(UringInstance* inst, const PendingSubmit& ps) {
+    std::lock_guard<std::mutex> lk(inst->submit_mtx);
+    if (!inst->overflow.empty()) {
+        inst->overflow.push_back(ps);
+        return;
+    }
+    struct io_uring_sqe* sqe = io_uring_get_sqe(&inst->ring);
+    if (!sqe) {
+        inst->overflow.push_back(ps);
+        return;
+    }
+    uring_prep_sqe(sqe, ps);
+    io_uring_submit(&inst->ring);
+}
+
+// reaper 在每次 CQE 排空后调用：尽量把溢出队列补进 SQ
+inline void uring_drain_overflow(UringInstance* inst) {
+    std::lock_guard<std::mutex> lk(inst->submit_mtx);
+    bool prepared = false;
+    while (!inst->overflow.empty()) {
+        struct io_uring_sqe* sqe = io_uring_get_sqe(&inst->ring);
+        if (!sqe) {
+            if (!prepared) break;       // SQ 满且无可冲项 —— 下批 CQE 再试
+            io_uring_submit(&inst->ring);  // 冲掉已预备项，SQ 立即腾出
+            prepared = false;
+            continue;
+        }
+        uring_prep_sqe(sqe, inst->overflow.front());
+        inst->overflow.pop_front();
+        prepared = true;
+    }
+    if (prepared) io_uring_submit(&inst->ring);
+}
+
+} // namespace ayafileio
 
 #endif // HAVE_IO_URING

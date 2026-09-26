@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+namespace ayafileio {
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Session — per-file state owned by IOCPContext
 //
@@ -141,5 +143,7 @@ private:
     // without an active Python exception (which would surface as SystemError).
     PyObject* make_failed_future_no_session();
 };
+
+} // namespace ayafileio
 
 #endif // _WIN32

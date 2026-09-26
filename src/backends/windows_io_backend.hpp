@@ -4,6 +4,8 @@
 #include "../iocp_context.hpp"
 #include <string>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // §7  Windows IO Backend — lightweight forwarding layer
 //
@@ -41,3 +43,5 @@ public:
 private:
     uint64_t m_sessionId = 0;
 };
+
+} // namespace ayafileio

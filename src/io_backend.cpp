@@ -6,6 +6,8 @@
 #include "utils/yuyuko_memlife.hpp"
 #include <cstdlib>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // 静态辅助方法
 // ════════════════════════════════════════════════════════════════════════════
@@ -42,10 +44,22 @@ void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
     PyObject* val;
     switch (req->type) {
         case ReqType::Read:  [[likely]]
-            if (req->isReadinto) [[unlikely]]
+            if (req->isReadinto) [[unlikely]] {
                 val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
-            else
+            } else if (req->preResult) {
+                // 零拷贝快路径：数据已直接读进预建的 PyBytes
+                val = req->preResult;
+                req->preResult = nullptr;
+                if (static_cast<size_t>(bytes) < req->reqSize) [[unlikely]] {
+                    // 短读（文件在读期间被外部截短）：收缩到实际字节数
+                    PyObject* exact = PyBytes_FromStringAndSize(
+                        PyBytes_AS_STRING(val), static_cast<Py_ssize_t>(bytes));
+                    Py_DECREF(val);
+                    val = exact;
+                }
+            } else {
                 val = PyBytes_FromStringAndSize(req->buf(), static_cast<Py_ssize_t>(bytes));
+            }
             break;
         case ReqType::Write: [[likely]]
             val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
@@ -60,9 +74,13 @@ void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
     Py_DECREF(req->future); req->future = nullptr;
     Py_XDECREF(req->set_exception); req->set_exception = nullptr;
 
+    // 只在达到批量阈值或这是本 loop 最后一个在飞 op（计数归 0，短期
+    // 内不会再有新完成到达）时才 flush —— 不再为每个完成都付出一次
+    // call_soon_threadsafe，与 IOCP 路径行为一致。
+    bool last = req->batcher ? req->batcher->op_completed() : false;
     if (set_fn && val && req->batcher) {
-        req->batcher->push(set_fn, val);
-        req->batcher->flush();
+        bool threshold = req->batcher->push(set_fn, val);
+        if (threshold || last) [[unlikely]] req->batcher->flush();
     } else {
         Py_XDECREF(set_fn);
         Py_XDECREF(val);
@@ -94,9 +112,11 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
     Py_DECREF(req->future); req->future = nullptr;
     Py_XDECREF(req->set_result); req->set_result = nullptr;
 
+    // 与 complete_ok 相同的批量 flush 策略
+    bool last = req->batcher ? req->batcher->op_completed() : false;
     if (set_fn && exc && req->batcher) {
-        req->batcher->push(set_fn, exc);
-        req->batcher->flush();
+        bool threshold = req->batcher->push(set_fn, exc);
+        if (threshold || last) [[unlikely]] req->batcher->flush();
     } else {
         Py_XDECREF(set_fn);
         Py_XDECREF(exc);
@@ -114,6 +134,7 @@ IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) 
     auto* req = TRACKED_NEW(IORequest);
     req->file = this;
     req->batcher = m_batcher;
+    if (m_batcher) m_batcher->op_submitted();
     req->future = future;
     Py_INCREF(future);
     req->set_result = PyObject_GetAttr(future, g_str_set_result);
@@ -128,10 +149,30 @@ IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) 
     return req;
 }
 
+// 读专用：预建 PyBytes 作为读取目标缓冲，完成时零拷贝直接作为结果返回
+IORequest* IOBackendBase::make_req_read_bytes(size_t size, PyObject* future) {
+    PyObject* bytes = PyBytes_FromStringAndSize(nullptr, static_cast<Py_ssize_t>(size));
+    if (!bytes) return nullptr;  // MemoryError 已设置
+
+    auto* req = TRACKED_NEW(IORequest);
+    req->file = this;
+    req->batcher = m_batcher;
+    if (m_batcher) m_batcher->op_submitted();
+    req->future = future;
+    Py_INCREF(future);
+    req->set_result = PyObject_GetAttr(future, g_str_set_result);
+    // set_exception 不预取，同 make_req
+    req->reqSize = size;
+    req->type = ReqType::Read;
+    req->preResult = bytes;
+    return req;
+}
+
 IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size_t size, PyObject* future) {
     auto* req = TRACKED_NEW(IORequest);
     req->file = this;
     req->batcher = m_batcher;
+    if (m_batcher) m_batcher->op_submitted();
     req->future = future;
     Py_INCREF(future);
     req->set_result = PyObject_GetAttr(future, g_str_set_result);
@@ -155,6 +196,7 @@ IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size
 void IOBackendBase::complete_error_inline(IORequest* req, DWORD err) {
     m_pending.fetch_sub(1, std::memory_order_relaxed);
     m_close_wake.release();
+    if (req->batcher) req->batcher->op_completed();
     PyObject* exc_class;
 #ifdef _WIN32
     exc_class = map_win_error(static_cast<int>(err));
@@ -176,3 +218,5 @@ void IOBackendBase::complete_error_inline(IORequest* req, DWORD err) {
     Py_DECREF(exc);
     TRACKED_DELETE(req);
 }
+
+} // namespace ayafileio

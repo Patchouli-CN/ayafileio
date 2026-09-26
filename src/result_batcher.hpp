@@ -7,6 +7,8 @@
 #include <mutex>
 #include <vector>
 
+namespace ayafileio {
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BatchEntry — one pending future result
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,3 +114,5 @@ private:
 // ── Global batcher registry (one per event loop, for non-IOCP backends) ─────
 ResultBatcher *get_or_create_batcher(PyObject *loop);
 void clear_batchers();
+
+} // namespace ayafileio

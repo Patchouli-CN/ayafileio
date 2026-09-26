@@ -2,6 +2,8 @@
 #include "iocp_context.hpp"
 #include "config.hpp"
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // §4  IOCP entry points — delegate to IOCPContext singleton
 // ════════════════════════════════════════════════════════════════════════════
@@ -54,3 +56,5 @@ BOOL WINAPI ctrl_handler(DWORD t) {
     }
     return FALSE;
 }
+
+} // namespace ayafileio

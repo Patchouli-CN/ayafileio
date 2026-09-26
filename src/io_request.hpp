@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // §5  IORequest
 // ════════════════════════════════════════════════════════════════════════════
@@ -45,8 +47,14 @@ struct IORequest {
     Py_buffer      userBufView;             // 缓冲区的 Py_buffer（zeroed）
     bool           isReadinto    = false;   // 标记：是否为 readinto 请求
 
+    // 读零拷贝（owned）：非空时 I/O 直接读进这个预建的 PyBytes，
+    // 完成路径直接把它作为 future 结果返回，省一次完整数据拷贝。
+    // 短读（文件在读期间被外部截短）由完成路径负责收缩。
+    PyObject      *preResult     = nullptr;
+
     char *buf() noexcept {
         if (isReadinto && userBufView.buf) return (char*)userBufView.buf;
+        if (preResult) return PyBytes_AS_STRING(preResult);
         return poolBuf ? poolBuf->data : heapBuf;
     }
 
@@ -67,6 +75,7 @@ struct IORequest {
         Py_XDECREF(future);
         Py_XDECREF(set_result);
         Py_XDECREF(set_exception);
+        Py_XDECREF(preResult);
         if (isReadinto && userBufView.buf) {
             PyBuffer_Release(&userBufView);
         }
@@ -75,3 +84,5 @@ struct IORequest {
         else if (!isReadinto && heapBuf) std::free(heapBuf);
     }
 };
+
+} // namespace ayafileio

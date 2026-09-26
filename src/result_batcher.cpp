@@ -3,7 +3,7 @@
 #include <nanobind/nanobind.h>
 #include <cmath>
 
-namespace py = nanobind;
+namespace ayafileio {
 
 ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
                              unsigned idle_timeout_ms)
@@ -320,3 +320,5 @@ void clear_batchers() {
     for (auto &kv : g_batchers) delete kv.second;
     g_batchers.clear();
 }
+
+} // namespace ayafileio

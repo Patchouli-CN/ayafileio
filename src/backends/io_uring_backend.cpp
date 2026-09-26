@@ -14,6 +14,9 @@
 #include <cstring>
 #include <chrono>
 #include <thread>
+#include <vector>
+
+namespace ayafileio {
 
 // ════════════════════════════════════════════════════════════════════════════
 // 全局缓存
@@ -207,7 +210,7 @@ void IOUringBackend::ensure_loop_initialized() {
 
 void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
     struct io_uring_cqe* cqe = nullptr;
-    
+
     while (!inst->reaper_stop.load(std::memory_order_acquire)) {
         int ret = io_uring_wait_cqe(&inst->ring, &cqe);
         if (ret == -EEXIST || ret == -EINTR) continue;
@@ -215,41 +218,57 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
 
         unsigned head;
         unsigned count = 0;
+        bool saw_wakeup = false;
 
+        // 第一遍：摘出本批完成（不持 GIL，纯指针搬运）
+        std::vector<std::pair<IORequest*, int>> done;
         io_uring_for_each_cqe(&inst->ring, head, cqe) {
             IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
-            if (req) {
-                auto* file = static_cast<IOUringBackend*>(req->file);
-                if (cqe->res >= 0) {
-                    file->complete_ok(req, static_cast<size_t>(cqe->res));
-                } else {
-                    file->complete_error(req, static_cast<DWORD>(-cqe->res));
-                }
-            } else {
-                // eventfd / timeout wakeup — re-submit poll so shutdown can wake us
-                bool stop = inst->reaper_stop.load(std::memory_order_acquire);
-                if (!stop) {
-                    struct io_uring_sqe* sqe = io_uring_get_sqe(&inst->ring);
-                    if (sqe) {
-                        io_uring_prep_poll_add(sqe, inst->event_fd, POLLIN);
-                        io_uring_sqe_set_data(sqe, nullptr);
-                    } else {
-                        // Ring full: fallback to a 1 s timeout so io_uring_wait_cqe
-                        // cannot block forever even if the poll SQE was lost.
-                        struct __kernel_timespec ts = {1, 0};
-                        sqe = io_uring_get_sqe(&inst->ring);
-                        if (sqe) {
-                            io_uring_prep_timeout(sqe, &ts, 0, 0);
-                            io_uring_sqe_set_data(sqe, nullptr);
-                        }
-                    }
-                    io_uring_submit(&inst->ring);
-                }
-            }
+            if (req)
+                done.emplace_back(req, cqe->res);
+            else
+                saw_wakeup = true;  // eventfd / timeout wakeup
             count++;
         }
 
         if (count > 0) io_uring_cq_advance(&inst->ring, count);
+
+        // SQ 可能已腾出空间：补提交溢出队列里的背压请求
+        uring_drain_overflow(inst);
+
+        if (saw_wakeup && !inst->reaper_stop.load(std::memory_order_acquire)) {
+            // 重新武装 eventfd poll，保证 shutdown 能再次唤醒我们（无需 GIL）
+            std::lock_guard<std::mutex> lk(inst->submit_mtx);
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&inst->ring);
+            if (sqe) {
+                io_uring_prep_poll_add(sqe, inst->event_fd, POLLIN);
+                io_uring_sqe_set_data(sqe, nullptr);
+            } else {
+                // Ring full: fallback to a 1 s timeout so io_uring_wait_cqe
+                // cannot block forever even if the poll SQE was lost.
+                struct __kernel_timespec ts = {1, 0};
+                sqe = io_uring_get_sqe(&inst->ring);
+                if (sqe) {
+                    io_uring_prep_timeout(sqe, &ts, 0, 0);
+                    io_uring_sqe_set_data(sqe, nullptr);
+                }
+            }
+            if (sqe) io_uring_submit(&inst->ring);
+        }
+
+        // 第二遍：一次持 GIL 处理整批完成（complete_ok 内部的
+        // PyGILState_Ensure 是嵌套计数，无害），与 IOCP worker 同款节奏
+        if (!done.empty()) {
+            PyGILState_STATE gs = PyGILState_Ensure();
+            for (auto& [req, res] : done) {
+                auto* file = static_cast<IOUringBackend*>(req->file);
+                if (res >= 0)
+                    file->complete_ok(req, static_cast<size_t>(res));
+                else
+                    file->complete_error(req, static_cast<DWORD>(-res));
+            }
+            PyGILState_Release(gs);
+        }
     }
 }
 
@@ -260,22 +279,16 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
 void IOUringBackend::submit_io(IORequest* req, int op, int fd,
                                 std::span<const std::byte> data, off_t offset) {
     if (!m_uring) { complete_error(req, EINVAL); return; }
-
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&m_uring->ring);
-    if (!sqe) { complete_error(req, EBUSY); return; }
-
-    void* wbuf = const_cast<std::byte*>(data.data());
-    auto len = static_cast<unsigned>(data.size());
-    if (op == IORING_OP_READ) [[likely]]
-        io_uring_prep_read(sqe, fd, wbuf, len, offset);
-    else if (op == IORING_OP_WRITE) [[likely]]
-        io_uring_prep_write(sqe, fd, wbuf, len, offset);
-    else if (op == IORING_OP_FSYNC)
-        io_uring_prep_fsync(sqe, fd, 0);
-    else { complete_error(req, EINVAL); return; }
-
-    io_uring_sqe_set_data(sqe, req);
-    io_uring_submit(&m_uring->ring);
+    if (op != IORING_OP_READ && op != IORING_OP_WRITE && op != IORING_OP_FSYNC) {
+        complete_error(req, EINVAL);
+        return;
+    }
+    // SQ 满时排入溢出队列（背压），由 reaper 在 CQE 排空后补提交 ——
+    // 高负载下不再对用户报虚假的 EBUSY
+    uring_submit_or_queue(m_uring.get(), PendingSubmit{
+        req, op, fd, data.data(),
+        static_cast<unsigned>(data.size()),
+        static_cast<uint64_t>(offset)});
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -308,7 +321,8 @@ PyObject* IOUringBackend::read(int64_t size) {
         m_filePos += readSize;
     }
 
-    IORequest* req = make_req(readSize, future, ReqType::Read);
+    IORequest* req = make_req_read_bytes(readSize, future);
+    if (!req) [[unlikely]] { Py_DECREF(future); return nullptr; }  // MemoryError
     m_pending.fetch_add(1, std::memory_order_relaxed);
     submit_io(req, IORING_OP_READ, m_fd,
               std::as_bytes(std::span{req->buf(), readSize}), static_cast<off_t>(offset));
@@ -345,7 +359,8 @@ PyObject* IOUringBackend::read_at(int64_t offset, int64_t size) {
         if (readSize == 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
     }
 
-    IORequest* req = make_req(readSize, future, ReqType::Read);
+    IORequest* req = make_req_read_bytes(readSize, future);
+    if (!req) [[unlikely]] { Py_DECREF(future); return nullptr; }  // MemoryError
     m_pending.fetch_add(1, std::memory_order_relaxed);
     // io_uring_prep_read 显式偏移，不动文件指针
     submit_io(req, IORING_OP_READ, m_fd,
@@ -606,5 +621,7 @@ PyObject* IOUringBackend::readinto(PyObject* buf) {
               static_cast<off_t>(offset));
     return future;
 }
+
+} // namespace ayafileio
 
 #endif // HAVE_IO_URING

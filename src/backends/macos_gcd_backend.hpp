@@ -11,6 +11,8 @@
 #include <memory>
 #include <vector>
 
+namespace ayafileio {
+
 class MacOSGCDBackend : public IOBackendBase {
 public:
     MacOSGCDBackend(const std::string& path, const std::string& mode);
@@ -36,6 +38,7 @@ private:
     std::atomic<bool> m_running{false};
     std::mutex m_posMtx;
     uint64_t m_filePos = 0;
+    uint64_t m_cachedFileSize = 0;  // open 时缓存，写/截断路径乐观更新
     bool m_appendMode = false;
     std::string m_path;
     
@@ -47,5 +50,7 @@ private:
     
     void ensure_loop_initialized();
 };
+
+} // namespace ayafileio
 
 #endif // __APPLE__

@@ -7,7 +7,7 @@
 #include <filesystem>
 #include "config.hpp"
 
-namespace py = nanobind; 
+namespace ayafileio {
 
 static std::shared_mutex                                           g_hpMtx;
 static std::unordered_map<PoolKey, std::vector<HANDLE>, PoolKeyHash> g_hpMap;
@@ -102,3 +102,5 @@ PoolKey make_pool_key(const std::string &path, DWORD access, DWORD disp) {
     
     return PoolKey{std::move(canon), access, disp};
 }
+
+} // namespace ayafileio

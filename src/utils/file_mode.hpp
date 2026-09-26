@@ -2,6 +2,8 @@
 #include <string>
 #include <stdexcept>
 
+namespace ayafileio {
+
 struct ModeInfo {
     bool canRead = false;
     bool canWrite = false;
@@ -31,3 +33,5 @@ inline ModeInfo parse_mode(const std::string &mode) {
 
     return mi;
 }
+
+} // namespace ayafileio

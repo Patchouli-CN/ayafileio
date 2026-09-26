@@ -11,6 +11,8 @@
 #include <mutex>
 #include <memory>
 
+namespace ayafileio {
+
 class IOUringBackend : public IOBackendBase {
 public:
     IOUringBackend(const std::string& path, const std::string& mode);
@@ -52,5 +54,7 @@ private:
     void ensure_loop_initialized();
     void submit_io(IORequest* req, int op, int fd, std::span<const std::byte> data, off_t offset);
 };
+
+} // namespace ayafileio
 
 #endif // HAVE_IO_URING

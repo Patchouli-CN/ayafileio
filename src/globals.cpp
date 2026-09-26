@@ -1,5 +1,7 @@
 #include "globals.hpp"
 
+namespace ayafileio {
+
 PyObject *g_OSError           = nullptr;
 PyObject *g_FileNotFoundError = nullptr;
 PyObject *g_FileExistsError   = nullptr;
@@ -88,3 +90,5 @@ void cache_globals() {
     throw py::python_error();
 }
 #endif
+
+} // namespace ayafileio

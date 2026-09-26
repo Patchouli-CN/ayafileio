@@ -8,6 +8,8 @@
 #include <algorithm>
 #include "config.hpp"
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // §2  Buffer pool (按大小分桶，支持动态配置)
 // ════════════════════════════════════════════════════════════════════════════
@@ -143,3 +145,5 @@ inline void pool_release(PoolBuf* p) {
 inline void pool_clear() {
     BufferPool::instance().clear();
 }
+
+} // namespace ayafileio

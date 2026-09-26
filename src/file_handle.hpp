@@ -3,6 +3,8 @@
 #include "io_backend.hpp"
 #include <string>
 
+namespace ayafileio {
+
 // ════════════════════════════════════════════════════════════════════════════
 // §6  FileHandle
 // ════════════════════════════════════════════════════════════════════════════
@@ -31,3 +33,5 @@ public:
 private:
     IOBackendBase* m_backend = nullptr;
 };
+
+} // namespace ayafileio

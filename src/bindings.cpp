@@ -20,7 +20,8 @@
 #include "pool.hpp"
 #include "global_thread_pool.hpp"
 
-// nanobind bindings
+// nanobind bindings — 实现全部位于 namespace ayafileio，此处引入
+using namespace ayafileio;
 
 struct PyAsyncFile {
     FileHandle *fh;
