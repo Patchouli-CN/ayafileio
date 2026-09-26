@@ -38,6 +38,12 @@ struct Session {
     bool            owns_fd = true;
     PoolKey         poolKey;
 
+    // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 是否成功启用。
+    // 启用时同步完成的 op 不再投递 IOCP 完成包：提交线程必须自己递减
+    // pending 并回收 req（worker 永远见不到它们）。设置失败则维持
+    // 旧行为（worker 收包排水），两条路径严格二选一，否则会重复递减。
+    bool            skipCPOnSuccess = false;
+
     // Cached file state (avoids GetFileSizeEx syscall on every read)
     uint64_t        cachedFileSize = 0;  // updated on write/truncate, read under posMtx
 

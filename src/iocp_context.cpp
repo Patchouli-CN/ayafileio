@@ -43,7 +43,7 @@ static void quarantine_drain() {
     auto it = t_quarantine.begin();
     while (it != t_quarantine.end()) {
         if (now - it->when >= std::chrono::milliseconds(QUARANTINE_MS)) {
-            TRACKED_DELETE(it->req);
+            REQ_FREE(it->req);
             it = t_quarantine.erase(it);
         } else {
             ++it;
@@ -196,8 +196,8 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
         Py_DECREF(create_future);
         win_throw_os_error(err, "Failed to associate handle with IOCP");
     }
-    SetFileCompletionNotificationModes(h,
-        FILE_SKIP_SET_EVENT_ON_HANDLE);
+    s->skipCPOnSuccess = SetFileCompletionNotificationModes(h,
+        FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) != 0;
 
     // Cache initial file size — avoids GetFileSizeEx syscall on every read
     {
@@ -479,7 +479,7 @@ namespace {
 
 IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
                          size_t buf_size, size_t /*pool_max*/) {
-    auto *req = TRACKED_NEW(IORequest);
+    auto *req = REQ_ALLOC();
     req->file        = nullptr;   // not used — completion routed via sessionId
     req->batcher = nullptr;   // not used — batcher handles dispatch
     req->future      = future;
@@ -494,7 +494,7 @@ IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
         // 零拷贝读：直接读进预建的 PyBytes，完成时它就是结果对象，
         // 省一次完整数据拷贝。OOM 返回 nullptr（MemoryError 已设置）。
         req->preResult = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)size);
-        if (!req->preResult) { TRACKED_DELETE(req); return nullptr; }
+        if (!req->preResult) { REQ_FREE(req); return nullptr; }
     } else if (size <= buf_size)
         req->poolBuf = pool_acquire_with_size(size);
     else
@@ -506,7 +506,7 @@ IORequest *make_req_iocp(size_t size, PyObject *future, ReqType type,
 
 IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
                                   PyObject *future) {
-    auto *req = TRACKED_NEW(IORequest);
+    auto *req = REQ_ALLOC();
     req->file        = nullptr;
     req->batcher = nullptr;
     req->future      = future;
@@ -528,7 +528,7 @@ IORequest *make_req_readinto_iocp(PyObject *buf, Py_buffer *view, size_t size,
 // 的视图不影响我们），WriteFile 直接读用户内存，省一次完整拷贝。
 // 失败返回 nullptr（Python 异常已设置）。
 IORequest *make_req_write_iocp_held(Py_buffer *view, PyObject *future) {
-    auto *req = TRACKED_NEW(IORequest);
+    auto *req = REQ_ALLOC();
     req->file        = nullptr;
     req->batcher     = nullptr;
     req->future      = future;
@@ -540,7 +540,7 @@ IORequest *make_req_write_iocp_held(Py_buffer *view, PyObject *future) {
     req->holdsWriteBuf = true;
 
     if (PyObject_GetBuffer(view->obj, &req->userBufView, PyBUF_SIMPLE) < 0) {
-        TRACKED_DELETE(req);
+        REQ_FREE(req);
         return nullptr;
     }
     req->userBuf = view->obj;
@@ -676,9 +676,9 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
     DWORD got = 0;
     BOOL ok = ReadFile(s->handle, req->buf(), (DWORD)readSize, &got, &req->ov);
     if (ok) {
-        // Synchronous completion — resolve inline, delete by IOCP worker.
-        // Do NOT decrement pending here; the worker handles it so that
-        // close() sees pending > 0 until all completions are drained.
+        // Synchronous completion — resolve inline.
+        // skipCPOnSuccess 启用时内核不投完成包，由提交线程全权收尾；
+        // 否则完成包到达后由 worker 递减 pending 并回收 req。
         UR_DEBUG_LOG("submit_read SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         PyObject *val;
         if ((size_t)got == readSize) {
@@ -693,7 +693,16 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
         req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
-        mark_sync_done(req);
+        if (s->skipCPOnSuccess) {
+            // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
+            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            s->pending.fetch_sub(1, std::memory_order_release);
+            mark_sync_done(req);
+            REQ_FREE(req);
+        } else {
+            // 回退路径：完成包仍会到达，worker 递减 pending 并回收 req
+            mark_sync_done(req);
+        }
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
@@ -705,7 +714,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            TRACKED_DELETE(req);
+            REQ_FREE(req);
         } else {
             UR_DEBUG_LOG("submit_read ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }
@@ -785,9 +794,9 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
     DWORD got = 0;
     BOOL ok = ReadFile(s->handle, req->buf(), (DWORD)readSize, &got, &req->ov);
     if (ok) {
-        // Synchronous completion — resolve inline, delete by IOCP worker.
-        // Do NOT decrement pending here; the worker handles it so that
-        // close() sees pending > 0 until all completions are drained.
+        // Synchronous completion — resolve inline.
+        // skipCPOnSuccess 启用时内核不投完成包，由提交线程全权收尾；
+        // 否则完成包到达后由 worker 递减 pending 并回收 req。
         UR_DEBUG_LOG("submit_read_at SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         PyObject *val;
         if ((size_t)got == readSize) {
@@ -802,7 +811,16 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
         req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
-        mark_sync_done(req);
+        if (s->skipCPOnSuccess) {
+            // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
+            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            s->pending.fetch_sub(1, std::memory_order_release);
+            mark_sync_done(req);
+            REQ_FREE(req);
+        } else {
+            // 回退路径：完成包仍会到达，worker 递减 pending 并回收 req
+            mark_sync_done(req);
+        }
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
@@ -814,7 +832,7 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            TRACKED_DELETE(req);
+            REQ_FREE(req);
         } else {
             UR_DEBUG_LOG("submit_read_at ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }
@@ -906,15 +924,25 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
     DWORD wrote = 0;
     BOOL ok = WriteFile(s->handle, req->buf(), (DWORD)wsize, &wrote, &req->ov);
     if (ok) {
-        // Synchronous completion — resolve inline, delete by IOCP worker.
-        // Do NOT decrement pending here; the worker handles it.
+        // Synchronous completion — resolve inline.
+        // skipCPOnSuccess 启用时内核不投完成包，由提交线程全权收尾；
+        // 否则完成包到达后由 worker 递减 pending 并回收 req。
         UR_DEBUG_LOG("submit_write SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         PyObject *val = PyLong_FromSsize_t((Py_ssize_t)wrote);
         PyObject *fn  = req->set_result;  // 提交时已预取，复用
         req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
-        mark_sync_done(req);
+        if (s->skipCPOnSuccess) {
+            // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
+            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            s->pending.fetch_sub(1, std::memory_order_release);
+            mark_sync_done(req);
+            REQ_FREE(req);
+        } else {
+            // 回退路径：完成包仍会到达，worker 递减 pending 并回收 req
+            mark_sync_done(req);
+        }
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
@@ -926,7 +954,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            TRACKED_DELETE(req);
+            REQ_FREE(req);
         } else {
             UR_DEBUG_LOG("submit_write ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }
@@ -1153,15 +1181,25 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
     DWORD got = 0;
     BOOL ok = ReadFile(s->handle, view.buf, (DWORD)readSize, &got, &req->ov);
     if (ok) {
-        // Synchronous completion — resolve inline, delete by IOCP worker.
-        // Do NOT decrement pending here; the worker handles it.
+        // Synchronous completion — resolve inline.
+        // skipCPOnSuccess 启用时内核不投完成包，由提交线程全权收尾；
+        // 否则完成包到达后由 worker 递减 pending 并回收 req。
         UR_DEBUG_LOG("submit_readinto SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         PyObject *val = PyLong_FromSsize_t((Py_ssize_t)got);
         PyObject *fn  = req->set_result;  // 提交时已预取，复用
         req->set_result = nullptr;
         PyObject *r   = PyObject_CallFunctionObjArgs(fn, val, nullptr);
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
-        mark_sync_done(req);
+        if (s->skipCPOnSuccess) {
+            // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
+            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            s->pending.fetch_sub(1, std::memory_order_release);
+            mark_sync_done(req);
+            REQ_FREE(req);
+        } else {
+            // 回退路径：完成包仍会到达，worker 递减 pending 并回收 req
+            mark_sync_done(req);
+        }
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
@@ -1173,7 +1211,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
             PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             req->state.store(IOState::REJECTED, std::memory_order_relaxed);
-            TRACKED_DELETE(req);
+            REQ_FREE(req);
         } else {
             UR_DEBUG_LOG("submit_readinto ASYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
         }

@@ -85,7 +85,7 @@ void IOBackendBase::complete_ok(IORequest* req, size_t bytes) {
         Py_XDECREF(set_fn);
         Py_XDECREF(val);
     }
-    TRACKED_DELETE(req);
+    REQ_FREE(req);
 
     PyGILState_Release(gs);
 }
@@ -121,7 +121,7 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
         Py_XDECREF(set_fn);
         Py_XDECREF(exc);
     }
-    TRACKED_DELETE(req);
+    REQ_FREE(req);
 
     PyGILState_Release(gs);
 }
@@ -131,7 +131,7 @@ void IOBackendBase::complete_error(IORequest* req, DWORD err) {
 // ════════════════════════════════════════════════════════════════════════════
 
 IORequest* IOBackendBase::make_req(size_t size, PyObject* future, ReqType type) {
-    auto* req = TRACKED_NEW(IORequest);
+    auto* req = REQ_ALLOC();
     req->file = this;
     req->batcher = m_batcher;
     if (m_batcher) m_batcher->op_submitted();
@@ -154,7 +154,7 @@ IORequest* IOBackendBase::make_req_read_bytes(size_t size, PyObject* future) {
     PyObject* bytes = PyBytes_FromStringAndSize(nullptr, static_cast<Py_ssize_t>(size));
     if (!bytes) return nullptr;  // MemoryError 已设置
 
-    auto* req = TRACKED_NEW(IORequest);
+    auto* req = REQ_ALLOC();
     req->file = this;
     req->batcher = m_batcher;
     if (m_batcher) m_batcher->op_submitted();
@@ -170,7 +170,7 @@ IORequest* IOBackendBase::make_req_read_bytes(size_t size, PyObject* future) {
 
 // 零拷贝写：持有调用方缓冲区视图，I/O 直接读用户内存
 IORequest* IOBackendBase::make_req_held_write(Py_buffer* view, PyObject* future) {
-    auto* req = TRACKED_NEW(IORequest);
+    auto* req = REQ_ALLOC();
     req->file = this;
     req->batcher = m_batcher;
     if (m_batcher) m_batcher->op_submitted();
@@ -185,7 +185,7 @@ IORequest* IOBackendBase::make_req_held_write(Py_buffer* view, PyObject* future)
     // 那份 Py_buffer，我们必须持有独立的视图引用
     if (PyObject_GetBuffer(view->obj, &req->userBufView, PyBUF_SIMPLE) < 0) {
         if (m_batcher) m_batcher->op_completed();
-        TRACKED_DELETE(req);
+        REQ_FREE(req);
         return nullptr;
     }
     req->userBuf = view->obj;
@@ -194,7 +194,7 @@ IORequest* IOBackendBase::make_req_held_write(Py_buffer* view, PyObject* future)
 }
 
 IORequest* IOBackendBase::make_req_readinto(PyObject* buf, Py_buffer* view, size_t size, PyObject* future) {
-    auto* req = TRACKED_NEW(IORequest);
+    auto* req = REQ_ALLOC();
     req->file = this;
     req->batcher = m_batcher;
     if (m_batcher) m_batcher->op_submitted();
@@ -241,7 +241,7 @@ void IOBackendBase::complete_error_inline(IORequest* req, DWORD err) {
     }
     Py_XDECREF(set_fn);
     Py_DECREF(exc);
-    TRACKED_DELETE(req);
+    REQ_FREE(req);
 }
 
 } // namespace ayafileio
