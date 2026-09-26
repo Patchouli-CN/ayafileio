@@ -1,327 +1,391 @@
 #!/usr/bin/env python3
 """
-ayafileio vs aiofiles — stress-test comparison
-Proves the difference between true kernel async and thread-pool async under extreme concurrency.
+ayafileio vs aiofiles — cross-platform benchmark (Windows / Linux / macOS).
 
-!!! Safety guards:
-    - aiofiles concurrency capped at 200 (thread pool can't handle 10K)
-    - Total tasks reduced to 50K (avoids thread explosion)
-    - 60s hard timeout (prevents system lockup)
-    - Batch task creation (avoids creating 50K coroutines at once)
+Methodology:
+  - Time-boxed rounds instead of fixed op counts: each measurement runs
+    ~ROUND_SECONDS, so total runtime stays bounded on any machine.
+  - One warmup + ROUNDS measured rounds per cell, median reported.
+    Backends are interleaved round-by-round so page-cache state and
+    machine load are shared fairly.
+  - Concurrent scenarios use positioned I/O (read_at) or one handle per
+    worker — never seek+read on a shared handle, which races by design.
+  - Results are written to benchmark_results.json (summary) and
+    benchmark_results_detailed.json (all raw rounds) in the CWD,
+    which the CI benchmark job uploads as artifacts.
 
-Usage:
-    pip install aiofiles
-    python t_compare.py
+Scenarios:
+  A. seq_read        sequential whole-file read, several chunk sizes (MB/s)
+  B. seq_write       sequential file write, several chunk sizes (MB/s)
+  C. small_read      sequential 4 KiB reads, per-op overhead (ops/s)
+  D. rand_read_own   random 4 KiB positioned reads, one handle per worker (ops/s)
+  E. rand_read_at    random 4 KiB read_at on a single shared handle,
+                     ayafileio only — aiofiles has no positioned I/O (ops/s)
+
+aiofiles is opened with its defaults (buffered), ayafileio is unbuffered;
+this reflects what a user gets out of the box from each library.
 """
 
 import asyncio
 import io
-import locale
+import json
 import os
+import platform
+import random
+import statistics
 import sys
 import tempfile
 import time
-from collections import Counter
 
-# Windows console: force UTF-8 so box-drawing chars don't crash on cp1252 terminals
+# Windows console/CI: force UTF-8 so non-ASCII output doesn't garble on cp1252
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-try:
-    import ayafileio
-except ImportError:
-    print("Please install ayafileio: pip install ayafileio  /  pip install ayafileio")
-    raise SystemExit(1)
+import ayafileio
 
 try:
     import aiofiles
+    HAS_AIOFILES = True
 except ImportError:
-    print("Please install aiofiles: pip install aiofiles  /  pip install aiofiles")
-    raise SystemExit(1)
+    HAS_AIOFILES = False
 
-# ═══════════════════════════════════════════════════════════
-# Locale detection
-# ═══════════════════════════════════════════════════════════
+# ── Tuning ──────────────────────────────────────────────────────────────────
+FILE_SIZE = 256 * 1024 * 1024          # shared data file for read scenarios
+PREP_CHUNK = 4 * 1024 * 1024
+ROUND_SECONDS = 1.0                    # measured time per round
+WARMUP_SECONDS = 0.3
+ROUNDS = 3
+HARD_CAP_SECONDS = 30                  # per-round kill switch, never hit in practice
 
-def _detect_lang() -> str:
-    """Return 'zh' or 'en' based on environment locale."""
-    for src in (os.environ.get("LANG", ""),
-                os.environ.get("LC_ALL", ""),
-                os.environ.get("LANGUAGE", "")):
-        if src.lower().startswith("zh"):
-            return "zh"
-    try:
-        lc = locale.getlocale()[0]
-        if lc and lc.lower().startswith("zh"):
-            return "zh"
-    except (ValueError, locale.Error):
-        pass
-    return "en"
-
-LANG = _detect_lang()
-
-_T = {
-    "en": {
-        "title":          "ayafileio vs aiofiles — comparison",
-        "requires_aya":   "Please install ayafileio: pip install ayafileio",
-        "requires_aio":   "Please install aiofiles: pip install aiofiles",
-        "total_tasks":    "total tasks",
-        "concurrency":    "concurrency",
-        "hard_timeout":   "hard timeout",
-        "mem_limit":      "memory limit",
-        "backend_aya":    "ayafileio",
-        "backend_aio":    "aiofiles",
-        "truly_async":    "truly async",
-        "test":           "Test",
-        "progress":       "Progress",
-        "results":        "Results",
-        "success":        "success",
-        "elapsed":        "elapsed",
-        "throughput":     "throughput",
-        "error_breakdown":"Error breakdown",
-        "errors":         "errors",
-        "summary":        "Summary",
-        "benchmark":      "Benchmark",
-        "completed":      "done",
-        "skipped":        "Skipping aiofiles test (ayafileio timed out — system may be unstable)",
-        "timeout":        "TIMEOUT",
-        "timed_out_msg":  "Timed out ({timeout}s) — {completed}/{total} tasks finished",
-        "terminated":     "force-terminated after {elapsed:.1f}s",
-        "speedup":        "ayafileio is {speedup:.1f}x faster than aiofiles",
-        "speedup_note":   "(even with aiofiles concurrency={aio} vs ayafileio={aya})",
-        "ops":            "ops/s",
-        "assert_mismatch":"AssertionError (data mismatch)",
-        "backend_info":   "{name}: {platform} - {backend} (truly async: {async_icon})",
-        "thread_pool":    "thread pool",
-        "single_file":    "ayafileio — single file",
-        "single_file_aio":"aiofiles  — single file",
-    },
-    "zh": {
-        "title":          "ayafileio vs aiofiles — 对比测试",
-        "requires_aya":   "请先安装 ayafileio: pip install ayafileio",
-        "requires_aio":   "请先安装 aiofiles: pip install aiofiles",
-        "total_tasks":    "总任务",
-        "concurrency":    "并发",
-        "hard_timeout":   "硬超时",
-        "mem_limit":      "内存上限",
-        "backend_aya":    "ayafileio",
-        "backend_aio":    "aiofiles",
-        "truly_async":    "真异步",
-        "test":           "测试",
-        "progress":       "进度",
-        "results":        "结果",
-        "success":        "成功",
-        "elapsed":        "耗时",
-        "throughput":     "吞吐量",
-        "error_breakdown":"错误明细",
-        "errors":         "错误",
-        "summary":        "对比总结",
-        "benchmark":      "Benchmark",
-        "completed":      "完成",
-        "skipped":        "跳过 aiofiles 测试（ayafileio 已超时，系统可能不稳定）",
-        "timeout":        "超时",
-        "timed_out_msg":  "超时 ({timeout}s) — 已完成 {completed}/{total}",
-        "terminated":     "{elapsed:.1f}s 后强制终止",
-        "speedup":        "ayafileio 比 aiofiles 快 {speedup:.1f}x",
-        "speedup_note":   "(即使 aiofiles 并发={aio} vs ayafileio={aya})",
-        "ops":            "ops/s",
-        "assert_mismatch":"AssertionError (数据不匹配)",
-        "backend_info":   "{name}: {platform} - {backend} (真异步: {async_icon})",
-        "thread_pool":    "线程池",
-        "single_file":    "ayafileio — 单文件",
-        "single_file_aio":"aiofiles  — 单文件",
-    },
-}
-
-def i18n(key: str) -> str:
-    return _T[LANG].get(key, _T["en"].get(key, key))
-
-# ═══════════════════════════════════════════════════════════
-# Safety limits
-# ═══════════════════════════════════════════════════════════
-TOTAL_TASKS = 50_000
-FILE_SIZE = 128
-HARD_TIMEOUT = 60
-MAX_MEMORY_MB = 1500
-AYAFILEIO_CONCURRENT = 1000
-AIOFILES_CONCURRENT = 200
+SEQ_CHUNKS = [64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024]
+SMALL_CHUNK = 4096
+CONCURRENCY_LEVELS = [1, 16, 64, 256]
+RNG_SEED = 42
 
 
-def format_number(n: int) -> str:
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.2f}M"
-    if n >= 1_000:
-        return f"{n/1_000:.2f}K"
-    return str(n)
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def fmt_rate(value: float, unit: str) -> str:
+    if unit == "MB/s":
+        return f"{value:8.1f}"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:7.2f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:7.1f}K"
+    return f"{value:8.0f}"
 
 
-async def worker_ayafileio(f, task_id: int):
-    """ayafileio worker — true kernel-async I/O"""
-    data = f"aya_{task_id}".ljust(FILE_SIZE, "x").encode()
-    offset = task_id * FILE_SIZE
-    await f.seek(offset)
-    await f.write(data)
-    await f.seek(offset)
-    read_back = await f.read(len(data))
-    assert read_back == data, f"data mismatch: {read_back!r} != {data!r}"
+def prepare_file(path: str, size: int) -> None:
+    """Create a file of exactly `size` bytes with non-repeating content."""
+    block = random.Random(RNG_SEED).randbytes(PREP_CHUNK)
+    with open(path, "wb") as f:
+        written = 0
+        while written < size:
+            n = min(PREP_CHUNK, size - written)
+            f.write(block[:n])
+            written += n
 
 
-async def worker_aiofiles(f, task_id: int):
-    """aiofiles worker — thread-pool async (seek+write not atomic)"""
-    data = f"aio_{task_id}".ljust(FILE_SIZE, "x").encode()
-    offset = task_id * FILE_SIZE
-    await f.seek(offset)
-    await f.write(data)
-    await f.seek(offset)
-    read_back = await f.read(len(data))
-    assert read_back == data, f"data mismatch: {read_back!r} != {data!r}"
+def random_offsets(count: int, chunk: int) -> list[int]:
+    rng = random.Random(RNG_SEED)
+    max_off = (FILE_SIZE - chunk) // chunk
+    return [rng.randrange(max_off) * chunk for _ in range(count)]
 
 
-async def run_benchmark(name: str, concurrent: int, worker_func, *args):
-    """Run one benchmark and return result dict with error breakdown."""
-    print(f"\n{'='*60}")
-    print(f"🧪 {name}")
-    print(f"   {i18n( 'total_tasks')}: {format_number(TOTAL_TASKS)} | {i18n( 'concurrency')}: {concurrent}")
-    print(f"{'='*60}")
+# ── Scenario runners ────────────────────────────────────────────────────────
+# Each runner performs one unit of work; the measurement loop drives them
+# until the time budget is spent.
 
-    sem = asyncio.Semaphore(concurrent)
-    completed = 0
-    error_counts: Counter[str] = Counter()
-    start_time = time.perf_counter()
-    timed_out = False
+async def aya_seq_read(f, chunk: int, stop: float) -> tuple[int, int]:
+    ops = 0
+    while time.perf_counter() < stop:
+        data = await f.read(chunk)
+        if not data:
+            await f.seek(0)
+        ops += 1
+    return ops, chunk * ops
 
-    async def bounded(task_id: int):
-        nonlocal completed, error_counts
-        async with sem:
-            try:
-                await worker_func(*args, task_id)
-            except AssertionError:
-                error_counts[i18n("assert_mismatch")] += 1
-            except OSError as e:
-                err_desc = os.strerror(e.errno) if e.errno else str(e)
-                error_counts[f"OSError({e.errno}): {err_desc}"] += 1
-            except ValueError:
-                error_counts["ValueError"] += 1
-            except Exception as e:
-                error_counts[f"{type(e).__name__}: {e}"] += 1
-            completed += 1
-            if completed % 10000 == 0:
-                elapsed = time.perf_counter() - start_time
-                print(f"   📍 {i18n( 'progress')}: {format_number(completed)}/{format_number(TOTAL_TASKS)} "
-                      f"({completed/TOTAL_TASKS*100:.0f}%) - "
-                      f"{format_number(int(completed/elapsed))} {i18n( 'ops')}")
 
-    try:
-        batch_size = concurrent * 2
-        for start in range(0, TOTAL_TASKS, batch_size):
-            end = min(start + batch_size, TOTAL_TASKS)
-            workers = [bounded(i) for i in range(start, end)]
-            await asyncio.wait_for(
-                asyncio.gather(*workers),
-                timeout=HARD_TIMEOUT - (time.perf_counter() - start_time)
-            )
-    except asyncio.TimeoutError:
-        timed_out = True
-        print(f"   ⏰ {i18n( 'timeout')}! ({HARD_TIMEOUT}s)")
+async def aio_seq_read(f, chunk: int, stop: float) -> tuple[int, int]:
+    ops = 0
+    while time.perf_counter() < stop:
+        data = await f.read(chunk)
+        if not data:
+            await f.seek(0)
+        ops += 1
+    return ops, chunk * ops
 
-    elapsed = time.perf_counter() - start_time
-    total_errors = sum(error_counts.values())
 
-    print(f"\n   📊 {i18n( 'results')}:")
-    if timed_out:
-        print(f"   ❌ {i18n( 'timed_out_msg').format(timeout=HARD_TIMEOUT, completed=format_number(completed), total=format_number(TOTAL_TASKS))}")
-        print(f"   ⏱️  {i18n( 'terminated').format(elapsed=elapsed)}")
-        return {"name": name, "completed": completed, "elapsed": elapsed,
-                "ops": int(completed/elapsed) if elapsed > 0 else 0,
-                "error_counts": error_counts, "timed_out": True}
+async def aya_seq_write(f, buf: bytes, stop: float) -> tuple[int, int]:
+    ops = 0
+    while time.perf_counter() < stop:
+        await f.write(buf)
+        ops += 1
+        if await f.tell() >= FILE_SIZE:
+            await f.seek(0)
+    return ops, len(buf) * ops
+
+
+async def aio_seq_write(f, buf: bytes, stop: float) -> tuple[int, int]:
+    ops = 0
+    while time.perf_counter() < stop:
+        await f.write(buf)
+        ops += 1
+        if await f.tell() >= FILE_SIZE:
+            await f.seek(0)
+    return ops, len(buf) * ops
+
+
+async def aya_rand_read_own(f, offsets: list[int], pos: list[int], chunk: int, stop: float) -> int:
+    ops = 0
+    i = pos[0] % len(offsets)
+    while time.perf_counter() < stop:
+        await f.read_at(offsets[i], chunk)
+        i = (i + 1) % len(offsets)
+        ops += 1
+    pos[0] = i
+    return ops
+
+
+async def aio_rand_read_own(f, offsets: list[int], pos: list[int], chunk: int, stop: float) -> int:
+    ops = 0
+    i = pos[0]
+    while time.perf_counter() < stop:
+        await f.seek(offsets[i])
+        await f.read(chunk)
+        i = (i + 1) % len(offsets)
+        ops += 1
+    pos[0] = i
+    return ops
+
+
+# ── Measurement engine ──────────────────────────────────────────────────────
+
+async def measure_once(kind: str, backend: str, path: str, chunk: int,
+                       budget: float, concurrency: int = 1) -> tuple[int, float]:
+    """Run one measurement. Returns (ops, elapsed_seconds)."""
+    stop = time.perf_counter() + budget
+    start = time.perf_counter()
+
+    if kind in ("seq_read", "small_read"):
+        if backend == "aya":
+            async with ayafileio.open(path, "rb") as f:
+                ops, _ = await asyncio.wait_for(aya_seq_read(f, chunk, stop), HARD_CAP_SECONDS)
+        else:
+            async with aiofiles.open(path, "rb") as f:
+                ops, _ = await asyncio.wait_for(aio_seq_read(f, chunk, stop), HARD_CAP_SECONDS)
+
+    elif kind == "seq_write":
+        buf = random.Random(1).randbytes(chunk)
+        if backend == "aya":
+            async with ayafileio.open(path, "r+b") as f:
+                ops, _ = await asyncio.wait_for(aya_seq_write(f, buf, stop), HARD_CAP_SECONDS)
+        else:
+            async with aiofiles.open(path, "r+b") as f:
+                ops, _ = await asyncio.wait_for(aio_seq_write(f, buf, stop), HARD_CAP_SECONDS)
+
+    elif kind == "rand_read_own":
+        offsets = random_offsets(4096, chunk)
+
+        async def worker_aya():
+            async with ayafileio.open(path, "rb") as f:
+                return await aya_rand_read_own(f, offsets, [0], chunk, stop)
+
+        async def worker_aio():
+            async with aiofiles.open(path, "rb") as f:
+                return await aio_rand_read_own(f, offsets, [0], chunk, stop)
+
+        worker = worker_aya if backend == "aya" else worker_aio
+        counts = await asyncio.wait_for(
+            asyncio.gather(*(worker() for _ in range(concurrency))),
+            HARD_CAP_SECONDS)
+        ops = sum(counts)
+
+    elif kind == "rand_read_at":
+        # Single shared handle, positioned reads — ayafileio only.
+        offsets = random_offsets(4096, chunk)
+
+        async def worker(pos: list[int]):
+            return await aya_rand_read_own(shared_f, offsets, pos, chunk, stop)
+
+        async with ayafileio.open(path, "rb") as shared_f:
+            counts = await asyncio.wait_for(
+                asyncio.gather(*(worker([i * 1024]) for i in range(concurrency))),
+                HARD_CAP_SECONDS)
+        ops = sum(counts)
+
     else:
-        ops = int(completed / elapsed) if elapsed > 0 else 0
-        icon = "✅" if total_errors == 0 else "⚠️"
-        print(f"   {icon} {i18n( 'success')}: {format_number(completed - total_errors)} / {format_number(completed)}")
-        print(f"   ⏱️  {i18n( 'elapsed')}: {elapsed:.1f}s")
-        print(f"   🚀 {i18n( 'throughput')}: {format_number(ops)} {i18n( 'ops')}")
-        if error_counts:
-            print(f"   ❌ {i18n( 'error_breakdown')} ({format_number(total_errors)} {i18n( 'errors')}):")
-            for err_type, count in error_counts.most_common():
-                print(f"      [{count:>6}] {err_type}")
-        return {"name": name, "completed": completed, "elapsed": elapsed,
-                "ops": ops, "error_counts": error_counts, "timed_out": False}
+        raise ValueError(f"unknown scenario kind: {kind}")
+
+    return ops, time.perf_counter() - start
 
 
-async def main():
-    print("╔" + "═" * 58 + "╗")
-    title = i18n( "title")
-    print("║" + title.center(58) + "║")
-    print("╠" + "═" * 58 + "╣")
-    print(f"║   {i18n( 'total_tasks')}: {format_number(TOTAL_TASKS):>12}    {i18n( 'concurrency')}(aya/aio): {AYAFILEIO_CONCURRENT}/{AIOFILES_CONCURRENT:<3} ║")
-    print(f"║   {i18n( 'hard_timeout')}: {HARD_TIMEOUT}s    {i18n( 'mem_limit')}: {MAX_MEMORY_MB}MB              ║")
-    print("╚" + "═" * 58 + "╝")
+async def run_cell(kind: str, backend: str, path: str, chunk: int,
+                   concurrency: int = 1) -> dict:
+    """Warmup + ROUNDS measured rounds for one cell. Returns raw round data."""
+    await measure_once(kind, backend, path, chunk, WARMUP_SECONDS, concurrency)
+    rounds = []
+    for _ in range(ROUNDS):
+        ops, elapsed = await measure_once(kind, backend, path, chunk, ROUND_SECONDS, concurrency)
+        rounds.append({"ops": ops, "elapsed": round(elapsed, 4),
+                       "ops_per_s": round(ops / elapsed, 1)})
+    return {"rounds": rounds, "median_ops_per_s": statistics.median(r["ops_per_s"] for r in rounds)}
 
+
+# ── Report ──────────────────────────────────────────────────────────────────
+
+def print_table(title: str, unit: str, rows: list[dict]) -> None:
+    print(f"\n== {title} ({unit}) ==")
+    header = f"  {'cell':<12}"
+    if HAS_AIOFILES:
+        header += f"{'ayafileio':>12}{'aiofiles':>12}{'aya/aio':>9}"
+    else:
+        header += f"{'ayafileio':>12}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for row in rows:
+        line = f"  {row['label']:<12}"
+        aya = row.get("aya")
+        aio = row.get("aio")
+        if aya is not None:
+            line += f"{fmt_rate(aya, unit):>12}"
+        if HAS_AIOFILES:
+            line += f"{fmt_rate(aio, unit):>12}" if aio is not None else f"{'n/a':>12}"
+            if aya is not None and aio:
+                line += f"{aya / aio:8.2f}x"
+            else:
+                line += f"{'—':>9}"
+        print(line)
+
+
+async def main() -> int:
     info = ayafileio.get_backend_info()
-    aya_icon = "✅" if info["is_truly_async"] else "❌"
-    print(f"\n🔧 {i18n( 'backend_info').format(name=i18n( 'backend_aya'), platform=info['platform'], backend=info['backend'], async_icon=aya_icon)}")
-    print(f"🔧 {i18n( 'backend_info').format(name=i18n( 'backend_aio'), platform=info['platform'], backend=i18n( 'thread_pool'), async_icon='❌')}")
+    print("ayafileio benchmark — cross-platform comparison")
+    print(f"  platform : {platform.system()} {platform.release()} ({platform.machine()})")
+    print(f"  python   : {platform.python_version()}")
+    print(f"  backend  : {info['backend']} (truly async: {info['is_truly_async']})")
+    print(f"  compare  : {'aiofiles (thread pool, buffered defaults)' if HAS_AIOFILES else 'not installed — ayafileio only'}")
+    print(f"  rounds   : {ROUNDS}x{ROUND_SECONDS}s measured + {WARMUP_SECONDS}s warmup per cell")
 
-    results = []
+    results = {"meta": {
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+        "backend": info,
+        "has_aiofiles": HAS_AIOFILES,
+        "file_size": FILE_SIZE,
+        "round_seconds": ROUND_SECONDS,
+        "rounds": ROUNDS,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }, "scenarios": {}}
+    detailed = {"meta": results["meta"], "scenarios": {}}
 
-    # ── Test 1: ayafileio single file ──
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp_path = tmp.name
+    tmpdir = tempfile.mkdtemp(prefix="aya_bench_")
+    data_path = os.path.join(tmpdir, "data.bin")
+    write_path = os.path.join(tmpdir, "write.bin")
+
     try:
-        async with ayafileio.open(tmp_path, "wb+") as f:
-            r = await run_benchmark(
-                i18n("single_file"),
-                AYAFILEIO_CONCURRENT, worker_ayafileio, f)
-            results.append(r)
+        print(f"\nPreparing {FILE_SIZE // (1024 * 1024)} MiB data file...", end="", flush=True)
+        t0 = time.perf_counter()
+        prepare_file(data_path, FILE_SIZE)
+        prepare_file(write_path, FILE_SIZE)
+        print(f" {time.perf_counter() - t0:.1f}s")
+
+        backends = ["aya"] + (["aio"] if HAS_AIOFILES else [])
+
+        # ── A. sequential read ────────────────────────────────────────────
+        rows, cells, det = [], {}, {}
+        for chunk in SEQ_CHUNKS:
+            label = f"{chunk // 1024}KiB"
+            row = {"label": label}
+            for be in backends:
+                r = await run_cell("seq_read", be, data_path, chunk)
+                mb_s = r["median_ops_per_s"] * chunk / (1024 * 1024)
+                row[be] = mb_s
+                det[f"{label}/{be}"] = r
+            cells[label] = row
+            rows.append(row)
+        print_table("A. Sequential read", "MB/s", rows)
+        results["scenarios"]["seq_read"] = {"unit": "MB/s", "cells": cells}
+        detailed["scenarios"]["seq_read"] = det
+
+        # ── B. sequential write ───────────────────────────────────────────
+        rows, cells, det = [], {}, {}
+        for chunk in SEQ_CHUNKS:
+            label = f"{chunk // 1024}KiB"
+            row = {"label": label}
+            for be in backends:
+                r = await run_cell("seq_write", be, write_path, chunk)
+                mb_s = r["median_ops_per_s"] * chunk / (1024 * 1024)
+                row[be] = mb_s
+                det[f"{label}/{be}"] = r
+            cells[label] = row
+            rows.append(row)
+        print_table("B. Sequential write", "MB/s", rows)
+        results["scenarios"]["seq_write"] = {"unit": "MB/s", "cells": cells}
+        detailed["scenarios"]["seq_write"] = det
+
+        # ── C. small sequential read (per-op overhead) ────────────────────
+        rows, cells, det = [], {}, {}
+        row = {"label": f"{SMALL_CHUNK // 1024}KiB"}
+        for be in backends:
+            r = await run_cell("small_read", be, data_path, SMALL_CHUNK)
+            row[be] = r["median_ops_per_s"]
+            det[f"{be}"] = r
+        rows.append(row)
+        cells[row["label"]] = row
+        print_table("C. Small sequential read", "ops/s", rows)
+        results["scenarios"]["small_read"] = {"unit": "ops/s", "cells": cells}
+        detailed["scenarios"]["small_read"] = det
+
+        # ── D. random read, one handle per worker ─────────────────────────
+        rows, cells, det = [], {}, {}
+        for conc in CONCURRENCY_LEVELS:
+            label = f"x{conc}"
+            row = {"label": label}
+            for be in backends:
+                r = await run_cell("rand_read_own", be, data_path, SMALL_CHUNK, conc)
+                row[be] = r["median_ops_per_s"]
+                det[f"{label}/{be}"] = r
+            cells[label] = row
+            rows.append(row)
+        print_table("D. Random 4KiB read (own handle)", "ops/s", rows)
+        results["scenarios"]["rand_read_own"] = {"unit": "ops/s", "cells": cells}
+        detailed["scenarios"]["rand_read_own"] = det
+
+        # ── E. random read_at, shared handle (ayafileio only) ─────────────
+        rows, cells, det = [], {}, {}
+        for conc in CONCURRENCY_LEVELS:
+            label = f"x{conc}"
+            r = await run_cell("rand_read_at", "aya", data_path, SMALL_CHUNK, conc)
+            row = {"label": label, "aya": r["median_ops_per_s"]}
+            det[label] = r
+            cells[label] = row
+            rows.append(row)
+        print_table("E. Random 4KiB read_at (shared handle)", "ops/s", rows)
+        results["scenarios"]["rand_read_at"] = {"unit": "ops/s", "cells": cells}
+        detailed["scenarios"]["rand_read_at"] = det
+
     finally:
-        os.unlink(tmp_path)
-
-    # ── Test 2: aiofiles single file ──
-    if results[-1]["timed_out"]:
-        print(f"\n   ⏭️ {i18n( 'skipped')}")
-    else:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp_path = tmp.name
+        for p in (data_path, write_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
         try:
-            async with aiofiles.open(tmp_path, "wb+") as f:
-                r = await run_benchmark(
-                    i18n("single_file_aio"),
-                    AIOFILES_CONCURRENT, worker_aiofiles, f)
-                results.append(r)
-        finally:
-            os.unlink(tmp_path)
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
 
-    # ── Summary ──
-    print("\n" + "=" * 60)
-    print(f"📊 {i18n( 'summary')}")
-    print("=" * 60)
-    print(f"{i18n( 'benchmark'):<30} {i18n( 'completed'):>8} {i18n( 'elapsed'):>8} {i18n( 'throughput'):>10} {i18n( 'truly_async'):>6}")
-    print("-" * 60)
-    for r in results:
-        total_err = sum(r["error_counts"].values())
-        status = format_number(r["completed"])
-        if r["timed_out"]:
-            status += "*"
-        err_flag = f" ({format_number(total_err)} {i18n( 'errors')})" if total_err else ""
-        aya_icon = "✅" if "aiofiles" not in r["name"] else "❌"
-        print(f"{r['name']:<30} {status:>8} {r['elapsed']:>7.1f}s "
-              f"{format_number(r['ops']):>9}{i18n( 'ops')}  {aya_icon} {err_flag}")
-
-    # ── Error details ──
-    for r in results:
-        if r["error_counts"]:
-            total_err = sum(r["error_counts"].values())
-            print(f"\n📋 {r['name']} — {i18n( 'error_breakdown')} ({format_number(total_err)} {i18n( 'errors')}):")
-            for err_type, count in r["error_counts"].most_common():
-                pct = count / total_err * 100
-                print(f"   [{count:>6} | {pct:5.1f}%] {err_type}")
-
-    if len(results) >= 2 and not results[0]["timed_out"] and not results[1]["timed_out"]:
-        speedup = results[0]["ops"] / max(results[1]["ops"], 1)
-        print(f"\n💡 {i18n( 'speedup').format(speedup=speedup)}")
-        print(f"   {i18n( 'speedup_note').format(aio=AIOFILES_CONCURRENT, aya=AYAFILEIO_CONCURRENT)}")
+    with open("benchmark_results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    with open("benchmark_results_detailed.json", "w", encoding="utf-8") as f:
+        json.dump(detailed, f, indent=2)
+    print("\nWrote benchmark_results.json + benchmark_results_detailed.json")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))
