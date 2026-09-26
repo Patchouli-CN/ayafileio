@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-09-26
+
+### Changed
+- **Semantics note: write buffers are now pinned until the write future resolves.** All backends serve writes zero-copy straight from the caller's buffer (see below), so the buffer object must not be resized while a write is in flight (the held buffer view already raises `BufferError` on resize attempts) and its contents should not be mutated in place — the same contract as `readinto()` and raw `os.FileIO.write`.
+
+### Performance
+- **All backends now actually use the completion batcher.** `complete_ok()`/`complete_error()` on the io_uring, macOS Dispatch I/O and thread-pool backends flushed after *every* completion, silently bypassing the adaptive batching introduced earlier. They now flush only on the count threshold or when the event loop's last in-flight operation completes — the same policy the IOCP path gained in 1.6.1.
+- **Zero-copy reads on all backends.** Reads I/O directly into a pre-built `PyBytes` that becomes the result object, eliminating a full data copy per read (short reads fall back to a shrinking copy).
+- **Zero-copy writes on all backends.** The write paths no longer memcpy the caller's buffer into a pool buffer; the kernel reads user memory directly via a held buffer view. Large sequential writes on Windows: 1 MiB 1,363 → 2,858 MB/s, 4 MiB 929 → 3,046 MB/s (local, vs aiofiles 0.73x → 1.47x).
+- **io_uring: backpressure instead of spurious EBUSY.** When the submission queue is full, requests are queued to an overflow deque and re-submitted by the reaper after each CQE batch instead of failing the operation. SQ access is now serialized with a submit mutex (concurrent submissions from Python threads and the reaper were technically racy).
+- **io_uring: batched GIL acquisition in the reaper** — CQE entries are harvested without the GIL and the whole batch is then completed under a single GIL hold, matching the IOCP worker's rhythm.
+- **io_uring: probe-enable `IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG`** (kernel 5.19+) with silent fallback on older kernels, avoiding a softirq dispatch per completion. `IORING_SETUP_SINGLE_ISSUER` is deliberately not used (submissions legitimately come from multiple threads).
+- **macOS: dual-mode dispatch for large I/O.** `dispatch_io`'s high-water setting chunked large requests into 64 KiB pieces with a callback and a memcpy each, collapsing large sequential throughput to as low as 4% of aiofiles. Requests ≥ 256 KiB now bypass `dispatch_io` and run a single `pread`/`pwrite` on the global thread pool straight into the final buffer; small requests keep the low-latency `dispatch_io` path. Measured on CI: sequential write 1 MiB 139 → 5,502 MB/s (40×), 4 MiB 208 → 6,787 MB/s; sequential read 1 MiB 0.28x → 0.97x vs aiofiles.
+- **macOS & thread-pool backends: cache the file size at open** (refreshed optimistically on write/truncate), eliminating a per-operation `fstat` syscall; `close()` now waits on the `m_close_wake` semaphore instead of exponential-backoff sleep polling, cutting close latency from ~16 ms average to immediate.
+- **Windows: `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`.** Synchronously completed operations no longer post an IOCP completion packet — one less worker wakeup and context switch per op on cache-hot small I/O. Sessions where the mode cannot be set keep the legacy worker-drain path (the two paths are strictly mutually exclusive).
+- **IORequest freelist.** A thread-local freelist (64 slots) with placement-new reconstruction replaces per-op `new`/`delete`, removing allocator churn on small high-frequency I/O; fully compatible with the Yuyuko memory tracker.
+
+### Changed (internal)
+- The entire C++ core now lives in `namespace ayafileio`; `bindings.cpp` pulls it in with a using-directive. No public API change.
+
+### CI / Testing
+- **Version guard on the release pipeline**: a `workflow_run` trigger whose `pyproject.toml` version already exists on PyPI skips the wheel build & publish jobs (plain test pushes: ~1 h → ~6 s). Tags and manual dispatches always build; bump the version to release.
+- **Rewritten cross-platform benchmark** (`tests/t_compare.py`): time-boxed rounds with interleaved backends and median reporting, race-free concurrency scenarios (one handle per worker, positioned I/O), and JSON artifacts (`benchmark_results.json` / `benchmark_results_detailed.json`) uploaded by CI for every run on all three platforms. The previous benchmark measured a seek+read race of its own making and never wrote the artifact files.
+
 ## [1.6.1] - 2026-09-26
 
 ### Fixed

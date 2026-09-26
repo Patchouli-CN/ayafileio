@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.6.2] - 2026-09-26
+
+### 变更
+- **语义提示：写入缓冲在写 future 完成前会被钉住。** 所有后端的写路径已改为直接从调用方缓冲零拷贝读取（见下），因此写在飞期间缓冲对象不可 resize（持有的缓冲视图会对 resize 抛 `BufferError`），内容也不应原地修改——与 `readinto()` 和原生 `os.FileIO.write` 同级契约。
+
+### 性能
+- **所有后端真正用上完成批量器了。** io_uring、macOS Dispatch I/O 与线程池后端的 `complete_ok()`/`complete_error()` 此前每完成一个操作就 flush 一次，悄悄绕过了自适应批量机制。现在与 1.6.1 的 IOCP 路径同策略：达到数量阈值或本事件循环最后一个在飞操作完成时才 flush。
+- **全平台零拷贝读。** 读取直接进预建的 `PyBytes`，完成时它就是结果对象，每次读省一整趟数据拷贝（短读回退为收缩拷贝）。
+- **全平台零拷贝写。** 写路径不再把调用方缓冲 memcpy 进池缓冲，内核通过持有的缓冲视图直接读用户内存。Windows 大块顺序写：1MiB 1,363 → 2,858 MB/s，4MiB 929 → 3,046 MB/s（本地实测，对 aiofiles 从 0.73x 转为 1.47x）。
+- **io_uring：背压取代虚假 EBUSY。** 提交队列打满时请求排入溢出队列，由 reaper 在每批 CQE 后补提交，不再让操作直接失败。SQ 访问改由提交互斥锁串行化（Python 线程与 reaper 并发提交此前理论上有竞争）。
+- **io_uring：reaper 批量持 GIL**——先不持 GIL 摘取 CQE，再一次持 GIL 完成整批，与 IOCP worker 同款节奏。
+- **io_uring：探测启用 `IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG`**（内核 5.19+），旧内核静默回退，每个完成省一次软中断调度。刻意不用 `IORING_SETUP_SINGLE_ISSUER`（提交合法地来自多个线程）。
+- **macOS：大 I/O 双模调度。** `dispatch_io` 的 high-water 设置会把大请求切成 64KiB 小块逐块回调加拷贝，大块顺序吞吐一度只剩 aiofiles 的 4%。≥256KiB 的请求现在绕过 `dispatch_io`，在线程池上直接一发 `pread`/`pwrite` 进最终缓冲；小请求保留低延迟 `dispatch_io` 路径。CI 实测：1MiB 顺序写 139 → 5,502 MB/s（40 倍），4MiB 208 → 6,787 MB/s；1MiB 顺序读对 aiofiles 从 0.28x 回到 0.97x。
+- **macOS 与线程池后端：open 时缓存文件大小**（写/截断时乐观刷新），消灭每操作一发的 `fstat` 系统调用；`close()` 改用 `m_close_wake` 信号量等待，取代指数退避 sleep 轮询，关闭延迟从平均 ~16ms 降到即时。
+- **Windows：`FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`。** 同步完成的操作不再投递 IOCP 完成包，热缓存小块 I/O 每次操作省一次 worker 唤醒和上下文切换。模式设置失败的会话保持旧的 worker 排水路径（两条路径严格互斥）。
+- **IORequest 对象池。** thread_local 空闲链表（64 槽位）+ placement new 重建，取代每操作的 `new`/`delete`，消除小块高频 I/O 的分配器抖动；与幽幽子内存追踪器完全兼容。
+
+### 变更（内部）
+- 整个 C++ 核心收进 `namespace ayafileio`，`bindings.cpp` 以 using 指令引入。公开 API 无变化。
+
+### CI / 测试
+- **发布流水线版本守护**：`workflow_run` 触发时若 `pyproject.toml` 的版本号已存在于 PyPI，则跳过 wheel 构建与发布（普通测试推送从 ~1 小时 → ~6 秒）。tag 与手动触发总是构建；要发布 bump 版本号即可。
+- **重写跨平台基准**（`tests/t_compare.py`）：时间盒轮次 + 双库交错测量 + 中位数报告，并发场景无竞态（每 worker 一句柄、位置 I/O），产出 JSON 产物（`benchmark_results.json` / `benchmark_results_detailed.json`）由 CI 在三平台每次运行上传。旧基准测的是自己 seek+read 竞态造出来的错误，且从未写出产物文件。
+
 ## [1.6.1] - 2026-09-26
 
 ### 修复
