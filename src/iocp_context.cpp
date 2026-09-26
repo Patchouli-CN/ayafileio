@@ -54,6 +54,13 @@ static void quarantine_push(IORequest* req) {
     if (t_quarantine.size() >= 256) quarantine_drain();
 }
 
+// 递减本 loop 的在飞 IOCP 计数；若这是最后一个在飞 op 且 batcher 里
+// 有滞留结果，立即 flush —— 串行/小并发负载不再为空闲超时买单。
+// 须持 GIL 调用（flush 需要）。
+static inline void complete_tracked_op(ResultBatcher *b) {
+    if (b && b->op_completed() && b->has_pending()) b->flush();
+}
+
 // mark the request sync done — clean up Python references but don't delete req.
 // The IOCP worker will handle the final delete when the completion arrives.
 // All Python references are released here so that the worker can delete req
@@ -359,6 +366,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
             UR_DEBUG_LOG("process_one SYNC req=%p sid=%llu SESSION NOT FOUND — deleting req anyway",
                          (void*)req, sessionId);
         }
+        complete_tracked_op(req->batcher);
         quarantine_push(req);
         return;
     }
@@ -371,6 +379,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         if (it == m_sessions.end()) {
             // Session already closed — just release memory.
             UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu SESSION GONE — deleting req", (void*)req, sessionId);
+            complete_tracked_op(req->batcher);
             quarantine_push(req);
             return;
         }
@@ -423,10 +432,13 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
 
     if (set_fn && val) {
         bool threshold = batcher->push(set_fn, val);
-        if (threshold) [[unlikely]] batcher->flush();
+        // 这是本 loop 最后一个在飞 op 时立即 flush，不再等空闲超时
+        bool last = req->batcher ? req->batcher->op_completed() : false;
+        if (threshold || last) [[unlikely]] batcher->flush();
     } else {
         Py_XDECREF(set_fn);
         Py_XDECREF(val);
+        complete_tracked_op(req->batcher);
     }
     UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu — deferred free after push", (void*)req, sessionId);
     quarantine_push(req);
@@ -619,6 +631,8 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
     req->ov.OffsetHigh = (DWORD)(offset >> 32);
 
     long prev = s->pending.fetch_add(1, std::memory_order_relaxed);
+    req->batcher = s->batcher;
+    req->batcher->op_submitted();
     DWORD got = 0;
     BOOL ok = ReadFile(s->handle, req->buf(), (DWORD)readSize, &got, &req->ov);
     if (ok) {
@@ -635,6 +649,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
             s->pending.fetch_sub(1, std::memory_order_relaxed);
+            req->batcher->op_completed();
             UR_DEBUG_LOG("submit_read FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
             PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
@@ -715,6 +730,8 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
     req->ov.OffsetHigh = (DWORD)(roffset >> 32);
 
     long prev = s->pending.fetch_add(1, std::memory_order_relaxed);
+    req->batcher = s->batcher;
+    req->batcher->op_submitted();
     DWORD got = 0;
     BOOL ok = ReadFile(s->handle, req->buf(), (DWORD)readSize, &got, &req->ov);
     if (ok) {
@@ -731,6 +748,7 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
             s->pending.fetch_sub(1, std::memory_order_relaxed);
+            req->batcher->op_completed();
             UR_DEBUG_LOG("submit_read_at FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
             PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
@@ -825,6 +843,8 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
     req->ov.OffsetHigh = (DWORD)(offset >> 32);
 
     long prev = s->pending.fetch_add(1, std::memory_order_relaxed);
+    req->batcher = s->batcher;
+    req->batcher->op_submitted();
     DWORD wrote = 0;
     BOOL ok = WriteFile(s->handle, req->buf(), (DWORD)wsize, &wrote, &req->ov);
     if (ok) {
@@ -840,6 +860,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
             s->pending.fetch_sub(1, std::memory_order_relaxed);
+            req->batcher->op_completed();
             UR_DEBUG_LOG("submit_write FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "WriteFile failed");
             PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
@@ -1068,6 +1089,8 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
     req->ov.OffsetHigh = (DWORD)(offset >> 32);
 
     long prev = s->pending.fetch_add(1, std::memory_order_relaxed);
+    req->batcher = s->batcher;
+    req->batcher->op_submitted();
     DWORD got = 0;
     BOOL ok = ReadFile(s->handle, view.buf, (DWORD)readSize, &got, &req->ov);
     if (ok) {
@@ -1083,6 +1106,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
             s->pending.fetch_sub(1, std::memory_order_relaxed);
+            req->batcher->op_completed();
             UR_DEBUG_LOG("submit_readinto FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
             PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);

@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.6.1] - 2026-09-26
+
+### 修复
+- **Windows (IOCP)：串行与低并发负载不再为完成批量器的空闲超时买单。** `ResultBatcher` 把完成通知聚合成少量 `loop.call_soon_threadsafe` 回调，此前只在数量阈值（64）或空闲超时（~5ms）触发时才 flush。孤零零一个在飞操作——串行 `await` 循环和低并发管线的常态——永远够不到阈值，每个操作都要干等满空闲超时才能拿到结果。现在批量器按事件循环跟踪在飞 IOCP 请求数（`op_submitted()` / `op_completed()`，挂在此前闲置的 `IORequest::batcher` 字段上），当本 loop 最后一个在飞操作完成时立即 flush：单操作延迟从 ~5ms 降到事件循环唤醒级别，高并发下的批量行为完全不变。计数是 fail-soft 的——即使失衡也只会退化为原来的空闲超时路径。实测 256MB 文件、4KB 随机 `read_at`（2 万次）：16 在飞时 1,313 → 21,435 ops/s（16 倍）；64KB 块顺序 `read_at` 整文件：11 → 314 MB/s（28 倍）；大块（4MB）顺序读现已反超 aiofiles（2.17 倍）；高并发吞吐不变。Linux io_uring、macOS Dispatch I/O 与线程池回退后端不受影响。
+
 ## [1.6.0] - 2026-09-22
 
 ### 变更

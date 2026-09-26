@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-09-26
+
+### Fixed
+- **Windows (IOCP): serial and low-concurrency workloads no longer pay the completion-batcher idle timeout.** `ResultBatcher` coalesces completion notifications into few `loop.call_soon_threadsafe` callbacks and only flushed on a count threshold (64) or an idle timeout (~5 ms). A lone in-flight operation — the norm for serial `await` loops and low-concurrency pipelines — never reached the threshold, so every operation waited out the full idle timeout before its future resolved. The batcher now tracks in-flight IOCP requests per event loop (`op_submitted()` / `op_completed()`, carried on the previously unused `IORequest::batcher` field) and flushes immediately when the loop's last in-flight operation completes: per-op latency drops from ~5 ms to event-loop wakeup level, while high-concurrency batching behavior is unchanged. The counter is fail-soft — if it ever drifts, behavior merely degrades to the previous idle-timeout path. Measured on a 256 MB file with 4 KB random `read_at` (20k ops): 1,313 → 21,435 ops/s at 16 in-flight (16×); sequential whole-file `read_at` with 64 KB chunks: 11 → 314 MB/s (28×); large-chunk (4 MB) sequential reads now surpass aiofiles (2.17×); high-concurrency throughput unchanged. The Linux io_uring, macOS Dispatch I/O and thread-pool fallback backends are untouched.
+
 ## [1.6.0] - 2026-09-22
 
 ### Changed

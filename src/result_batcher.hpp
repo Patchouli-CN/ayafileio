@@ -62,6 +62,14 @@ public:
     bool idle_expired() const;
     DWORD get_timeout_ms() const;
 
+    // ── in-flight op tracking (IOCP path) ─────────────────────────────────
+    // 提交时 +1、完成处理时 -1。最后一个在飞 op 完成（计数归 0）说明
+    // 短期内不会再有新完成到达，调用方应立即 flush —— 串行/小并发负载
+    // 不再为空闲超时买单，每-op 延迟从 ~idle_timeout_ms 降到事件循环
+    // 唤醒级别。计数失衡（泄露）只会退化为原来的空闲超时行为，无害。
+    void op_submitted() { m_outstanding.fetch_add(1, std::memory_order_relaxed); }
+    bool op_completed() { return m_outstanding.fetch_sub(1, std::memory_order_acq_rel) == 1; }
+
     // ── stats (for debugging / monitoring) ─────────────────────────────────
     size_t current_threshold() const { return m_current_threshold.load(std::memory_order_relaxed); }
     unsigned current_idle_ms()  const { return m_current_idle_ms.load(std::memory_order_relaxed); }
@@ -87,6 +95,7 @@ private:
     std::atomic<unsigned> m_target_latency_us{1000};  // target max extra latency
     std::atomic<size_t>   m_current_threshold{64};
     std::atomic<unsigned> m_current_idle_ms{5};
+    std::atomic<long>     m_outstanding{0};  // 本 loop 在飞 IOCP 请求数
 
     static constexpr size_t RING_SIZE = 128;
     static constexpr size_t ADAPTIVE_UPDATE_INTERVAL = 16;  // 每 N 次 push 重算一次中位数
