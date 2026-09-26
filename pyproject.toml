@@ -1,6 +1,8 @@
 [build-system]
 requires = [
-    "scikit-build-core>=0.5.0",
+    # 1.1.0 的 FindPython 在 Linux 自由线程解释器（3.14t）上找不到
+    # Development.Module，CI 构建直接挂在 configure 阶段；钉住上限待上游修复
+    "scikit-build-core>=0.5.0,<1.1",
     "nanobind>=2.12.0",
 ]
 build-backend = "scikit_build_core.build"
