@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [1.6.2] - 2026-09-26
+## [1.7.0] - 2026-09-26
 
 ### 变更
 - **语义提示：写入缓冲在写 future 完成前会被钉住。** 所有后端的写路径已改为直接从调用方缓冲零拷贝读取（见下），因此写在飞期间缓冲对象不可 resize（持有的缓冲视图会对 resize 抛 `BufferError`），内容也不应原地修改——与 `readinto()` 和原生 `os.FileIO.write` 同级契约。

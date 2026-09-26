@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.6.2] - 2026-09-26
+## [1.7.0] - 2026-09-26
 
 ### Changed
 - **Semantics note: write buffers are now pinned until the write future resolves.** All backends serve writes zero-copy straight from the caller's buffer (see below), so the buffer object must not be resized while a write is in flight (the held buffer view already raises `BufferError` on resize attempts) and its contents should not be mutated in place — the same contract as `readinto()` and raw `os.FileIO.write`.
