@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0] - 2026-09-27
 
 ### Performance
 - **io_uring: inline harvest of submit-time completions (page-cache-hit fast path).** With `IORING_SETUP_COOP_TASKRUN` (probed in 1.7.0), a cache-hit read completes inside the submitter's own `io_uring_enter`, yet every completion still round-tripped through the reaper thread. After each submission the submitting thread now non-blockingly peeks the CQ — `try_lock` on a new consumer-side mutex shared with the reaper, up to 32 leading data CQEs per peek, wakeup CQEs always left to the reaper — and resolves them inline with a direct `set_result`/`set_exception`, the io_uring counterpart of the Windows `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` path. The future is already resolved when the I/O call returns, so `await` no longer yields to the event loop for cache-hit I/O; batcher accounting stays balanced. Kernels without `COOP_TASKRUN` simply fall back to the reaper path.

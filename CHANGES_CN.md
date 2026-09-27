@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [1.8.0] - 2026-09-27
 
 ### 性能
 - **io_uring：提交即完成的内联收割（缓存命中快车道）。** 1.7.0 探测启用的 `IORING_SETUP_COOP_TASKRUN` 让缓存命中的读在提交者自己的 `io_uring_enter` 里就完成了，但所有完成仍要绕 reaper 线程一圈。现在每次提交后，提交线程会非阻塞地瞥一眼 CQ——与 reaper 共享的新消费侧互斥锁上 `try_lock`，每次最多摘 32 个队首数据 CQE，wakeup CQE 永远留给 reaper——并用直接 `set_result`/`set_exception` 内联完成，这正是 Windows `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` 路径的 uring 对应物。I/O 调用返回时 future 已 resolve，缓存命中的 `await` 不再让出事件循环；批量器记账保持平衡。不支持 `COOP_TASKRUN` 的旧内核自动落回 reaper 路径。
