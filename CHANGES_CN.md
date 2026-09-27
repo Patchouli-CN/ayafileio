@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+### 构建 / CI
+- **Python 3.15 支持。** 测试矩阵覆盖 3.15 与 3.15t（10 月 1 日正式版发布前经 `allow-prereleases` 解析到 3.15.0 RC），wheel 流水线新增 `cp315`/`cp315t` 构建（cibuildwheel 3.2.1 → 4.2.1）。
+
 ## [1.8.0] - 2026-09-27
 
 ### 性能

@@ -55,7 +55,7 @@ jobs:
         os: [ubuntu-24.04, windows-2025, macos-latest, macos-15-intel]
       fail-fast: false
     env:
-      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
+      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
       CIBW_ARCHS_LINUX: "x86_64 aarch64 riscv64"
       CIBW_ARCHS_WINDOWS: "AMD64 x86"
       CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
@@ -82,7 +82,7 @@ jobs:
       with:
         platforms: all
     - name: Install cibuildwheel
-      run: python -m pip install cibuildwheel==3.2.1
+      run: python -m pip install cibuildwheel==4.2.1
     - name: Build wheels
       run: python -m cibuildwheel --output-dir wheelhouse
     - uses: actions/upload-artifact@v4

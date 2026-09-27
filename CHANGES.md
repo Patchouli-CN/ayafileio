@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Build / CI
+- **Python 3.15 support.** The test matrix now covers 3.15 and 3.15t (resolving to 3.15.0 release candidates via `allow-prereleases` until the October 1 final), and the wheel pipeline builds `cp315`/`cp315t` wheels (cibuildwheel 3.2.1 → 4.2.1).
+
 ## [1.8.0] - 2026-09-27
 
 ### Performance
