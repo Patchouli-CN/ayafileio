@@ -60,7 +60,9 @@ jobs:
       CIBW_ARCHS_WINDOWS: "AMD64 x86"
       CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
       CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10"
-      CIBW_ENABLE: "cpython-freethreading"
+      # cibuildwheel 4.x：free-threaded 默认构建，不再需要 enable；
+      # cp315 在 2026-10-01 正式版前属于 prerelease，需要这个组
+      CIBW_ENABLE: "cpython-prerelease"
       CIBW_BUILD_FRONTEND: "build"
       CIBW_TEST_SKIP: "*"
       CIBW_SKIP: "*-musllinux_*"
