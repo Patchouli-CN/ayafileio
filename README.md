@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="ayafileio icon" width="200">
+</p>
+
 # ayafileio
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
