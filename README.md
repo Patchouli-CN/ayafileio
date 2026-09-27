@@ -31,6 +31,7 @@ See [CHANGES.md](CHANGES.md).
 - Thousands of concurrent operations on a single file handle
 - aiofiles-compatible API, plain `async/await`
 - Text and binary modes with automatic encoding/decoding
+- Async whole-file copy: `acopy()` with OS-level fast paths (zero-copy on Linux)
 - Runtime-tunable configuration shared by all backends
 - Python 3.10–3.14, including 3.14t free-threading
 
@@ -221,6 +222,22 @@ reporting submission or I/O errors, but batches are not atomic: some writes may
 have succeeded when an error is raised. Concurrent overlapping writes have
 unspecified ordering; await each `write_at(...)` separately when ordering matters.
 Cancelling the wait does not undo already submitted system I/O.
+
+### Copying files
+
+```python
+n = await ayafileio.acopy("model.gguf", "backup/model.gguf")
+```
+
+`acopy(src, dst, *, chunk_size=4 MiB, concurrency=8, copy_stat=False)` copies a
+whole file asynchronously and returns the number of bytes copied. OS-level fast
+paths run first in a worker thread: the in-kernel zero-copy `copy_file_range`
+on Linux and `CopyFile2` on Windows (which also preserves metadata); other
+platforms — and systems that reject the fast call — fall back to a bounded
+`read_at`/`write_at` pipeline with up to `concurrency` chunks in flight (at
+most `concurrency × chunk_size` of memory). The destination is truncated
+first, copying a file onto itself raises `shutil.SameFileError`, and
+`copy_stat=True` additionally applies `shutil.copystat`.
 
 ### Configuration functions
 

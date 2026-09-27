@@ -31,6 +31,7 @@
 - 单文件句柄上轻松扛数千并发操作
 - 与 aiofiles 兼容的 API，就是普通的 `async/await`
 - 文本/二进制模式，自动编解码
+- 异步整文件复制：`acopy()`，Linux/Windows 走 OS 级快车道
 - 所有后端共享一套运行时可调的配置
 - 支持 Python 3.10–3.14，含 3.14t free-threading
 
@@ -214,6 +215,20 @@ async with ayafileio.open("data.bin", "w+b") as f:
 这些批量操作会在报告提交或 I/O 异常前等待已提交请求完成，但不是原子事务，失败时可能已部分写入。
 重叠区间的并发写入顺序未定义；需要顺序保证时请逐项 `await write_at(...)`。
 取消等待不会撤销已经提交的系统 I/O。
+
+### 复制文件
+
+```python
+n = await ayafileio.acopy("model.gguf", "backup/model.gguf")
+```
+
+`acopy(src, dst, *, chunk_size=4 MiB, concurrency=8, copy_stat=False)` 异步复制
+整个文件，返回复制的字节数。优先在 worker 线程里走 OS 级快车道：Linux 用
+内核态零拷贝 `copy_file_range`，Windows 用 `CopyFile2`（顺带保留元数据）；
+其它平台、以及快车道被系统拒绝时会回退到有界 `read_at`/`write_at` 流水线，
+最多 `concurrency` 个块在飞（内存上界 `concurrency × chunk_size`）。目标文件
+先被截断，复制到自身抛 `shutil.SameFileError`，`copy_stat=True` 时附加
+`shutil.copystat`。
 
 ### 配置函数
 

@@ -69,6 +69,7 @@ jobs:
         python -c "import ayafileio._ayafileio"
         python -m unittest discover -s tests -p test_async_wrapper.py -v
         python -m unittest discover -s tests -p test_write_at.py -v
+        python -m unittest discover -s tests -p test_acopy.py -v
     - name: Check backend info
       timeout-minutes: 1
       run: |
@@ -176,6 +177,7 @@ jobs:
         python -c "import ayafileio._ayafileio"
         python -m unittest discover -s tests -p test_async_wrapper.py -v
         python -m unittest discover -s tests -p test_write_at.py -v
+        python -m unittest discover -s tests -p test_acopy.py -v
     - name: Check backend info
       timeout-minutes: 1
       run: |
@@ -278,6 +280,7 @@ jobs:
         python -c "import ayafileio._ayafileio"
         python -m unittest discover -s tests -p test_async_wrapper.py -v
         python -m unittest discover -s tests -p test_write_at.py -v
+        python -m unittest discover -s tests -p test_acopy.py -v
     - name: Check backend info
       timeout-minutes: 1
       run: |
