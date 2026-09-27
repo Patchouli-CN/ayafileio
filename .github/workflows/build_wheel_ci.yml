@@ -12,6 +12,15 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      linux_targets:
+        description: 'Linux 构建目标：fast = x86_64+aarch64；riscv64 走 QEMU 极慢，补发 wheel 时选 fast 即可'
+        type: choice
+        options:
+          - all
+          - fast
+          - riscv64
+        default: all
 
 jobs:
   check-version:
@@ -46,9 +55,10 @@ jobs:
 
   build:
     name: Build wheels on ${{ matrix.os }}
-    # Only run when triggered by workflow_run with success, or always for tags/manual
+    # Only run when triggered by workflow_run with success, or always for tags/manual.
+    # 手动触发且 linux_targets=riscv64 时跳过（只补慢路径）。
     needs: check-version
-    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'riscv64') }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -56,7 +66,8 @@ jobs:
       fail-fast: false
     env:
       CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
-      CIBW_ARCHS_LINUX: "x86_64 aarch64 riscv64"
+      # riscv64 拆到独立 job（见下），这里只跑快路径
+      CIBW_ARCHS_LINUX: "x86_64 aarch64"
       CIBW_ARCHS_WINDOWS: "AMD64 x86"
       CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
       CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10"
@@ -69,7 +80,7 @@ jobs:
 
       CIBW_ENVIRONMENT_LINUX: "ENABLE_IO_URING=ON"
       CIBW_BEFORE_ALL_LINUX: "yum install -y liburing-devel"
-      
+
       CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.0"
     steps:
     - uses: actions/checkout@v6.0.2
@@ -93,9 +104,51 @@ jobs:
         path: ./wheelhouse/*.whl
         retention-days: 7
 
+  build-riscv64:
+    # riscv64 走 QEMU 全 emulation，一个 arch 比其它所有加起来还慢。
+    # 拆成独立 job：不拖快路径的反馈，flake 了可以单独重跑，
+    # 手动补发 wheel 时（linux_targets=fast）可以整组跳过。
+    name: Build wheels on ubuntu-24.04 (riscv64)
+    needs: check-version
+    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'fast') }}
+    runs-on: ubuntu-24.04
+    env:
+      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
+      CIBW_ARCHS_LINUX: "riscv64"
+      CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10"
+      CIBW_ENABLE: "cpython-prerelease"
+      CIBW_BUILD_FRONTEND: "build"
+      CIBW_TEST_SKIP: "*"
+      CIBW_SKIP: "*-musllinux_*"
+      CIBW_ENVIRONMENT_LINUX: "ENABLE_IO_URING=ON"
+      CIBW_BEFORE_ALL_LINUX: "yum install -y liburing-devel"
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - name: Check out recursively
+      run: git submodule update --init --recursive
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: all
+    - name: Install cibuildwheel
+      run: python -m pip install cibuildwheel==4.2.1
+    - name: Build wheels
+      run: python -m cibuildwheel --output-dir wheelhouse
+    - uses: actions/upload-artifact@v4
+      with:
+        name: cibw-wheels-ubuntu-riscv64
+        path: ./wheelhouse/*.whl
+        retention-days: 7
+
   publish:
     name: Publish to PyPI
-    needs: build
+    # 任一构建组被输入/守护跳过都算正常（result == skipped），
+    # 两组同时跳过只会发生在版本守护命中时，此时不该走到这里。
+    needs: [build, build-riscv64]
+    if: ${{ needs.check-version.outputs.should_build == 'true' && !cancelled() && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-riscv64.result == 'success' || needs.build-riscv64.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write

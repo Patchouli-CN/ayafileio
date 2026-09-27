@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Build / CI
 - **Python 3.15 support.** The test matrix now covers 3.15 and 3.15t (resolving to 3.15.0 release candidates via `allow-prereleases` until the October 1 final), and the wheel pipeline builds `cp315`/`cp315t` wheels — cibuildwheel 3.2.1 → 4.2.1, with `CIBW_ENABLE` switched to `cpython-prerelease` (4.x dropped the `cpython-freethreading` group; free-threaded wheels are built by default now).
+- **riscv64 split out of the wheel pipeline.** The QEMU-emulated riscv64 build (slower than everything else combined) is now its own job, and manual dispatches accept a `linux_targets` input (`all`/`fast`/`riscv64`) — topping up wheels no longer means sitting through the slow path.
 
 ## [1.8.0] - 2026-09-27
 

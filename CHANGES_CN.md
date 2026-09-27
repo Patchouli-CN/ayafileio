@@ -9,6 +9,7 @@
 
 ### 构建 / CI
 - **Python 3.15 支持。** 测试矩阵覆盖 3.15 与 3.15t（10 月 1 日正式版发布前经 `allow-prereleases` 解析到 3.15.0 RC），wheel 流水线新增 `cp315`/`cp315t` 构建——cibuildwheel 3.2.1 → 4.2.1，`CIBW_ENABLE` 换成 `cpython-prerelease`（4.x 移除了 `cpython-freethreading` 组，自由线程 wheel 改为默认构建）。
+- **riscv64 从 wheel 流水线拆出。** QEMU 全模拟的 riscv64 构建（比其它所有目标加起来还慢）独立成单独 job；手动触发新增 `linux_targets` 输入（`all`/`fast`/`riscv64`）——补发 wheel 不必再陪跑慢路径。
 
 ## [1.8.0] - 2026-09-27
 
