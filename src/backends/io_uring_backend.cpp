@@ -221,17 +221,21 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
         bool saw_wakeup = false;
 
         // 第一遍：摘出本批完成（不持 GIL，纯指针搬运）
+        // cq_mtx：与提交线程的内联收割互斥，每个 CQE 只被消费一次
         std::vector<std::pair<IORequest*, int>> done;
-        io_uring_for_each_cqe(&inst->ring, head, cqe) {
-            IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
-            if (req)
-                done.emplace_back(req, cqe->res);
-            else
-                saw_wakeup = true;  // eventfd / timeout wakeup
-            count++;
-        }
+        {
+            std::lock_guard<std::mutex> cq_lk(inst->cq_mtx);
+            io_uring_for_each_cqe(&inst->ring, head, cqe) {
+                IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
+                if (req)
+                    done.emplace_back(req, cqe->res);
+                else
+                    saw_wakeup = true;  // eventfd / timeout wakeup
+                count++;
+            }
 
-        if (count > 0) io_uring_cq_advance(&inst->ring, count);
+            if (count > 0) io_uring_cq_advance(&inst->ring, count);
+        }
 
         // SQ 可能已腾出空间：补提交溢出队列里的背压请求
         uring_drain_overflow(inst);
@@ -273,6 +277,112 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// 提交后内联收割 + 内联完成 —— IOCP 同步完成分支（FILE_SKIP_COMPLETION_PORT_
+// ON_SUCCESS）的 uring 对应物
+// ════════════════════════════════════════════════════════════════════════════
+
+// COOP_TASKRUN 下缓存命中的读在 io_uring_enter 返回时就已完成，CQE 多半已
+// 躺在 CQ 里——就地摘走直接完成，省掉 reaper 唤醒 + 跨线程交接一整圈。
+// 只摘队首连续的数据 CQE（最多 32 个，防止清积压饿死提交线程）；遇到
+// wakeup CQE（data == nullptr）即停，eventfd 唤醒/重新武装语义完整留给
+// reaper。调用方持 GIL（submit_io 只从 Python 入口进入）。
+void IOUringBackend::try_harvest_inline() {
+    UringInstance* inst = m_uring.get();
+    if (!inst) [[unlikely]] return;
+
+    // reaper 正在收割则让路——它自然会拿到这批 CQE
+    std::unique_lock<std::mutex> lk(inst->cq_mtx, std::try_to_lock);
+    if (!lk.owns_lock()) return;
+
+    std::pair<IORequest*, int> done[32];
+    size_t n = 0;
+    unsigned head;
+    struct io_uring_cqe* cqe;
+    io_uring_for_each_cqe(&inst->ring, head, cqe) {
+        IORequest* req = static_cast<IORequest*>(io_uring_cqe_get_data(cqe));
+        if (!req || n >= 32) break;  // wakeup CQE / 达到上限：留给 reaper
+        done[n++] = {req, cqe->res};
+    }
+    if (n == 0) return;
+    io_uring_cq_advance(&inst->ring, static_cast<unsigned>(n));
+    lk.unlock();
+
+    for (size_t i = 0; i < n; i++)
+        static_cast<IOUringBackend*>(done[i].first->file)
+            ->complete_inline(done[i].first, done[i].second);
+}
+
+// 提交线程（持 GIL）内联完成：取值与清理逻辑同 complete_ok/complete_error，
+// 但结果不经 batcher 的 call_soon_threadsafe，直接 set_result/set_exception
+// ——future 在 I/O 调用返回前就已 resolve，await 不再让出事件循环。
+// 批量器记账保持平衡（op_submitted 已在 make_req* 里计过）。
+void IOUringBackend::complete_inline(IORequest* req, int res) {
+    m_pending.fetch_sub(1, std::memory_order_release);
+    m_close_wake.release();
+
+    PyObject* set_fn;
+    PyObject* val;
+    if (res >= 0) [[likely]] {
+        size_t bytes = static_cast<size_t>(res);
+        switch (req->type) {
+            case ReqType::Read: [[likely]]
+                if (req->isReadinto) [[unlikely]] {
+                    val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
+                } else if (req->preResult) {
+                    // 零拷贝快路径：数据已直接读进预建的 PyBytes
+                    val = req->preResult;
+                    req->preResult = nullptr;
+                    if (bytes < req->reqSize) [[unlikely]] {
+                        // 短读（文件在读期间被外部截短）：收缩到实际字节数
+                        PyObject* exact = PyBytes_FromStringAndSize(
+                            PyBytes_AS_STRING(val), static_cast<Py_ssize_t>(bytes));
+                        Py_DECREF(val);
+                        val = exact;
+                    }
+                } else {
+                    val = PyBytes_FromStringAndSize(req->buf(), static_cast<Py_ssize_t>(bytes));
+                }
+                break;
+            case ReqType::Write: [[likely]]
+                val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
+                break;
+            default:
+                val = Py_None;
+                Py_INCREF(val);
+                break;
+        }
+        set_fn = req->set_result; req->set_result = nullptr;
+        Py_DECREF(req->future); req->future = nullptr;
+        Py_XDECREF(req->set_exception); req->set_exception = nullptr;
+    } else {
+        int err = -res;
+        PyObject* exc_class = map_posix_error(err);
+        val = PyObject_CallFunction(exc_class, "is", err, "I/O operation failed");
+        set_fn = req->set_exception; req->set_exception = nullptr;
+        if (!set_fn && req->future) {
+            // set_exception 未预取（罕见路径），此处按需获取（持 GIL）
+            set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+            if (!set_fn) PyErr_Clear();
+        }
+        Py_DECREF(req->future); req->future = nullptr;
+        Py_XDECREF(req->set_result); req->set_result = nullptr;
+    }
+
+    // 若这是本 loop 最后一个在飞 op 且 batcher 里还有滞留结果（其它 op
+    // 走的批量路径），顺手 flush——与 IOCP 的 complete_tracked_op 同款
+    if (req->batcher && req->batcher->op_completed() && req->batcher->has_pending())
+        req->batcher->flush();
+
+    if (set_fn && val) {
+        PyObject* r = PyObject_CallFunctionObjArgs(set_fn, val, nullptr);
+        Py_XDECREF(r);
+    }
+    Py_XDECREF(set_fn);
+    Py_XDECREF(val);
+    REQ_FREE(req);  // 析构负责 preResult/userBufView/poolBuf 等剩余清理
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // I/O 提交
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -289,6 +399,9 @@ void IOUringBackend::submit_io(IORequest* req, int op, int fd,
         req, op, fd, data.data(),
         static_cast<unsigned>(data.size()),
         static_cast<uint64_t>(offset)});
+    // 缓存命中等"提交即完成"的 CQE 已在 CQ 里：就地收割内联完成，
+    // 不再绕道 reaper 线程
+    try_harvest_inline();
 }
 
 // ════════════════════════════════════════════════════════════════════════════

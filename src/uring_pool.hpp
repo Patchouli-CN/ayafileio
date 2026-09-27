@@ -56,6 +56,12 @@ struct UringInstance {
     // 由 reaper 在每次 CQE 排空后补提交（uring_drain_overflow）。
     std::mutex submit_mtx;
     std::deque<PendingSubmit> overflow;
+
+    // CQ 消费序列化：reaper 与"提交后内联收割"（try_harvest_inline）
+    // 两个消费者都必须持此锁才能 for_each_cqe/cq_advance，保证每个
+    // CQE 只被消费一次。内联收割用 try_lock——拿不到即让给 reaper，
+    // 绝不阻塞提交线程；reaper 也从不持此锁再取 submit_mtx，无锁序问题。
+    std::mutex cq_mtx;
     
     using ReaperFunc = void (*)(UringInstance*);
     ReaperFunc reaper_func = nullptr;

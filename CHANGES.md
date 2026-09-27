@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+- **io_uring: inline harvest of submit-time completions (page-cache-hit fast path).** With `IORING_SETUP_COOP_TASKRUN` (probed in 1.7.0), a cache-hit read completes inside the submitter's own `io_uring_enter`, yet every completion still round-tripped through the reaper thread. After each submission the submitting thread now non-blockingly peeks the CQ — `try_lock` on a new consumer-side mutex shared with the reaper, up to 32 leading data CQEs per peek, wakeup CQEs always left to the reaper — and resolves them inline with a direct `set_result`/`set_exception`, the io_uring counterpart of the Windows `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` path. The future is already resolved when the I/O call returns, so `await` no longer yields to the event loop for cache-hit I/O; batcher accounting stays balanced. Kernels without `COOP_TASKRUN` simply fall back to the reaper path.
+
+### Added
+- **`ayafileio.acopy(src, dst)` — async whole-file copy.** OS-level fast paths run first in a worker thread: in-kernel zero-copy `copy_file_range` on Linux, `CopyFile2` on Windows (which additionally preserves timestamps and metadata). Other platforms — and systems where the fast call is rejected (cross-device copies, NFS, …) — transparently fall back to a `read_at`/`write_at` pipeline that keeps up to `concurrency` chunks of `chunk_size` in flight (memory bound: `concurrency × chunk_size`, defaults 8 × 4 MiB; the destination is pre-sized to avoid repeated EOF extension). Semantics follow `shutil.copyfile`: the destination is truncated first, copying a file onto itself raises `shutil.SameFileError`, and `copy_stat=True` additionally applies `shutil.copystat`. Measured locally on a cache-hot 512 MiB file: 3,300 MiB/s, on par with `robocopy` (3,413 MiB/s).
+
 ## [1.7.0] - 2026-09-26
 
 ### Changed
