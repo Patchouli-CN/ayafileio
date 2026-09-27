@@ -3,14 +3,16 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
-[![Version](https://img.shields.io/badge/version-1.6.0-red.svg)]()
+[![PyPI](https://img.shields.io/pypi/v/ayafileio.svg)](https://pypi.org/project/ayafileio/)
 
 **English** | [简体中文](README_CN.md)
 
 > "The fastest file I/O in Gensokyo, swift as the Wind God Maiden."
-> — Aya Shameimaru, always flying at full speed
+> — Aya Shameimaru
 
-Async file I/O with real kernel backends: **IOCP** on Windows, **io_uring** on Linux (kernel 5.1+), **Dispatch I/O (GCD)** on macOS. No thread pools pretending to be async — one `ayafileio.open()`, and the right backend is picked for you.
+Async file I/O on real kernel backends: IOCP on Windows, io_uring on Linux
+(5.1+), Dispatch I/O on macOS. No thread pools pretending to be async;
+`ayafileio.open()` picks the backend for you.
 
 ## Changelog
 
@@ -27,7 +29,7 @@ See [CHANGES.md](CHANGES.md).
 ## Features
 
 - Zero thread overhead on true-async platforms — no background threads
-- Kernel-level completion: IOCP / io_uring / Dispatch I/O, direct to the kernel
+- Kernel-level completion: IOCP / io_uring / Dispatch I/O
 - Thousands of concurrent operations on a single file handle
 - aiofiles-compatible API, plain `async/await`
 - Text and binary modes with automatic encoding/decoding
@@ -230,14 +232,14 @@ n = await ayafileio.acopy("model.gguf", "backup/model.gguf")
 ```
 
 `acopy(src, dst, *, chunk_size=4 MiB, concurrency=8, copy_stat=False)` copies a
-whole file asynchronously and returns the number of bytes copied. OS-level fast
-paths run first in a worker thread: the in-kernel zero-copy `copy_file_range`
-on Linux and `CopyFile2` on Windows (which also preserves metadata); other
-platforms — and systems that reject the fast call — fall back to a bounded
-`read_at`/`write_at` pipeline with up to `concurrency` chunks in flight (at
-most `concurrency × chunk_size` of memory). The destination is truncated
-first, copying a file onto itself raises `shutil.SameFileError`, and
-`copy_stat=True` additionally applies `shutil.copystat`.
+whole file and returns the number of bytes copied. On Linux it uses the
+in-kernel zero-copy `copy_file_range`; on Windows `CopyFile2`, which also
+preserves metadata. Both run in a worker thread. Where no fast call exists (or
+the filesystem rejects it), it falls back to a `read_at`/`write_at` pipeline
+with up to `concurrency` chunks in flight, so memory stays below
+`concurrency × chunk_size`. The destination is truncated first; copying a file
+onto itself raises `shutil.SameFileError`; `copy_stat=True` applies
+`shutil.copystat` afterwards.
 
 ### Configuration functions
 
@@ -255,7 +257,7 @@ def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[
 ```
 
 Wraps an existing file descriptor (int) or a file-like object with `fileno()` as
-an `AsyncFile`, backed by the optimal platform backend. Binary mode only.
+an `AsyncFile`. Binary mode only.
 
 ### Pool management
 
@@ -268,77 +270,61 @@ Useful after bulk tempfile operations or between benchmark rounds.
 
 ## Benchmarks
 
-### Crawlee-style dataset append (open/write/close per record)
+Every push runs `tests/t_compare.py` on all three platforms on CI and attaches
+the JSON results as artifacts. Numbers below are from a recent run
+(GitHub Actions, Python 3.14) unless marked *local*. Reproduce with
+`python tests/t_compare.py`.
 
-5,000 records, 50 concurrent writers, each writing a single line and closing the
-file — simulating Crawlee's Dataset append pattern:
+### Random 4 KiB read (Linux, io_uring)
 
-| Platform | ayafileio | aiofiles | Speedup |
-|----------|-----------|----------|---------|
-| Windows (NVMe SSD) | **41,336 items/s** | 9,658 items/s | **4.28x** |
-| Linux (NVMe SSD) | **17,688 items/s** | 11,455 items/s | **1.54x** |
-| macOS (NVMe SSD) | **29,837 items/s** | 25,522 items/s | **1.17x** |
-| Windows (6yr old HDD) | **20,251 items/s** | 13,011 items/s | **1.56x** |
+| Concurrency | ayafileio | aiofiles | aya/aio |
+|------------:|----------:|---------:|--------:|
+| 1 | 191.5K ops/s | 9.8K ops/s | 19.6x |
+| 16 | 361.6K ops/s | 10.2K ops/s | 35.4x |
+| 64 | 361.2K ops/s | 12.5K ops/s | 28.9x |
+| 256 | 349.9K ops/s | 12.3K ops/s | 28.5x |
 
-On the Windows NVMe run, ayafileio's P99 latency is 42x lower (0.044 ms vs
-1.854 ms), and jitter under load is 16.2% against aiofiles' 96.7%. Even on the
-old HDD the numbers stay predictable.
+Positioned `read_at` on a single shared handle holds ~345K ops/s from x16 up;
+aiofiles has no positioned-read API to compare against. Small 4 KiB sequential
+reads: 201.6K vs 21.9K ops/s (9.2x). Sequential read throughput: 7,360 MB/s at
+64 KiB blocks (6.6x), 20,178 MB/s at 4 MiB (1.3x).
 
-*Test environment: Windows 10/11, Ubuntu 22.04, macOS 14; GitHub Actions NVMe SSD.*
+Sequential writes are closer: 1.2–1.3x up to 256 KiB blocks, and aiofiles
+pulls ahead at 4 MiB (0.4x) on the CI runner — large buffered writes ride the
+kernel's writeback path and swing between runs. If that workload matters to
+you, check a recent run's artifact rather than any single number.
 
-### Single-file random read at high concurrency
+### Windows and macOS
 
-100,000 concurrent tasks doing random 256-byte reads on one shared file handle —
-no open/close overhead, pure I/O path:
+GitHub's Windows runners throttle small I/O too hard for the CI numbers to be
+representative, so the Windows figures are *local* NVMe measurements:
 
-| Library | 1K concur | 10K concur | 50K concur | 100K concur |
-|---------|-----------|------------|------------|-------------|
-| **ayafileio (IOCP)** | 7,487 ops/s | **46,616 ops/s** | **28,165 ops/s** | **19,290 ops/s** |
-| aiofiles (threadpool) | 7,706 ops/s | 7,320 ops/s | 2,131 ops/s | 2,130 ops/s |
-| sync threadpool | 9,492 ops/s | 9,469 ops/s | 8,840 ops/s | 8,660 ops/s |
-| **ayafileio vs aiofiles** | 1.0x | **6.4x** | **13.2x** | **9.1x** |
+- Windows (IOCP), sequential write: 1,363 → 2,858 MB/s at 1 MiB blocks,
+  929 → 3,046 MB/s at 4 MiB (1.47x over aiofiles). 4 KiB random `read_at`
+  with 16 in flight: 21.4K ops/s.
+- macOS (Dispatch I/O), sequential write: 139 → 5,502 MB/s at 1 MiB (40x),
+  208 → 6,787 MB/s at 4 MiB — measured on the macos-15 CI runner, which is
+  fast enough to be meaningful.
 
-At 1K concurrency everything is about equal — the IOCP setup cost is still being
-amortized. Past 10K, aiofiles' thread pool saturates and throughput *drops* with
-more concurrency (7,706 → 2,130 ops/s, a 72% loss), while IOCP *gains* throughput
-thanks to batched completion harvesting via `GetQueuedCompletionStatusEx`. The
-sync threadpool flatlines around 8,800 ops/s no matter what — that's the thread
-contention ceiling.
+### Whole-file copy (`acopy`, *local*, 512 MiB cache-hot file)
 
-*Test environment: Windows 10, Python 3.14.5, WDC WD10EZEX 7200RPM HDD, 20 MB file, 256 B random reads.*
+| Tool | Time | Throughput |
+|------|-----:|-----------:|
+| `robocopy` | 0.150 s | 3,413 MiB/s |
+| `acopy()` (CopyFile2 fast path) | 0.155 s | 3,300 MiB/s |
+| `shutil.copyfile` | 0.217 s | 2,358 MiB/s |
+| `acopy()` forced pipeline | 0.330 s | 1,554 MiB/s |
 
-### Stress: 500,000 concurrent reads
+### Concurrent logging writes (`tests/test_loguru.py`)
 
-Half a million asyncio tasks all reading one file through IOCP:
+10K records × 128 B written concurrently to 5 files: 3.5–5.2x over
+sync-writes-in-a-threadpool across runs.
 
-| Metric | Value |
-|--------|-------|
-| Concurrent tasks | 500,000 |
-| Completion time | 21.6 s |
-| Throughput | 23,116 ops/s |
-| Peak memory (RSS) | ~583 MB |
-| Errors / exceptions | 0 |
+### Tuning
 
-The dual-IOCP worker architecture (2 threads total) drains all 500K completions.
-aiofiles would need thousands of threads for the same workload — and would still
-be slower.
-
-### A note on tuning
-
-We benchmarked 14 configuration combinations (`iocp_batch_size`, `buffer_size`,
-`buffer_pool_max`, `io_worker_count`) on the HDD at 100K concurrency. Every single
-one landed within ±3% of the defaults — the auto-tuned defaults already saturate
-the disk's physical I/O limit, so there is nothing left to tune by hand.
-
-On NVMe drives with >500K IOPS, raising `iocp_batch_size` to 128–256 and
-`buffer_size` to 128 KB may squeeze out a bit more:
-
-```python
-ayafileio.configure({
-    "iocp_batch_size": 128,
-    "buffer_size": 131072,
-})
-```
+The defaults are where the tuning ended up. On very fast NVMe drives,
+`iocp_batch_size` 128–256 with `buffer_size` 128 KiB can squeeze out a bit
+more on Windows.
 
 ## Contributing
 

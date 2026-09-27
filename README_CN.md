@@ -3,14 +3,14 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
-[![Version](https://img.shields.io/badge/version-1.6.0-red.svg)]()
+[![PyPI](https://img.shields.io/pypi/v/ayafileio.svg)](https://pypi.org/project/ayafileio/)
 
 [English](README.md) | **简体中文**
 
 > **「幻想郷最速のファイルI/O、風神少女の如く」**
-> *—— 射命丸文，今日も全力で翔ける*
+> *—— 射命丸文*
 
-跨平台异步文件 I/O，用的是真正的内核后端：Windows 上 **IOCP**，Linux 上 **io_uring**（内核 5.1+），macOS 上 **Dispatch I/O (GCD)**。没有拿线程池冒充异步的把戏——一个 `ayafileio.open()`，自动选对后端。
+跨平台异步文件 I/O，用的是真正的内核后端：Windows 上 IOCP，Linux 上 io_uring（内核 5.1+），macOS 上 Dispatch I/O (GCD)。没有拿线程池冒充异步的把戏——`ayafileio.open()` 会自动选对后端。
 
 ## 更新日志
 
@@ -27,7 +27,7 @@
 ## 特性
 
 - 真异步平台零线程开销——没有后台线程，也不需要 `run_in_executor`
-- 内核级完成通知：IOCP / io_uring / Dispatch I/O 直达内核
+- 内核级完成通知：IOCP / io_uring / Dispatch I/O
 - 单文件句柄上轻松扛数千并发操作
 - 与 aiofiles 兼容的 API，就是普通的 `async/await`
 - 文本/二进制模式，自动编解码
@@ -222,13 +222,12 @@ async with ayafileio.open("data.bin", "w+b") as f:
 n = await ayafileio.acopy("model.gguf", "backup/model.gguf")
 ```
 
-`acopy(src, dst, *, chunk_size=4 MiB, concurrency=8, copy_stat=False)` 异步复制
-整个文件，返回复制的字节数。优先在 worker 线程里走 OS 级快车道：Linux 用
-内核态零拷贝 `copy_file_range`，Windows 用 `CopyFile2`（顺带保留元数据）；
-其它平台、以及快车道被系统拒绝时会回退到有界 `read_at`/`write_at` 流水线，
-最多 `concurrency` 个块在飞（内存上界 `concurrency × chunk_size`）。目标文件
-先被截断，复制到自身抛 `shutil.SameFileError`，`copy_stat=True` 时附加
-`shutil.copystat`。
+`acopy(src, dst, *, chunk_size=4 MiB, concurrency=8, copy_stat=False)` 复制整个
+文件，返回复制的字节数。Linux 上走内核态零拷贝 `copy_file_range`，Windows 上走
+`CopyFile2`（顺带保留元数据），都在 worker 线程里执行。没有快车道可用（或文件
+系统拒绝）时，回退到 `read_at`/`write_at` 流水线：最多 `concurrency` 个块在飞，
+内存占用不超过 `concurrency × chunk_size`。目标文件先截断；复制到自身抛
+`shutil.SameFileError`；`copy_stat=True` 时完成后附加 `shutil.copystat`。
 
 ### 配置函数
 
@@ -245,7 +244,7 @@ def get_backend_info() -> dict: ...             # 获取后端信息
 def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]: ...
 ```
 
-将已有的 `int` 文件描述符或带 `fileno()` 方法的对象包装为 `AsyncFile`，底层自动选择最优平台后端。仅支持二进制模式。
+将已有的 `int` 文件描述符或带 `fileno()` 方法的对象包装为 `AsyncFile`。仅二进制模式。
 
 ### 池管理
 
@@ -258,70 +257,55 @@ def drain_buffer_pool() -> None: ...            # 清空缓冲区池中的所有
 
 ## 基准测试
 
-### Crawlee 风格 Dataset 追加写入（每条记录 open → write → close）
+每次推送都会在 CI 上三平台跑完整基准（`tests/t_compare.py`），JSON 结果作为
+artifact 挂在每次运行上。除非标注*本地*，以下数字来自最近一次 CI 运行
+（GitHub Actions, Python 3.14）。本地复现：`python tests/t_compare.py`。
 
-5000 条记录，50 个并发写入者，每条写一行就关闭文件——模拟 Crawlee 的 Dataset 追加模式：
+### 随机 4 KiB 读（Linux, io_uring）
 
-| 平台 | ayafileio | aiofiles | 提速 |
-|------|-----------|----------|------|
-| Windows (NVMe SSD) | **41,336 条/秒** | 9,658 条/秒 | **4.28x** |
-| Linux (NVMe SSD) | **17,688 条/秒** | 11,455 条/秒 | **1.54x** |
-| macOS (NVMe SSD) | **29,837 条/秒** | 25,522 条/秒 | **1.17x** |
-| Windows (6年旧机械盘) | **20,251 条/秒** | 13,011 条/秒 | **1.56x** |
+| 并发 | ayafileio | aiofiles | 倍数 |
+|---:|----------:|---------:|---:|
+| 1 | 191.5K ops/s | 9.8K ops/s | 19.6x |
+| 16 | 361.6K ops/s | 10.2K ops/s | 35.4x |
+| 64 | 361.2K ops/s | 12.5K ops/s | 28.9x |
+| 256 | 349.9K ops/s | 12.3K ops/s | 28.5x |
 
-Windows NVMe 那轮，ayafileio 的 P99 延迟是 0.044ms，aiofiles 是 1.854ms——差 42 倍；
-负载下抖动 16.2% 对 96.7%。就算换上快报废的机械盘，数字依然稳。
+单共享句柄上的位置读 `read_at` 从 x16 起稳定在 ~345K ops/s——aiofiles 没有
+位置读 API，无从对比。4 KiB 小块顺序读 201.6K vs 21.9K ops/s（9.2x）。
+顺序读吞吐：64 KiB 块 7,360 MB/s（6.6x），4 MiB 块 20,178 MB/s（1.3x）。
 
-*测试环境：Windows 10/11, Ubuntu 22.04, macOS 14；GitHub Actions NVMe SSD。*
+顺序写差距不大：256 KiB 块以内 1.2–1.3x，4 MiB 块在 CI 机器上反而落后
+（0.4x）——大块缓冲写走内核 writeback 路径，不同轮次波动很大。关心这个
+负载的话，直接看最近一次运行的 artifact 比看任何单个数字都靠谱。
 
-### 单文件高并发随机读
+### Windows 和 macOS
 
-100,000 个并发任务共享同一个文件句柄，随机读 256 字节——没有开关文件开销，纯粹比拼 I/O 路径：
+GitHub 的 Windows runner 对小 I/O 限流太狠，CI 数字没有代表性，Windows 这边
+用*本地* NVMe 实测：
 
-| 库 | 1K 并发 | 10K 并发 | 50K 并发 | 100K 并发 |
-|---|---------|----------|----------|-----------|
-| **ayafileio (IOCP)** | 7,487 ops/s | **46,616 ops/s** | **28,165 ops/s** | **19,290 ops/s** |
-| aiofiles (线程池) | 7,706 ops/s | 7,320 ops/s | 2,131 ops/s | 2,130 ops/s |
-| 同步线程池 | 9,492 ops/s | 9,469 ops/s | 8,840 ops/s | 8,660 ops/s |
-| **ayafileio vs aiofiles** | 1.0x | **6.4x** | **13.2x** | **9.1x** |
+- Windows (IOCP) 顺序写：1 MiB 块 1,363 → 2,858 MB/s，4 MiB 块 929 → 3,046 MB/s
+  （对 aiofiles 1.47x）；4 KiB 随机 `read_at`、16 在飞：21.4K ops/s。
+- macOS (Dispatch I/O) 顺序写：1 MiB 块 139 → 5,502 MB/s（40x），4 MiB 块
+  208 → 6,787 MB/s——这两个是 macos-15 CI runner 上测的，那台机器够快，
+  数字有意义。
 
-1K 并发时三家差不多——IOCP 的初始化开销还没摊完。过了 10K，aiofiles 的线程池开始饱和，
-吞吐量**随并发增加不升反降**（7,706 → 2,130 ops/s，掉了 72%）；IOCP 反而越跑越快，
-靠的是 `GetQueuedCompletionStatusEx` 批量收割完成事件。同步线程池则无论并发多少都趴在
-~8,800 ops/s——那就是线程竞争的物理天花板。
+### 整文件复制（`acopy`，*本地*，512 MiB 缓存热文件）
 
-*测试环境：Windows 10, Python 3.14.5, 西数 1TB 7200RPM 机械硬盘, 20MB 文件, 256B 随机读。*
+| 工具 | 耗时 | 吞吐 |
+|------|-----:|-----:|
+| `robocopy` | 0.150 s | 3,413 MiB/s |
+| `acopy()`（CopyFile2 快车道） | 0.155 s | 3,300 MiB/s |
+| `shutil.copyfile` | 0.217 s | 2,358 MiB/s |
+| `acopy()` 强制流水线 | 0.330 s | 1,554 MiB/s |
 
-### 压测：50 万并发读
+### 并发日志写入（`tests/test_loguru.py`）
 
-50 万个 asyncio 任务同时读同一个文件，走 IOCP：
+10K 条 × 128 B 并发写 5 个文件：各轮次对"同步写 + 线程池"快 3.5–5.2x。
 
-| 指标 | 数值 |
-|------|------|
-| 并发任务数 | 500,000 |
-| 总耗时 | 21.6 秒 |
-| 吞吐量 | 23,116 ops/s |
-| 峰值内存 (RSS) | ~583 MB |
-| 错误 / 异常 | 0 |
+### 调优
 
-双 IOCP worker 架构（总共 2 个线程）收割完全部 50 万个完成事件，零错误。
-同样的负载 aiofiles 得开几千个线程——而且还会更慢。
-
-### 关于调优
-
-我们在机械盘上用 14 种配置组合（`iocp_batch_size`、`buffer_size`、`buffer_pool_max`、
-`io_worker_count`）跑了 100K 并发。结果每一种都落在默认值的 ±3% 以内——自动调好的默认值
-已经顶到了磁盘的物理 I/O 上限，没有留给手工调的空间。
-
-NVMe 盘（>500K IOPS）上，把 `iocp_batch_size` 提到 128–256、`buffer_size` 提到 128 KB，
-可能还能再榨一点：
-
-```python
-ayafileio.configure({
-    "iocp_batch_size": 128,
-    "buffer_size": 131072,
-})
-```
+默认值就是调优的终点。特别快的 NVMe 上，Windows 可以试试 `iocp_batch_size`
+128–256 配 `buffer_size` 128 KiB，也许还能再榨一点。
 
 ## 贡献
 
