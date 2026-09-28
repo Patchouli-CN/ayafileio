@@ -1,6 +1,6 @@
 # 故事集
 
-[English](https://github.com/Patchouli-CN/ayafileio/blob/main/STORY.md)
+[English](STORY.md)
 
 这里收集 ayafileio 的真实使用故事——基准测试、意外发现、脑洞用法，
 以及偶尔的"它不适合我的场景，原因如下"。统统欢迎。

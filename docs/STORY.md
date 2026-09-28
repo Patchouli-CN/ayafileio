@@ -1,6 +1,6 @@
 # Stories
 
-[简体中文](https://github.com/Patchouli-CN/ayafileio/blob/main/STORY_CN.md)
+[简体中文](STORY_CN.md)
 
 Real-world stories from people using ayafileio — benchmarks, surprises,
 creative uses, and the occasional "it didn't fit, and here's why". All of it

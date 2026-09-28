@@ -1,7 +1,9 @@
 # MANIFEST.in
 include README.md
 include README_CN.md
-include CHANGES.md
-include CHANGES_CN.md
+include docs/CHANGES.md
+include docs/CHANGES_CN.md
+include docs/STORY.md
+include docs/STORY_CN.md
 include LICENSE
 recursive-include ayafileio *.py *.pyd *.pyi

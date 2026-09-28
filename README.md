@@ -20,8 +20,8 @@ Async file I/O on real kernel backends: IOCP on Windows, io_uring on Linux
 
 ## Changelog
 
-See [CHANGES.md](https://github.com/Patchouli-CN/ayafileio/blob/main/CHANGES.md).
-Using ayafileio in an interesting way? See [STORY.md](https://github.com/Patchouli-CN/ayafileio/blob/main/STORY.md).
+See [CHANGES.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/CHANGES.md).
+Using ayafileio in an interesting way? See [STORY.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/STORY.md).
 
 ## Backends
 
