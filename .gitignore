@@ -42,3 +42,6 @@ __pycache__/
 # Test binary files
 test_1gb.bin
 test_small.bin
+
+# scratch
+temp/
