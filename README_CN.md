@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
 [![PyPI](https://img.shields.io/pypi/v/ayafileio.svg)](https://pypi.org/project/ayafileio/)
 
-[English](README.md) | **简体中文**
+[English](https://github.com/Patchouli-CN/ayafileio/blob/main/README.md) | **简体中文**
 
 > **「幻想郷最速のファイルI/O、風神少女の如く」**
 > *—— 射命丸文*

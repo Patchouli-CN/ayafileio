@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
 [![PyPI](https://img.shields.io/pypi/v/ayafileio.svg)](https://pypi.org/project/ayafileio/)
 
-**English** | [简体中文](README_CN.md)
+**English** | [简体中文](https://github.com/Patchouli-CN/ayafileio/blob/main/README_CN.md)
 
 > "The fastest file I/O in Gensokyo, swift as the Wind God Maiden."
 > — Aya Shameimaru
