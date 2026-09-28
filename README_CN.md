@@ -18,7 +18,7 @@
 
 ## 更新日志
 
-见 [CHANGES_CN.md](CHANGES_CN.md)。
+见 [CHANGES_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/CHANGES_CN.md)。
 
 ## 后端
 
