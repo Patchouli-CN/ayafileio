@@ -7,9 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Build / CI
-- **Python 3.15 support.** The test matrix now covers 3.15 and 3.15t (resolving to 3.15.0 release candidates via `allow-prereleases` until the October 1 final), and the wheel pipeline builds `cp315`/`cp315t` wheels — cibuildwheel 3.2.1 → 4.2.1, with `CIBW_ENABLE` switched to `cpython-prerelease` (4.x dropped the `cpython-freethreading` group; free-threaded wheels are built by default now).
-- **riscv64 split out of the wheel pipeline.** The QEMU-emulated riscv64 build (slower than everything else combined) is now its own job, and manual dispatches accept a `linux_targets` input (`all`/`fast`/`riscv64`) — topping up wheels no longer means sitting through the slow path.
+Nothing pending yet.
 
 ## [1.8.0] - 2026-09-27
 
@@ -18,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **`ayafileio.acopy(src, dst)` — async whole-file copy.** OS-level fast paths run first in a worker thread: in-kernel zero-copy `copy_file_range` on Linux, `CopyFile2` on Windows (which additionally preserves timestamps and metadata). Other platforms — and systems where the fast call is rejected (cross-device copies, NFS, …) — transparently fall back to a `read_at`/`write_at` pipeline that keeps up to `concurrency` chunks of `chunk_size` in flight (memory bound: `concurrency × chunk_size`, defaults 8 × 4 MiB; the destination is pre-sized to avoid repeated EOF extension). Semantics follow `shutil.copyfile`: the destination is truncated first, copying a file onto itself raises `shutil.SameFileError`, and `copy_stat=True` additionally applies `shutil.copystat`. Measured locally on a cache-hot 512 MiB file: 3,300 MiB/s, on par with `robocopy` (3,413 MiB/s).
+
+### Build / CI
+- **Python 3.15 support.** The test matrix now covers 3.15 and 3.15t (resolving to 3.15.0 release candidates via `allow-prereleases` until the October 1 final), and the wheel pipeline builds `cp315`/`cp315t` wheels — cibuildwheel 3.2.1 → 4.2.1, with `CIBW_ENABLE` switched to `cpython-prerelease` (4.x dropped the `cpython-freethreading` group; free-threaded wheels are built by default now). Shipped as a post-release wheel top-up: the `cp315`/`cp315t` wheels were uploaded to PyPI on 2026-09-27 via manual dispatch, covering Windows / Linux (x86-64, aarch64) / macOS.
+- **riscv64 split out of the wheel pipeline.** The QEMU-emulated riscv64 build (slower than everything else combined) is now its own job, and manual dispatches accept a `linux_targets` input (`all`/`fast`/`riscv64`) — topping up wheels no longer means sitting through the slow path. The 1.8.0 top-up ran through the `fast` lane, so `cp315`/`cp315t` riscv64 wheels are not part of 1.8.0 yet; dispatch with `linux_targets=riscv64` to add them.
 
 ## [1.7.0] - 2026-09-26
 

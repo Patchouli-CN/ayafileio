@@ -40,7 +40,7 @@ Using ayafileio in an interesting way? See [STORY.md](https://github.com/Patchou
 - Text and binary modes with automatic encoding/decoding
 - Async whole-file copy: `acopy()` with OS-level fast paths (zero-copy on Linux)
 - Runtime-tunable configuration shared by all backends
-- Python 3.10–3.14, including 3.14t free-threading
+- Python 3.10–3.15, including 3.14t/3.15t free-threading
 
 ## Installation
 

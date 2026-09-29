@@ -7,9 +7,7 @@
 
 ## [Unreleased]
 
-### 构建 / CI
-- **Python 3.15 支持。** 测试矩阵覆盖 3.15 与 3.15t（10 月 1 日正式版发布前经 `allow-prereleases` 解析到 3.15.0 RC），wheel 流水线新增 `cp315`/`cp315t` 构建——cibuildwheel 3.2.1 → 4.2.1，`CIBW_ENABLE` 换成 `cpython-prerelease`（4.x 移除了 `cpython-freethreading` 组，自由线程 wheel 改为默认构建）。
-- **riscv64 从 wheel 流水线拆出。** QEMU 全模拟的 riscv64 构建（比其它所有目标加起来还慢）独立成单独 job；手动触发新增 `linux_targets` 输入（`all`/`fast`/`riscv64`）——补发 wheel 不必再陪跑慢路径。
+暂无待发布变更。
 
 ## [1.8.0] - 2026-09-27
 
@@ -18,6 +16,10 @@
 
 ### 新增
 - **`ayafileio.acopy(src, dst)` —— 异步整文件复制。** 优先在 worker 线程里走 OS 级快车道：Linux 用内核态零拷贝 `copy_file_range`，Windows 用 `CopyFile2`（顺带保留时间戳等元数据）；其它平台、以及快车道被系统拒绝时（跨设备、NFS 等）透明回退到 `read_at`/`write_at` 流水线：最多 `concurrency` 个 `chunk_size` 块在飞（内存上界 `concurrency × chunk_size`，默认 8 × 4 MiB；目标文件预先扩展到全尺寸，避免反复扩展 EOF）。语义对齐 `shutil.copyfile`：目标先截断，复制到自身抛 `shutil.SameFileError`，`copy_stat=True` 时附加 `shutil.copystat`。本地实测 512 MiB 缓存热文件 3,300 MiB/s，与 `robocopy`（3,413 MiB/s）持平。
+
+### 构建 / CI
+- **Python 3.15 支持。** 测试矩阵覆盖 3.15 与 3.15t（10 月 1 日正式版发布前经 `allow-prereleases` 解析到 3.15.0 RC），wheel 流水线新增 `cp315`/`cp315t` 构建——cibuildwheel 3.2.1 → 4.2.1，`CIBW_ENABLE` 换成 `cpython-prerelease`（4.x 移除了 `cpython-freethreading` 组，自由线程 wheel 改为默认构建）。标签发布后经手动 dispatch 补传，`cp315`/`cp315t` wheel 已于 2026-09-27 上传 PyPI，覆盖 Windows / Linux（x86-64、aarch64）/ macOS。
+- **riscv64 从 wheel 流水线拆出。** QEMU 全模拟的 riscv64 构建（比其它所有目标加起来还慢）独立成单独 job；手动触发新增 `linux_targets` 输入（`all`/`fast`/`riscv64`）——补发 wheel 不必再陪跑慢路径。1.8.0 的补传走 `fast` 通道，故 `cp315`/`cp315t` 暂无 riscv64 wheel，后续可 `linux_targets=riscv64` 单独补发。
 
 ## [1.7.0] - 2026-09-26
 

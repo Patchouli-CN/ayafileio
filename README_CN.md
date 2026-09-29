@@ -38,7 +38,7 @@
 - 文本/二进制模式，自动编解码
 - 异步整文件复制：`acopy()`，Linux/Windows 走 OS 级快车道
 - 所有后端共享一套运行时可调的配置
-- 支持 Python 3.10–3.14，含 3.14t free-threading
+- 支持 Python 3.10–3.15，含 3.14t / 3.15t free-threading
 
 ## 安装
 
