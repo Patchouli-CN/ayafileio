@@ -308,9 +308,12 @@ representative, so the Windows figures are *local* NVMe measurements:
 - Windows (IOCP), sequential write: 1,363 → 2,858 MB/s at 1 MiB blocks,
   929 → 3,046 MB/s at 4 MiB (1.47x over aiofiles). 4 KiB random `read_at`
   with 16 in flight: 21.4K ops/s.
-- macOS (Dispatch I/O), sequential write: 139 → 5,502 MB/s at 1 MiB (40x),
-  208 → 6,787 MB/s at 4 MiB — measured on the macos-15 CI runner, which is
-  fast enough to be meaningful.
+- macOS (Dispatch I/O): cache-hit small reads now complete inline on the
+  calling thread (mincore + pread) — 4 KiB sequential read 6.8K → 416K ops/s
+  (24.3x over aiofiles), 4 KiB random read at x1 4.6K → 289K ops/s (37.7x),
+  64 KiB sequential read 384 → 7,474 MB/s (7.3x); the write path is untouched
+  (1 MiB sequential write 5.4 GB/s). Measured on the macos-15 CI runner
+  (Python 3.14, `tests/t_compare.py` methodology).
 
 ### Whole-file copy (`acopy`, *local*, 512 MiB cache-hot file)
 

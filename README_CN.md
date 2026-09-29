@@ -291,9 +291,11 @@ GitHub 的 Windows runner 对小 I/O 限流太狠，CI 数字没有代表性，W
 
 - Windows (IOCP) 顺序写：1 MiB 块 1,363 → 2,858 MB/s，4 MiB 块 929 → 3,046 MB/s
   （对 aiofiles 1.47x）；4 KiB 随机 `read_at`、16 在飞：21.4K ops/s。
-- macOS (Dispatch I/O) 顺序写：1 MiB 块 139 → 5,502 MB/s（40x），4 MiB 块
-  208 → 6,787 MB/s——这两个是 macos-15 CI runner 上测的，那台机器够快，
-  数字有意义。
+- macOS (Dispatch I/O)：缓存命中的小读在调用线程内联完成（mincore + pread）——
+  4 KiB 顺序读 6.8K → 416K ops/s（对 aiofiles 24.3x）、4 KiB 随机读 x1
+  4.6K → 289K ops/s（37.7x）、64 KiB 顺序读 384 → 7,474 MB/s（7.3x）；写路径
+  不走快车道（1 MiB 顺序写 5.4 GB/s）。macos-15 CI runner 实测（Python 3.14，
+  `tests/t_compare.py` 口径）。
 
 ### 整文件复制（`acopy`，*本地*，512 MiB 缓存热文件）
 

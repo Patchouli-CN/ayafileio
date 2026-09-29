@@ -8,7 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Performance
-- **macOS: mincore inline fast path for small reads.** dispatch_io charges every operation a queue delivery (handler hop + wakeup); cache-hit small reads (< 256 KiB, same bound as `LARGE_IO_THRESHOLD`) now complete inline: a read-only mapping is mmap'ed at open, `mincore` checks that the whole requested range is page-cache resident, and on a full hit the calling thread (holding the GIL) `pread`s straight into the pre-built PyBytes and resolves via `complete_inline` — `await` no longer yields to the event loop. This is the macOS counterpart of the Windows `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` path (1.7.0) and the io_uring `COOP_TASKRUN` inline harvest (1.8.0), completing the hot-path story on all three platforms. Cold pages, missing mappings, and ranges beyond the open-time mapping (regions the file grew into afterwards) fall back to the dispatch_io async path with unchanged semantics; the mapping is only ever fed to `mincore`, never dereferenced (no SIGBUS risk); the residency-check-to-pread race degrades to one synchronous read at worst.
+- **macOS: mincore inline fast path for small reads.** dispatch_io charges every operation a queue delivery (handler hop + wakeup); cache-hit small reads (< 256 KiB, same bound as `LARGE_IO_THRESHOLD`) now complete inline: a read-only mapping is mmap'ed at open, `mincore` checks that the whole requested range is page-cache resident, and on a full hit the calling thread (holding the GIL) `pread`s straight into the pre-built PyBytes and resolves via `complete_inline` — `await` no longer yields to the event loop. This is the macOS counterpart of the Windows `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` path (1.7.0) and the io_uring `COOP_TASKRUN` inline harvest (1.8.0), completing the hot-path story on all three platforms. Cold pages, missing mappings, and ranges beyond the open-time mapping (regions the file grew into afterwards) fall back to the dispatch_io async path with unchanged semantics; the mapping is only ever fed to `mincore`, never dereferenced (no SIGBUS risk); the residency-check-to-pread race degrades to one synchronous read at worst (EINTR transparently retried).
+- **Measurements** (macOS-15 CI runner, Python 3.14, `tests/t_compare.py` methodology, 256 MiB cache-hot file; "old" = same-methodology baseline on `cb8a99f`):
+
+  | scenario | old | new | vs aiofiles |
+  | --- | ---: | ---: | ---: |
+  | 4 KiB sequential read | 6,751 ops/s (0.67x) | 416,318 ops/s (**61.7x**) | **24.3x** |
+  | 4 KiB random read x1 | 4,575 ops/s | 289,251 ops/s (**63.2x**) | **37.7x** |
+  | 4 KiB random read x16 | 32,706 ops/s | 304,136 ops/s (9.3x) | 20.9x |
+  | 4 KiB random read x64 | 37,765 ops/s | 311,607 ops/s (8.3x) | 15.4x |
+  | 64 KiB sequential read | 384 MB/s (0.63x) | 7,474 MB/s (**19.5x**) | **7.3x** |
+
+  The write path does not take the fast lane — 64 KiB sequential write is flat (1.02x, no regression); reads/writes at ≥ 256 KiB keep the existing dual-mode dispatch and thread fast path within their previous ranges (the 4 MiB sequential-read 0.86x and the large-write swings are macOS-runner noise).
 
 ### Changed (internal)
 - **`complete_inline` moved up to `IOBackendBase`.** The former `IOUringBackend::complete_inline` becomes the shared inline-completion implementation for all backends; the io_uring COOP_TASKRUN harvest and the macOS mincore fast path both use it. Value construction, cleanup, and batcher accounting are unchanged.

@@ -1005,7 +1005,12 @@ bool MacOSGCDBackend::try_inline_read(IORequest* req, uint64_t offset, size_t si
 
     // 全命中：当前线程（持 GIL）直接 pread 进预建 PyBytes。承诺内联后
     // 必须在此完成（含错误），不可落回——否则同一 future 会被双投递。
-    const ssize_t got = pread(m_fd, req->buf(), size, static_cast<off_t>(offset));
+    // EINTR 透明重试，与 CPython 的 pread 封装一致（dispatch 路径内部
+    // 同样重试，避免信号把一次正常的缓存命中读变成 OSError）。
+    ssize_t got;
+    do {
+        got = pread(m_fd, req->buf(), size, static_cast<off_t>(offset));
+    } while (got < 0 && errno == EINTR);
     complete_inline(req, got);
     return true;
 }
