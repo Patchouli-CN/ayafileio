@@ -7,7 +7,11 @@
 
 ## [Unreleased]
 
-暂无待发布变更。
+### 性能
+- **macOS：小读 mincore 内联快车道。** dispatch_io 每个 op 都要过队列交付（handler hop + 唤醒），缓存命中的小读（< 256 KiB，与 `LARGE_IO_THRESHOLD` 同界）改为内联完成：open 时 mmap 一份只读映射，读前 `mincore` 判定整个请求范围常驻页缓存，全命中即在调用线程（持 GIL）直接 `pread` 进预建 PyBytes，经 `complete_inline` 即刻 resolve——`await` 不再让出事件循环。这是 macOS 侧对应 Windows `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`（1.7.0）与 io_uring `COOP_TASKRUN` 内联收割（1.8.0）的热路径机制，三平台自此补齐。冷页 / 无映射 / 超出 open 时映射窗口（文件后续增长的区域）一律落回 dispatch_io 异步路径，语义不变；映射只供 mincore 探测、从不解引用，无 SIGBUS 风险；`mincore` 与 `pread` 之间页被换出的竞态由预读窗口自然兜底（最坏退化一次同步读）。
+
+### 变更（内部）
+- **`complete_inline` 上提至 `IOBackendBase`。** 原 `IOUringBackend::complete_inline` 移动为所有后端共享的内联完成实现，io_uring 的 COOP_TASKRUN 内联收割与 macOS mincore 快车道共用；取值/清理逻辑与批量器记账策略不变。
 
 ## [1.8.0] - 2026-09-27
 

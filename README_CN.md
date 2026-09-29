@@ -33,6 +33,7 @@
 
 - 真异步平台零线程开销——没有后台线程，也不需要 `run_in_executor`
 - 内核级完成通知：IOCP / io_uring / Dispatch I/O
+- 缓存命中内联快车道：热路径小读在调用线程就地完成，await 不让出事件循环（IOCP 同步完成 / io_uring COOP_TASKRUN / macOS mincore + pread）
 - 单文件句柄上轻松扛数千并发操作
 - 与 aiofiles 兼容的 API，就是普通的 `async/await`
 - 文本/二进制模式，自动编解码

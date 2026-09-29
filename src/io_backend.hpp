@@ -52,6 +52,13 @@ protected:
     // 自己的视图不影响我们），内核直接读用户内存。失败返回 nullptr。
     virtual IORequest* make_req_held_write(Py_buffer* view, PyObject* future);
     virtual void complete_error_inline(IORequest* req, DWORD err);
+    // 内联完成（调用方持 GIL）：取值与清理逻辑同 complete_ok/complete_error，
+    // 但结果不经 batcher 的 call_soon_threadsafe，直接 set_result/
+    // set_exception——future 在 I/O 调用返回前就已 resolve，await 不让出
+    // 事件循环。批量器记账保持平衡（op_submitted 已在 make_req* 里计过）；
+    // 本 loop 最后一个在飞 op 且 batcher 有滞留结果时顺手 flush。
+    // res < 0 时走错误路径（errno 取 -res）。
+    virtual void complete_inline(IORequest* req, Py_ssize_t res);
 
     static void resolve_ok(PyObject* future, PyObject* val);
     static void resolve_bytes(PyObject* future, const char* buf, Py_ssize_t n);

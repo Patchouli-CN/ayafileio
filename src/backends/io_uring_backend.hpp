@@ -55,7 +55,8 @@ private:
     void submit_io(IORequest* req, int op, int fd, std::span<const std::byte> data, off_t offset);
     // 提交后内联收割"提交即完成"的 CQE（IOCP 同步完成分支的 uring 对应物）
     void try_harvest_inline();
-    void complete_inline(IORequest* req, int res);
+    // 注：complete_inline 已上提至 IOBackendBase（所有后端共享），
+    // 见 io_backend.hpp / io_backend.cpp
 };
 
 } // namespace ayafileio

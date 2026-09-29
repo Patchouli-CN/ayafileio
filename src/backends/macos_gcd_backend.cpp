@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <cerrno>
 #include <cstring>
 #include <chrono>
@@ -142,7 +143,21 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
             }
         }
     }
-    
+
+    // 小读 mincore 内联快车道的驻留探测映射：只喂给 mincore，从不解引用，
+    // 故映射窗口之外的页不会造成 SIGBUS。映射失败仅退化为无快车道。
+    if (mi.canRead && m_cachedFileSize > 0) {
+        void* p = mmap(nullptr, static_cast<size_t>(m_cachedFileSize),
+                       PROT_READ, MAP_SHARED, m_fd, 0);
+        if (p != MAP_FAILED) {
+            m_mapBase = p;
+            m_mapSize = static_cast<size_t>(m_cachedFileSize);
+            UR_DEBUG_LOG("MacOSGCDBackend: mincore mapping created, size=%zu", m_mapSize);
+        } else {
+            UR_DEBUG_LOG("MacOSGCDBackend: mmap for mincore failed, errno=%d", errno);
+        }
+    }
+
     UR_DEBUG_LOG("MacOSGCDBackend: constructor done, this=%p", (void*)this);
 }
 
@@ -213,7 +228,20 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
             }
         }
     }
-    
+
+    // 小读 mincore 内联快车道的驻留探测映射（同路径构造函数）
+    if (mi.canRead && m_cachedFileSize > 0) {
+        void* p = mmap(nullptr, static_cast<size_t>(m_cachedFileSize),
+                       PROT_READ, MAP_SHARED, m_fd, 0);
+        if (p != MAP_FAILED) {
+            m_mapBase = p;
+            m_mapSize = static_cast<size_t>(m_cachedFileSize);
+            UR_DEBUG_LOG("MacOSGCDBackend: fd ctor mincore mapping created, size=%zu", m_mapSize);
+        } else {
+            UR_DEBUG_LOG("MacOSGCDBackend: fd ctor mmap for mincore failed, errno=%d", errno);
+        }
+    }
+
     UR_DEBUG_LOG("MacOSGCDBackend: fd constructor done, this=%p", (void*)this);
 }
 
@@ -370,6 +398,12 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
         return future;
     }
 
+    // 小读：缓存命中走 mincore 内联快车道（就地 resolve，await 不让出
+    // 事件循环）；冷页/无映射/越界时落回 dispatch_io 异步路径
+    if (try_inline_read(req, offset, readSize)) {
+        return future;
+    }
+
     auto self = this;
     __block size_t total_copied = 0;
     dispatch_io_read(
@@ -477,6 +511,11 @@ PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
     if (readSize >= LARGE_IO_THRESHOLD) {
         // 大请求：线程快速路，一发 pread 直接进 preResult PyBytes
         submit_read_fast(req, static_cast<uint64_t>(offset), readSize);
+        return future;
+    }
+
+    // 小读：缓存命中走 mincore 内联快车道（同 read()）
+    if (try_inline_read(req, static_cast<uint64_t>(offset), readSize)) {
         return future;
     }
 
@@ -754,7 +793,16 @@ void MacOSGCDBackend::close_impl() {
         UR_DEBUG_LOG("MacOSGCDBackend::close_impl timeout waiting for pending I/O, forcing close. pending=%ld",
                      m_pending.load());
     }
-    
+
+    // 解除小读快车道的驻留探测映射。pending 已排空（内联读在 pending
+    // 归零前就已完成 mincore/pread 窗口），此时无读者。
+    if (m_mapBase) {
+        munmap(const_cast<void*>(m_mapBase), m_mapSize);
+        m_mapBase = nullptr;
+        m_mapSize = 0;
+        UR_DEBUG_LOG0("MacOSGCDBackend: mincore mapping released");
+    }
+
     if (m_channel) {
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl closing dispatch channel");
         // DISPATCH_IO_STOP stops I/O immediately and schedules the cleanup
@@ -914,6 +962,52 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
         });
     
     return future;
+}
+
+// ── 小读 mincore 内联快车道 ─────────────────────────────────────────────
+//
+// dispatch_io 每 op 都需过队列交付（handler hop + 唤醒），缓存命中的
+// 小读由本方法就地完成：mincore 判定整个请求范围常驻页缓存后，在调用
+// 线程（持 GIL）直接 pread 进预建的 PyBytes，并以 complete_inline 即刻
+// resolve——无 GCD 回调、无线程池、无 batch flush 一跳。这是 macOS 侧
+// 对应 Windows FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 与 io_uring
+// COOP_TASKRUN 内联收割的快车道，补上三平台热路径的最后一块。
+//
+// 竞态与语义（与 turbofile 同款赌注）：mincore 判定与 pread 之间页可能
+// 被换出，此时 pread 在当前线程阻塞。接受——热路径赌命中率；冷数据/大
+// 请求本就走 dispatch_io/线程池，不受影响。短读由 complete_inline 收缩
+// preResult；pread 失败亦由 complete_inline 转成异常 future。
+bool MacOSGCDBackend::try_inline_read(IORequest* req, uint64_t offset, size_t size) {
+    const char* base = static_cast<const char*>(m_mapBase);
+    const size_t map_size = m_mapSize;
+    if (!base || map_size == 0) [[unlikely]] return false;
+
+    // 请求范围必须完整落在 open 时的映射窗口内；文件此后增长的区域
+    // 不走快车道（落回 dispatch_io 异步路径）。
+    if (offset > map_size || size > map_size - offset) [[unlikely]] return false;
+
+    static const size_t s_page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const size_t first_page = offset / s_page;
+    const size_t npages = (offset + size - 1) / s_page - first_page + 1;
+    if (npages > 64) [[unlikely]] return false;  // 上限保护（正常有 LARGE_IO_THRESHOLD 兜底，远小于此）
+
+    // mincore 在部分新 SDK 被标记 deprecated；调用本身有效，压掉告警
+    char vec[64] = {0};
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    const int mc = mincore(const_cast<void*>(
+        static_cast<const void*>(base + first_page * s_page)), npages * s_page, vec);
+#pragma clang diagnostic pop
+    if (mc != 0) [[unlikely]] return false;
+    for (size_t i = 0; i < npages; ++i) {
+        if (!(vec[i] & 1)) [[unlikely]] return false;  // 存在未驻留页 → 冷路径
+    }
+
+    // 全命中：当前线程（持 GIL）直接 pread 进预建 PyBytes。承诺内联后
+    // 必须在此完成（含错误），不可落回——否则同一 future 会被双投递。
+    const ssize_t got = pread(m_fd, req->buf(), size, static_cast<off_t>(offset));
+    complete_inline(req, got);
+    return true;
 }
 
 } // namespace ayafileio

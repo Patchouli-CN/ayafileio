@@ -312,75 +312,9 @@ void IOUringBackend::try_harvest_inline() {
             ->complete_inline(done[i].first, done[i].second);
 }
 
-// 提交线程（持 GIL）内联完成：取值与清理逻辑同 complete_ok/complete_error，
-// 但结果不经 batcher 的 call_soon_threadsafe，直接 set_result/set_exception
-// ——future 在 I/O 调用返回前就已 resolve，await 不再让出事件循环。
-// 批量器记账保持平衡（op_submitted 已在 make_req* 里计过）。
-void IOUringBackend::complete_inline(IORequest* req, int res) {
-    m_pending.fetch_sub(1, std::memory_order_release);
-    m_close_wake.release();
-
-    PyObject* set_fn;
-    PyObject* val;
-    if (res >= 0) [[likely]] {
-        size_t bytes = static_cast<size_t>(res);
-        switch (req->type) {
-            case ReqType::Read: [[likely]]
-                if (req->isReadinto) [[unlikely]] {
-                    val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
-                } else if (req->preResult) {
-                    // 零拷贝快路径：数据已直接读进预建的 PyBytes
-                    val = req->preResult;
-                    req->preResult = nullptr;
-                    if (bytes < req->reqSize) [[unlikely]] {
-                        // 短读（文件在读期间被外部截短）：收缩到实际字节数
-                        PyObject* exact = PyBytes_FromStringAndSize(
-                            PyBytes_AS_STRING(val), static_cast<Py_ssize_t>(bytes));
-                        Py_DECREF(val);
-                        val = exact;
-                    }
-                } else {
-                    val = PyBytes_FromStringAndSize(req->buf(), static_cast<Py_ssize_t>(bytes));
-                }
-                break;
-            case ReqType::Write: [[likely]]
-                val = PyLong_FromSsize_t(static_cast<Py_ssize_t>(bytes));
-                break;
-            default:
-                val = Py_None;
-                Py_INCREF(val);
-                break;
-        }
-        set_fn = req->set_result; req->set_result = nullptr;
-        Py_DECREF(req->future); req->future = nullptr;
-        Py_XDECREF(req->set_exception); req->set_exception = nullptr;
-    } else {
-        int err = -res;
-        PyObject* exc_class = map_posix_error(err);
-        val = PyObject_CallFunction(exc_class, "is", err, "I/O operation failed");
-        set_fn = req->set_exception; req->set_exception = nullptr;
-        if (!set_fn && req->future) {
-            // set_exception 未预取（罕见路径），此处按需获取（持 GIL）
-            set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
-            if (!set_fn) PyErr_Clear();
-        }
-        Py_DECREF(req->future); req->future = nullptr;
-        Py_XDECREF(req->set_result); req->set_result = nullptr;
-    }
-
-    // 若这是本 loop 最后一个在飞 op 且 batcher 里还有滞留结果（其它 op
-    // 走的批量路径），顺手 flush——与 IOCP 的 complete_tracked_op 同款
-    if (req->batcher && req->batcher->op_completed() && req->batcher->has_pending())
-        req->batcher->flush();
-
-    if (set_fn && val) {
-        PyObject* r = PyObject_CallFunctionObjArgs(set_fn, val, nullptr);
-        Py_XDECREF(r);
-    }
-    Py_XDECREF(set_fn);
-    Py_XDECREF(val);
-    REQ_FREE(req);  // 析构负责 preResult/userBufView/poolBuf 等剩余清理
-}
+// complete_inline 已上提至 IOBackendBase（所有后端共享内联完成），
+// 见 io_backend.cpp。io_uring 的 COOP_TASKRUN 内联收割与 macOS 小读
+// mincore 内联快车道共用该实现；批量器记账策略保持一致。
 
 // ════════════════════════════════════════════════════════════════════════════
 // I/O 提交

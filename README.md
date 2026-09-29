@@ -35,6 +35,7 @@ Using ayafileio in an interesting way? See [STORY.md](https://github.com/Patchou
 
 - Zero thread overhead on true-async platforms — no background threads
 - Kernel-level completion: IOCP / io_uring / Dispatch I/O
+- Cache-hit inline fast paths: hot small reads complete on the calling thread (IOCP sync-completion / io_uring COOP_TASKRUN / macOS mincore + pread)
 - Thousands of concurrent operations on a single file handle
 - aiofiles-compatible API, plain `async/await`
 - Text and binary modes with automatic encoding/decoding

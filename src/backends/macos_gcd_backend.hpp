@@ -63,6 +63,26 @@ private:
     static constexpr size_t LARGE_IO_THRESHOLD = 256 * 1024;
     void submit_read_fast(IORequest* req, uint64_t offset, size_t size);
     void submit_write_fast(IORequest* req, uint64_t offset, size_t size);
+
+    // ── 小读 mincore 内联快车道 ─────────────────────────────────────────
+    // dispatch_io 每 op 都要过队列交付（handler hop + 唤醒），缓存命中的
+    // 小读改为内联完成：open 时 mmap 一份只读映射，读前 mincore 判驻留，
+    // 全命中就在调用线程（持 GIL）直接 pread 进预建 PyBytes 并以
+    // complete_inline 即刻 resolve——await 不让出事件循环。这是 macOS 侧
+    // 对应 Windows FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 与 io_uring
+    // COOP_TASKRUN 内联收割的快车道，补上三平台热路径的最后一块。
+    //
+    // 调用方须已完成 m_pending++（与异步路径同一记账）；返回 true 表示
+    // future 已 resolve（调用方直接返回），false 表示落回 dispatch_io。
+    // 注意：一旦通过驻留检查就必须在本方法内完成（含错误路径），不可
+    // 落回，否则同一 future 将被双投递。
+    //
+    // 映射快照于 open 时的文件大小且只用于 mincore 探测（从不解引用），
+    // 因此文件后续增长的区域不走快车道（范围检查落回），也不会因映射
+    // 越界产生 SIGBUS。收缩/增长由 m_cachedFileSize 与范围检查共同保证。
+    const void* m_mapBase = nullptr;
+    size_t      m_mapSize = 0;
+    bool try_inline_read(IORequest* req, uint64_t offset, size_t size);
 };
 
 } // namespace ayafileio
