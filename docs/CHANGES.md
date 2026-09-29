@@ -19,7 +19,7 @@ Nothing pending yet.
 
 ### Build / CI
 - **Python 3.15 support.** The test matrix now covers 3.15 and 3.15t (resolving to 3.15.0 release candidates via `allow-prereleases` until the October 1 final), and the wheel pipeline builds `cp315`/`cp315t` wheels — cibuildwheel 3.2.1 → 4.2.1, with `CIBW_ENABLE` switched to `cpython-prerelease` (4.x dropped the `cpython-freethreading` group; free-threaded wheels are built by default now). Shipped as a post-release wheel top-up: the `cp315`/`cp315t` wheels were uploaded to PyPI on 2026-09-27 via manual dispatch, covering Windows / Linux (x86-64, aarch64) / macOS.
-- **riscv64 split out of the wheel pipeline.** The QEMU-emulated riscv64 build (slower than everything else combined) is now its own job, and manual dispatches accept a `linux_targets` input (`all`/`fast`/`riscv64`) — topping up wheels no longer means sitting through the slow path. The 1.8.0 top-up ran through the `fast` lane, so `cp315`/`cp315t` riscv64 wheels are not part of 1.8.0 yet; dispatch with `linux_targets=riscv64` to add them.
+- **riscv64 split out of the wheel pipeline.** The QEMU-emulated riscv64 build (slower than everything else combined) is now its own job, and manual dispatches accept a `linux_targets` input (`all`/`fast`/`riscv64`) — topping up wheels no longer means sitting through the slow path. The 1.8.0 top-up ran through the `fast` lane; the `cp315`/`cp315t` riscv64 wheels were dispatched separately on 2026-09-29 with `linux_targets=riscv64`.
 
 ## [1.7.0] - 2026-09-26
 

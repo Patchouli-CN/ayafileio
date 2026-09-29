@@ -19,7 +19,7 @@
 
 ### 构建 / CI
 - **Python 3.15 支持。** 测试矩阵覆盖 3.15 与 3.15t（10 月 1 日正式版发布前经 `allow-prereleases` 解析到 3.15.0 RC），wheel 流水线新增 `cp315`/`cp315t` 构建——cibuildwheel 3.2.1 → 4.2.1，`CIBW_ENABLE` 换成 `cpython-prerelease`（4.x 移除了 `cpython-freethreading` 组，自由线程 wheel 改为默认构建）。标签发布后经手动 dispatch 补传，`cp315`/`cp315t` wheel 已于 2026-09-27 上传 PyPI，覆盖 Windows / Linux（x86-64、aarch64）/ macOS。
-- **riscv64 从 wheel 流水线拆出。** QEMU 全模拟的 riscv64 构建（比其它所有目标加起来还慢）独立成单独 job；手动触发新增 `linux_targets` 输入（`all`/`fast`/`riscv64`）——补发 wheel 不必再陪跑慢路径。1.8.0 的补传走 `fast` 通道，故 `cp315`/`cp315t` 暂无 riscv64 wheel，后续可 `linux_targets=riscv64` 单独补发。
+- **riscv64 从 wheel 流水线拆出。** QEMU 全模拟的 riscv64 构建（比其它所有目标加起来还慢）独立成单独 job；手动触发新增 `linux_targets` 输入（`all`/`fast`/`riscv64`）——补发 wheel 不必再陪跑慢路径。1.8.0 的补传走 `fast` 通道，`cp315`/`cp315t` 的 riscv64 wheel 于 2026-09-29 经 `linux_targets=riscv64` 手动 dispatch 单独补发。
 
 ## [1.7.0] - 2026-09-26
 
