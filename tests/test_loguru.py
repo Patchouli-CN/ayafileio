@@ -93,7 +93,7 @@ async def main():
     print()
 
     t_aya = await test_aya(LOG_COUNT, 50, NUM_FILES)
-    print(f"🍃 ayafileio (IOCP):     {t_aya:.3f}s  ({LOG_COUNT / t_aya:.0f} 条/秒)")
+    print(f"🍃 ayafileio ({info['backend']}):     {t_aya:.3f}s  ({LOG_COUNT / t_aya:.0f} 条/秒)")
 
     t_sync = await test_sync(LOG_COUNT, 50, NUM_FILES)
     print(f"📄 同步 + 线程池:         {t_sync:.3f}s  ({LOG_COUNT / t_sync:.0f} 条/秒)")
