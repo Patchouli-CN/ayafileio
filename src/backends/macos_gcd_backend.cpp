@@ -327,6 +327,70 @@ void MacOSGCDBackend::submit_write_fast(IORequest* req, uint64_t offset, size_t 
     });
 }
 
+// ── 大读并行分块填充 ─────────────────────────────────────────────────
+//
+// N 个分块 pread 共用一个 IORequest（各写各的位置区间，零协调）；仅最后
+// 一个完成者负责 complete_*（含 batcher 记账，整请求仍是一次完成）与回收
+// 聚合组。任一块失败即整请求失败——部分数据不可交付，与 read_at/write_at
+// 流水线路径的错误语义一致。取消语义同其它快速路：已提交的内核/线程工作
+// 不可撤销，future 取消不影响数据完整性。
+
+namespace {
+
+struct ParallelReadGroup {
+    IORequest* req;
+    std::atomic<size_t> remaining;   // 尚未完成的分块数
+    std::atomic<size_t> copied{0};   // 各块成功字节累加
+    std::atomic<int> first_errno{0}; // 首个失败 errno（0 = 无）
+};
+
+} // namespace
+
+void MacOSGCDBackend::submit_read_parallel(IORequest* req, uint64_t offset, size_t size) {
+    // 分块数封顶 256，超出则放大块大小（巨型文件也不撑爆任务队列）
+    size_t chunk_size = PARALLEL_READ_CHUNK;
+    while ((size + chunk_size - 1) / chunk_size > 256) {
+        chunk_size *= 2;
+    }
+    const size_t nchunks = (size + chunk_size - 1) / chunk_size;
+
+    auto* group = new ParallelReadGroup();
+    group->req = req;
+    group->remaining.store(nchunks, std::memory_order_relaxed);
+
+    const int fd = m_fd;
+    auto* self = this;
+    for (size_t i = 0; i < nchunks; ++i) {
+        const size_t off_in = i * chunk_size;
+        const size_t len = std::min(chunk_size, size - off_in);
+        GlobalThreadPool::instance().enqueue([group, self, fd, offset, off_in, len]() {
+            ssize_t got;
+            do {
+                got = pread(fd, group->req->buf() + off_in, len,
+                            static_cast<off_t>(offset + off_in));
+            } while (got < 0 && errno == EINTR);
+
+            if (got < 0) {
+                int expected = 0;
+                group->first_errno.compare_exchange_strong(expected, errno,
+                                                           std::memory_order_acq_rel);
+            } else {
+                group->copied.fetch_add(static_cast<size_t>(got), std::memory_order_acq_rel);
+            }
+
+            if (group->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                // 最后一块：聚合收尾（整请求一次完成，batcher 记账不变）
+                IORequest* r = group->req;
+                const size_t total = group->copied.load(std::memory_order_acquire);
+                const int err = group->first_errno.load(std::memory_order_acquire);
+                delete group;
+                if (err) self->complete_error(r, static_cast<DWORD>(err));
+                else self->complete_ok(r, total);
+            }
+        });
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 公共 I/O 接口
 // ════════════════════════════════════════════════════════════════════════════
@@ -391,6 +455,12 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
                  (void*)req, (unsigned long long)offset, readSize);
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
+
+    if (readSize >= PARALLEL_READ_THRESHOLD) {
+        // 大读：并行分块填充，多 worker 并发 pread 进同一预建缓冲
+        submit_read_parallel(req, offset, readSize);
+        return future;
+    }
 
     if (readSize >= LARGE_IO_THRESHOLD) {
         // 大请求：线程快速路，一发 pread 直接进 preResult PyBytes
@@ -507,6 +577,12 @@ PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
                  (void*)req, (long long)offset, readSize);
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
+
+    if (readSize >= PARALLEL_READ_THRESHOLD) {
+        // 大读：并行分块填充（同 read()）
+        submit_read_parallel(req, static_cast<uint64_t>(offset), readSize);
+        return future;
+    }
 
     if (readSize >= LARGE_IO_THRESHOLD) {
         // 大请求：线程快速路，一发 pread 直接进 preResult PyBytes
@@ -935,6 +1011,12 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
     IORequest* req = make_req_readinto(buf, &view, readSize, future);
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
+
+    if (readSize >= PARALLEL_READ_THRESHOLD) {
+        // 大读：并行分块填充（直接进用户缓冲区）
+        submit_read_parallel(req, offset, readSize);
+        return future;
+    }
 
     if (readSize >= LARGE_IO_THRESHOLD) {
         // 大请求：线程快速路，一发 pread 直接进用户缓冲区

@@ -235,6 +235,18 @@ n = await ayafileio.acopy("model.gguf", "backup/model.gguf")
 内存占用不超过 `concurrency × chunk_size`。目标文件先截断；复制到自身抛
 `shutil.SameFileError`；`copy_stat=True` 时完成后附加 `shutil.copystat`。
 
+### 整文件操作
+
+```python
+data = await ayafileio.read_bytes("model.safetensors")
+n    = await ayafileio.write_bytes("out.bin", payload)
+text = await ayafileio.read_text("config.yaml", encoding="utf-8")
+```
+
+一次 await 完成 open + 读写 + close——面向 `asyncio.gather` 批量处理多文件
+（按层加载权重、批量读配置）。语义与手写 `async with ayafileio.open(...)`
+完全一致，只是省掉样板。
+
 ### 配置函数
 
 ```python

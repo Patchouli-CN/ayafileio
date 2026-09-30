@@ -64,6 +64,17 @@ private:
     void submit_read_fast(IORequest* req, uint64_t offset, size_t size);
     void submit_write_fast(IORequest* req, uint64_t offset, size_t size);
 
+    // ── 大读并行分块填充 ─────────────────────────────────────────────
+    // ≥ PARALLEL_READ_THRESHOLD 的读拆成 PARALLEL_READ_CHUNK 大小的块，
+    // 一次性全部提交全局线程池，各 worker 并发 pread 进同一预建缓冲
+    // （位置写，零协调），最后一块完成时聚合收尾。单线程顺序读的页缓存
+    // memcpy 是瓶颈（实测 64 MiB：单线程 ~8.9ms）；摊到多个 worker 后
+    // 逼近内存带宽。turbofile 同款手法（其 64 MiB 并行填充 2.7ms）。
+    // 任一块失败即整请求失败（与流水线路径一致：部分数据不可交付）。
+    static constexpr size_t PARALLEL_READ_THRESHOLD = 1024 * 1024;
+    static constexpr size_t PARALLEL_READ_CHUNK = 512 * 1024;
+    void submit_read_parallel(IORequest* req, uint64_t offset, size_t size);
+
     // ── 小读 mincore 内联快车道 ─────────────────────────────────────────
     // dispatch_io 每 op 都要过队列交付（handler hop + 唤醒），缓存命中的
     // 小读改为内联完成：open 时 mmap 一份只读映射，读前 mincore 判驻留，

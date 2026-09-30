@@ -247,6 +247,18 @@ with up to `concurrency` chunks in flight, so memory stays below
 onto itself raises `shutil.SameFileError`; `copy_stat=True` applies
 `shutil.copystat` afterwards.
 
+### Whole-file operations
+
+```python
+data = await ayafileio.read_bytes("model.safetensors")
+n    = await ayafileio.write_bytes("out.bin", payload)
+text = await ayafileio.read_text("config.yaml", encoding="utf-8")
+```
+
+One await does open + read/write + close — aimed at `asyncio.gather` over many
+files (per-layer weight loading, bulk config reads). Semantics are identical to
+the hand-written `async with ayafileio.open(...)` form, minus the boilerplate.
+
 ### Configuration functions
 
 ```python

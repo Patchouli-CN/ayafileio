@@ -73,6 +73,7 @@ jobs:
         python -m unittest discover -s tests -p test_async_wrapper.py -v
         python -m unittest discover -s tests -p test_write_at.py -v
         python -m unittest discover -s tests -p test_acopy.py -v
+        python -m unittest discover -s tests -p test_parallel_read.py -v
     - name: Check backend info
       timeout-minutes: 1
       run: |
@@ -184,6 +185,7 @@ jobs:
         python -m unittest discover -s tests -p test_async_wrapper.py -v
         python -m unittest discover -s tests -p test_write_at.py -v
         python -m unittest discover -s tests -p test_acopy.py -v
+        python -m unittest discover -s tests -p test_parallel_read.py -v
     - name: Check backend info
       timeout-minutes: 1
       run: |
@@ -290,6 +292,7 @@ jobs:
         python -m unittest discover -s tests -p test_async_wrapper.py -v
         python -m unittest discover -s tests -p test_write_at.py -v
         python -m unittest discover -s tests -p test_acopy.py -v
+        python -m unittest discover -s tests -p test_parallel_read.py -v
     - name: Check backend info
       timeout-minutes: 1
       run: |

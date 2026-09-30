@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+### 性能
+- **macOS：大读并行分块填充。** ≥ 1 MiB 的读不再由单个 worker 线程顺序 `pread`，而是拆成 512 KiB 的块一次性全部提交全局线程池，各 worker 并发 `pread` 进同一预建缓冲（位置写、零协调），最后一块完成时聚合收尾——整请求仍是一次完成，批量器记账不变。单线程顺序读的页缓存拷贝是瓶颈（turbofile 实测 64 MiB：并行 2.7ms vs 单线程 8.9ms），摊到多个 worker 后逼近内存带宽。任一块失败即整请求失败（部分数据不可交付，与流水线路径语义一致）；分块数封顶 256，巨型文件自动放大块大小。Linux io_uring（20 GB/s 已带宽饱和）与 Windows IOCP（单完成结构）路径不变。
+
+### 新增
+- **整文件操作 API：`ayafileio.read_bytes()` / `write_bytes()` / `read_text()` / `write_text()`。** 一次 await 完成 open + 读写 + close，面向 `asyncio.gather` 批量处理多文件的形态（模型权重按层加载、配置批量读取等）。语义与手动 `async with ayafileio.open(...)` 逐行写法完全一致，只是省掉样板。
+
+### CI / 测试
+- 新增 `tests/test_parallel_read.py`（并行分块数据逐字节校验、短尾块、`read_at` 交叉、`readinto` 大缓冲、整文件 API round-trip、gather 批量读），三平台测试矩阵接入。
+
 ## [1.9.0] - 2026-09-29
 
 ### 性能

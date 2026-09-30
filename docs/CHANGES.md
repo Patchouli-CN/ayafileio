@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+- **macOS: parallel chunk fill for large reads.** Reads ≥ 1 MiB are no longer a single sequential `pread` on one worker thread: they are split into 512 KiB chunks, all submitted to the global thread pool at once, and each worker `pread`s its chunk into the same pre-built buffer (positioned writes, zero coordination); the last chunk to finish settles the request — still one completion, unchanged batcher accounting. A single-threaded sequential read is page-cache-copy bound (turbofile measured 64 MiB: 2.7 ms parallel vs 8.9 ms single-thread); spreading the copy across workers approaches memory bandwidth. Any failed chunk fails the whole request (partial data is never deliverable, same semantics as the pipeline path); the chunk count is capped at 256 and the chunk size grows for huge files. The Linux io_uring (already ~20 GB/s, bandwidth-bound) and Windows IOCP (single-completion structure) paths are unchanged.
+
+### Added
+- **Whole-file API: `ayafileio.read_bytes()` / `write_bytes()` / `read_text()` / `write_text()`.** One await does open + read/write + close, targeting the `asyncio.gather`-over-many-files pattern (per-layer model weight loading, bulk config reads, …). Semantics are identical to hand-written `async with ayafileio.open(...)`; it just removes the boilerplate.
+
+### CI / Testing
+- Added `tests/test_parallel_read.py` (byte-exact verification of the parallel fill, short tail chunks, interleaved `read_at`, large `readinto`, whole-file API round-trips, gathered bulk reads) and wired it into the three-platform test matrices.
+
 ## [1.9.0] - 2026-09-29
 
 ### Performance

@@ -21,6 +21,7 @@ from . import _cleanup  # noqa: F401  # 副作用：注册 atexit
 from ._async_file import AsyncFile
 from ._copy import acopy
 from ._open import open
+from ._whole import read_bytes, write_bytes, read_text, write_text
 from ._wrap import wrap_file
 from .types import AyaFileIO
 from ._config import configure, get_config, reset_config, get_backend_info
@@ -37,6 +38,10 @@ __all__ = [
     "open",
     "wrap_file",
     "acopy",
+    "read_bytes",
+    "write_bytes",
+    "read_text",
+    "write_text",
     "AyaFileIO",
     "AsyncFile",
     "configure",
