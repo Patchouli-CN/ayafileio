@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.10.0] - 2026-09-29
 
 ### Performance
 - **macOS: parallel chunk fill for large reads.** Reads ≥ 1 MiB are no longer a single sequential `pread` on one worker thread: they are split into 512 KiB chunks, all submitted to the global thread pool at once, and each worker `pread`s its chunk into the same pre-built buffer (positioned writes, zero coordination); the last chunk to finish settles the request — still one completion, unchanged batcher accounting. A single-threaded sequential read is page-cache-copy bound (turbofile measured 64 MiB on its own Apple Silicon: 2.7 ms parallel vs 8.9 ms single-thread); spreading the copy across workers approaches memory bandwidth. Any failed chunk fails the whole request (partial data is never deliverable, same semantics as the pipeline path); the chunk count is capped at 256 and the chunk size grows for huge files. The Linux io_uring (already ~20 GB/s, bandwidth-bound) and Windows IOCP (single-completion structure) paths are unchanged.

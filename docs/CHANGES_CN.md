@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [1.10.0] - 2026-09-29
 
 ### 性能
 - **macOS：大读并行分块填充。** ≥ 1 MiB 的读不再由单个 worker 线程顺序 `pread`，而是拆成 512 KiB 的块一次性全部提交全局线程池，各 worker 并发 `pread` 进同一预建缓冲（位置写、零协调），最后一块完成时聚合收尾——整请求仍是一次完成，批量器记账不变。单线程顺序读的页缓存拷贝是瓶颈（turbofile 在自有 Apple Silicon 上实测 64 MiB：并行 2.7ms vs 单线程 8.9ms），摊到多个 worker 后逼近内存带宽。任一块失败即整请求失败（部分数据不可交付，与流水线路径语义一致）；分块数封顶 256，巨型文件自动放大块大小。Linux io_uring（20 GB/s 已带宽饱和）与 Windows IOCP（单完成结构）路径不变。
