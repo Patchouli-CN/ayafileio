@@ -6,11 +6,7 @@
 语义与手动逐行写法完全一致。
 """
 
-import os
-
 from ._open import open as _aopen
-
-_Path = "str | bytes | os.PathLike"
 
 
 async def read_bytes(path) -> bytes:
@@ -49,7 +45,11 @@ async def read_text(path, encoding: "str | None" = None) -> str:
 
 
 async def write_text(path, data: str, encoding: "str | None" = None) -> int:
-    """一次性写入整个文本文件（覆盖写），返回写入的字节数。
+    """一次性写入整个文本文件（覆盖写），返回编码后写入的字节数。
+
+    注意与内置 ``open()`` 的语义差异：内置文本模式 ``write()`` 返回
+    字符数，这里返回 encode 之后实际落盘的字节数（与 ``AsyncFile.write``
+    一致）。
 
     示例::
 
