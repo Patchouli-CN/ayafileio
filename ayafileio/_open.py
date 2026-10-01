@@ -2,7 +2,8 @@
 
 import locale
 from pathlib import Path
-from typing import overload, Literal
+from typing import overload, Literal, Any
+from collections.abc import Coroutine
 from ._async_file import AsyncFile, _normalize_mode
 from ._ayafileio import open_async as _native_open_async
 
@@ -59,6 +60,37 @@ def open(
     💡 性能提示：尽量复用同一个句柄，避免在循环中反复 open/close。
     """
     return AsyncFile(path, mode, encoding, newline, errors, auto_flush)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# aopen 类型重载：文本模式 → str，二进制模式 → bytes（与 open 一致）
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@overload
+def aopen(
+    path: str | Path,
+    mode: Literal["r", "w", "a", "x", "r+", "w+", "a+", "x+"],
+    encoding: str | None = None,
+    newline: str | None = None,
+    errors: str | None = None,
+    auto_flush: bool = False
+) -> Coroutine[Any, Any, AsyncFile[str]]:
+    """文本模式：await 后 read() 返回 str"""
+    ...
+
+
+@overload
+def aopen(
+    path: str | Path,
+    mode: Literal["rb", "wb", "ab", "xb", "rb+", "wb+", "ab+", "xb+"] = "rb",
+    encoding: None = None,
+    newline: str | None = None,
+    errors: str | None = None,
+    auto_flush: bool = False
+) -> Coroutine[Any, Any, AsyncFile[bytes]]:
+    """二进制模式：await 后 read() 返回 bytes"""
+    ...
 
 
 async def aopen(
