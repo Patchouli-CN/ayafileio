@@ -275,19 +275,24 @@ style): `async with` triggers the open in `__aenter__`, and
 parallelizes the open syscalls themselves; a plain synchronous `open()` in the
 loop still costs one short blocking syscall per file.
 
-### Batch whole-file reads
+### Batch whole-file operations
 
 ```python
 shards  = await ayafileio.read_bytes_many(model_shard_paths)
 configs = await ayafileio.read_text_many(config_paths, encoding="utf-8")
+counts  = await ayafileio.write_bytes_many([(p, payload) for p, payload in items])
+counts  = await ayafileio.write_text_many(items, encoding="utf-8")
 ```
 
-One call reads many files concurrently: parallel opens via `aopen()`, async
-reads via the platform backend, results in input order. `max_concurrency`
-(default 64) caps in-flight files so huge inputs can't exhaust fds; any failure
-raises the whole call. This is the shortest way to write the pattern that
-actually uses the async backend — a sequential `for` loop over `open()` reads
-one file at a time no matter how fast each read is.
+One call reads (or writes) many files concurrently: parallel opens via
+`aopen()`, async I/O via the platform backend, results in input order
+(write variants take `(path, data)` pairs and return byte counts).
+`max_concurrency` (default 64) caps in-flight files so huge inputs can't
+exhaust fds; any failure raises the whole call — batches are not atomic, so
+a failed write batch may leave some files already written. This is the
+shortest way to write the pattern that actually uses the async backend — a
+sequential `for` loop over `open()` moves one file at a time no matter how
+fast each operation is.
 
 ### Configuration functions
 

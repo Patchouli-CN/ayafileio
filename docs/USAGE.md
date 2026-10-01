@@ -15,7 +15,7 @@ For benchmarks and the backend architecture, see the
 - [Reading and writing](#reading-and-writing)
 - [Positioned I/O: `read_at` / `write_at` / `read_many` / `write_many`](#positioned-io)
 - [Whole-file helpers](#whole-file-helpers)
-- [Batch reads: `read_bytes_many` / `read_text_many`](#batch-reads)
+- [Batch operations: `read_*_many` / `write_*_many`](#batch-operations)
 - [Streaming with `chunk()`](#streaming-with-chunk)
 - [Zero-copy reads with `readinto()`](#zero-copy-reads-with-readinto)
 - [Copying files: `acopy()`](#copying-files-acopy)
@@ -174,7 +174,7 @@ One await does open + read/write + close. Semantics are identical to the
 hand-written `async with ayafileio.open(...)` form — it just removes the
 boilerplate. (`write_text` also returns the encoded byte count.)
 
-## Batch reads
+## Batch operations
 
 The single most common async-file mistake is the sequential loop:
 
@@ -190,13 +190,19 @@ The one-line fix:
 ```python
 shards  = await ayafileio.read_bytes_many(model_shard_paths)
 configs = await ayafileio.read_text_many(config_paths, encoding="utf-8")
+counts  = await ayafileio.write_bytes_many([(p, payload) for p, payload in items])
+counts  = await ayafileio.write_text_many(items, encoding="utf-8")
 ```
 
-One call reads many files concurrently: opens go through `aopen()` (parallel
-OS opens), reads go through the platform async backend, and results come back
-**in input order**. `max_concurrency` (keyword-only, default 64) caps
-in-flight files, so a hundred-thousand-path input can't exhaust file
-descriptors. Any failure raises the whole call, same as `asyncio.gather`.
+One call reads (or writes) many files concurrently: opens go through
+`aopen()` (parallel OS opens), I/O goes through the platform async backend,
+and results come back **in input order**. The write variants take an
+iterable of `(path, data)` pairs (overwrite writes) and return per-file
+byte counts — encoded bytes for `write_text_many`. `max_concurrency`
+(keyword-only, default 64) caps in-flight files, so a
+hundred-thousand-item input can't exhaust file descriptors. Any failure
+raises the whole call, same as `asyncio.gather` — and batches are **not
+atomic**: when a write batch raises, some files may already be on disk.
 
 Measured on 300 × 4 KiB cache-hot files: 5.6x over the sequential aiofiles
 loop, 2.6x over the sequential ayafileio loop.
@@ -344,7 +350,8 @@ Differences worth knowing:
   Read in chunks.
 - **Text-mode `write()` returns encoded bytes**, not characters.
 - **Extra APIs aiofiles doesn't have:** `read_at`/`write_at`/`read_many`/
-  `write_many`, `aopen()`, `read_bytes_many()`/`read_text_many()`, `acopy()`,
+  `write_many`, `aopen()`, `read_bytes_many()`/`read_text_many()`/
+  `write_bytes_many()`/`write_text_many()`, `acopy()`,
   `readinto()`, `chunk()`.
 - `aiofiles.os` (async `stat`, `listdir`, …) is **not** covered — ayafileio
   is file I/O only.

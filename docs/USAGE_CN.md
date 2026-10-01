@@ -14,7 +14,7 @@
 - [读与写](#读与写)
 - [定位 I/O：`read_at` / `write_at` / `read_many` / `write_many`](#定位-io)
 - [整文件操作](#整文件操作)
-- [批量读取：`read_bytes_many` / `read_text_many`](#批量读取)
+- [批量操作：`read_*_many` / `write_*_many`](#批量操作)
 - [流式分块：`chunk()`](#流式分块chunk)
 - [零拷贝读取：`readinto()`](#零拷贝读取readinto)
 - [复制文件：`acopy()`](#复制文件acopy)
@@ -164,7 +164,7 @@ n    = await ayafileio.write_text("out.txt", "hello", encoding="utf-8")
 `async with ayafileio.open(...)` 完全一致，只是省掉样板。
 （`write_text` 同样返回编码后的字节数。）
 
-## 批量读取
+## 批量操作
 
 异步文件操作最常见的错误写法是串行循环：
 
@@ -180,12 +180,16 @@ for path in paths:
 ```python
 shards  = await ayafileio.read_bytes_many(model_shard_paths)
 configs = await ayafileio.read_text_many(config_paths, encoding="utf-8")
+counts  = await ayafileio.write_bytes_many([(p, payload) for p, payload in items])
+counts  = await ayafileio.write_text_many(items, encoding="utf-8")
 ```
 
-一次调用并发读取多个文件：打开走 `aopen()`（OS open 并行），读取走
-平台异步后端，返回顺序**与输入一致**。`max_concurrency`（仅关键字，
-默认 64）限制在飞文件数，十万级路径输入也不会打爆 fd。任一失败整体
-抛出，与 `asyncio.gather` 默认语义相同。
+一次调用并发读取（或写入）多个文件：打开走 `aopen()`（OS open 并行），
+I/O 走平台异步后端，返回顺序**与输入一致**。写系列接收 `(path, data)`
+对的可迭代对象（覆盖写），返回逐文件字节数——`write_text_many` 返回
+编码后的字节数。`max_concurrency`（仅关键字，默认 64）限制在飞文件数，
+十万级输入也不会打爆 fd。任一失败整体抛出，与 `asyncio.gather` 默认
+语义相同——批量**不是事务**：写批量抛出时，部分文件可能已经落盘。
 
 实测 300 个 4 KiB 缓存热文件：对串行 aiofiles 循环 5.6x，对串行
 ayafileio 循环 2.6x。
@@ -327,8 +331,9 @@ ayafileio.drain_buffer_pool()   # 释放所有缓存 I/O 缓冲区
   顺序读曲线不同的原因。按块读取。
 - **文本模式 `write()` 返回编码后字节数**，不是字符数。
 - **aiofiles 没有的 API：** `read_at`/`write_at`/`read_many`/
-  `write_many`、`aopen()`、`read_bytes_many()`/`read_text_many()`、
-  `acopy()`、`readinto()`、`chunk()`。
+  `write_many`、`aopen()`、`read_bytes_many()`/`read_text_many()`/
+  `write_bytes_many()`/`write_text_many()`、`acopy()`、`readinto()`、
+  `chunk()`。
 - `aiofiles.os`（异步 `stat`、`listdir` 等）**不在覆盖范围**——
   ayafileio 只做文件 I/O。
 

@@ -163,6 +163,43 @@ class TestAsyncOpen(unittest.TestCase):
             for p in paths:
                 os.unlink(p)
 
+    def test_write_bytes_many(self):
+        """批量写：顺序一致的字节数，round-trip 内容正确"""
+        pairs = [(os.path.join(self.dir, f"wb{i}.bin"), f"payload-{i}".encode() * 3)
+                 for i in range(8)]
+        async def run():
+            counts = await ayafileio.write_bytes_many(pairs)
+            return counts, await ayafileio.read_bytes_many([p for p, _ in pairs])
+        try:
+            counts, contents = asyncio.run(run())
+            self.assertEqual(counts, [len(d) for _, d in pairs])
+            self.assertEqual(contents, [d for _, d in pairs])
+        finally:
+            for p, _ in pairs:
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_write_bytes_many_empty(self):
+        """空输入返回空列表"""
+        self.assertEqual(asyncio.run(ayafileio.write_bytes_many([])), [])
+
+    def test_write_text_many(self):
+        """批量文本写：返回编码后字节数，round-trip 正确"""
+        pairs = [(os.path.join(self.dir, f"wt{i}.txt"), f"文本-{i}")
+                 for i in range(4)]
+        async def run():
+            counts = await ayafileio.write_text_many(pairs, encoding="utf-8")
+            return counts, await ayafileio.read_text_many(
+                [p for p, _ in pairs], encoding="utf-8")
+        try:
+            counts, contents = asyncio.run(run())
+            self.assertEqual(counts, [len(d.encode("utf-8")) for _, d in pairs])
+            self.assertEqual(contents, [d for _, d in pairs])
+        finally:
+            for p, _ in pairs:
+                if os.path.exists(p):
+                    os.unlink(p)
+
 
 if __name__ == "__main__":
     unittest.main()

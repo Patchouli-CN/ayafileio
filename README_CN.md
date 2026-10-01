@@ -262,17 +262,21 @@ async with ayafileio.aopen("data.bin", "rb") as f:
 系统调用本身也能并行；循环里同步 `open()` 则每个文件仍要付出一次短暂的
 阻塞系统调用。
 
-### 批量整文件读
+### 批量整文件操作
 
 ```python
 shards  = await ayafileio.read_bytes_many(model_shard_paths)
 configs = await ayafileio.read_text_many(config_paths, encoding="utf-8")
+counts  = await ayafileio.write_bytes_many([(p, payload) for p, payload in items])
+counts  = await ayafileio.write_text_many(items, encoding="utf-8")
 ```
 
-一次调用并发读取多个文件：打开经 `aopen()` 并行、读取走平台异步后端、
-返回顺序与输入一致。`max_concurrency`（默认 64）限制在飞文件数，海量
-输入不会打爆 fd；任一失败整体抛出。这是吃到异步后端性能的最短写法——
-串行 `for` 循环配 `open()` 无论单次读多快，同一时刻都只有一个文件在飞。
+一次调用并发读取（或写入）多个文件：打开经 `aopen()` 并行、I/O 走
+平台异步后端、返回顺序与输入一致（写系列接收 `(path, data)` 对，
+返回字节数）。`max_concurrency`（默认 64）限制在飞文件数，海量输入
+不会打爆 fd；任一失败整体抛出——批量不是事务，写批量失败时部分文件
+可能已经落盘。这是吃到异步后端性能的最短写法——串行 `for` 循环配
+`open()` 无论单次操作多快，同一时刻都只有一个文件在飞。
 
 ### 配置函数
 

@@ -28,6 +28,8 @@ from ._whole import (
     write_text,
     read_bytes_many,
     read_text_many,
+    write_bytes_many,
+    write_text_many,
 )
 from ._wrap import wrap_file
 from .types import AyaFileIO
@@ -52,6 +54,8 @@ __all__ = [
     "write_text",
     "read_bytes_many",
     "read_text_many",
+    "write_bytes_many",
+    "write_text_many",
     "AyaFileIO",
     "AsyncFile",
     "configure",
