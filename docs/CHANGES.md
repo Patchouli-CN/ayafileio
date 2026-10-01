@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.11.0] - 2026-10-01
 
 ### Added
 - **Async open: `ayafileio.aopen()`.** Same arguments, mode semantics, and returned `AsyncFile` as `ayafileio.open()`, but the OS open itself runs on the C++ global thread pool: the worker constructs the backend holding the GIL while the blocking syscalls inside the constructors (`CreateFileW` / `open` / `openat`-wait / `mmap`) release it via the new `GilRelease` guard, so many workers genuinely open files in parallel. The result (a ready-to-use `AsyncFile` or an exception object) is delivered through the `ResultBatcher` — the same batched-wakeup lane as I/O completions. On Windows the `loop`/`create_future` pair the constructor needs is pre-fetched on the caller's loop thread and injected (there is no running loop on a worker thread); POSIX backends bind the loop lazily at first I/O and ignore the injection. The synchronous `ayafileio.open()` path benefits too: its open syscall no longer freezes the whole interpreter for its duration.
