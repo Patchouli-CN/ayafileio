@@ -695,8 +695,13 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         if (s->skipCPOnSuccess) {
             // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
-            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            //（同步完成意味着内核已结束该 op，worker 无需参与）。
+            // batcher 的 op_submitted 也必须在此配平——worker 见不到
+            // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
+            // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
+            // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
             s->pending.fetch_sub(1, std::memory_order_release);
+            complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
         } else {
@@ -813,8 +818,13 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         if (s->skipCPOnSuccess) {
             // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
-            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            //（同步完成意味着内核已结束该 op，worker 无需参与）。
+            // batcher 的 op_submitted 也必须在此配平——worker 见不到
+            // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
+            // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
+            // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
             s->pending.fetch_sub(1, std::memory_order_release);
+            complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
         } else {
@@ -935,8 +945,13 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         if (s->skipCPOnSuccess) {
             // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
-            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            //（同步完成意味着内核已结束该 op，worker 无需参与）。
+            // batcher 的 op_submitted 也必须在此配平——worker 见不到
+            // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
+            // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
+            // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
             s->pending.fetch_sub(1, std::memory_order_release);
+            complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
         } else {
@@ -1192,8 +1207,13 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
         Py_XDECREF(r); Py_XDECREF(fn); Py_DECREF(val);
         if (s->skipCPOnSuccess) {
             // 内核不再投递完成包：pending 由提交线程递减，req 直接回收
-            //（同步完成意味着内核已结束该 op，worker 无需参与）
+            //（同步完成意味着内核已结束该 op，worker 无需参与）。
+            // batcher 的 op_submitted 也必须在此配平——worker 见不到
+            // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
+            // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
+            // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
             s->pending.fetch_sub(1, std::memory_order_release);
+            complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
         } else {

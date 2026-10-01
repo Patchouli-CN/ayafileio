@@ -75,6 +75,9 @@ public:
     // ── stats (for debugging / monitoring) ─────────────────────────────────
     size_t current_threshold() const { return m_current_threshold.load(std::memory_order_relaxed); }
     unsigned current_idle_ms()  const { return m_current_idle_ms.load(std::memory_order_relaxed); }
+    // 在飞 op 记账（op_submitted/op_completed 之差）。回归测试用它断言
+    // 同步完成路径没有记账泄漏
+    long outstanding() const { return m_outstanding.load(std::memory_order_relaxed); }
     double median_interval_us() const;
 
 private:

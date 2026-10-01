@@ -4,6 +4,7 @@
 #include "globals.hpp"
 #ifdef _WIN32
 #include "iocp.hpp"
+#include "iocp_context.hpp"
 #endif
 #ifdef HAVE_IO_URING
 #include <liburing.h>
@@ -474,6 +475,20 @@ NB_MODULE(_ayafileio, m) {
     }, py::arg("path"), py::arg("mode") = "rb",
     "Open a file asynchronously: the OS open runs on the C++ thread pool, "
     "resolving to a ready-to-use AsyncFile.");
+
+    // 调试/回归测试：当前 loop 的 batcher 在飞 op 记账（正常应为 0）。
+    // 同步完成路径若泄漏 op_submitted，这里会看到只增不减的计数
+    m.def("debug_batcher_outstanding", []() {
+        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
+        if (!loop) throw py::python_error();
+#ifdef _WIN32
+        ResultBatcher* b = IOCPContext::instance().get_batcher(loop);
+#else
+        ResultBatcher* b = get_or_create_batcher(loop);
+#endif
+        Py_DECREF(loop);
+        return b ? b->outstanding() : 0L;
+    }, "Current loop's in-flight op accounting (test/debug aid)");
 
     // 向后兼容的句柄池 API
     m.def("set_handle_pool_limits", &set_handle_pool_limits,
