@@ -5,5 +5,7 @@ include docs/CHANGES.md
 include docs/CHANGES_CN.md
 include docs/STORY.md
 include docs/STORY_CN.md
+include docs/USAGE.md
+include docs/USAGE_CN.md
 include LICENSE
-recursive-include ayafileio *.py *.pyd *.pyi
+recursive-include ayafileio *.py *.pyd *.pyi py.typed

@@ -19,6 +19,7 @@
 ## 更新日志
 
 见 [CHANGES_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/CHANGES_CN.md)。
+完整使用指南见 [USAGE_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/USAGE_CN.md)。
 在用 ayafileio 玩有趣的东西？见 [STORY_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/STORY_CN.md)。
 
 ## 后端
