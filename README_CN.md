@@ -247,6 +247,30 @@ text = await ayafileio.read_text("config.yaml", encoding="utf-8")
 （按层加载权重、批量读配置）。语义与手写 `async with ayafileio.open(...)`
 完全一致，只是省掉样板。
 
+### 异步打开
+
+```python
+async with await ayafileio.aopen("data.bin", "rb") as f:
+    data = await f.read()
+```
+
+`aopen()` 与 `open()` 参数一致、返回同样的 `AsyncFile`——区别是 OS open
+本身跑在 C++ 线程池，而不是阻塞事件循环线程。批量打开大量文件时，open
+系统调用本身也能并行；循环里同步 `open()` 则每个文件仍要付出一次短暂的
+阻塞系统调用。
+
+### 批量整文件读
+
+```python
+shards  = await ayafileio.read_bytes_many(model_shard_paths)
+configs = await ayafileio.read_text_many(config_paths, encoding="utf-8")
+```
+
+一次调用并发读取多个文件：打开经 `aopen()` 并行、读取走平台异步后端、
+返回顺序与输入一致。`max_concurrency`（默认 64）限制在飞文件数，海量
+输入不会打爆 fd；任一失败整体抛出。这是吃到异步后端性能的最短写法——
+串行 `for` 循环配 `open()` 无论单次读多快，同一时刻都只有一个文件在飞。
+
 ### 配置函数
 
 ```python

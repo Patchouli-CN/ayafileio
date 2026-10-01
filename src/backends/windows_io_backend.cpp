@@ -10,13 +10,34 @@ namespace ayafileio {
 // ════════════════════════════════════════════════════════════════════════════
 
 WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &mode) {
-    auto &cfg = ayafileio::config();
-
     // ── get event loop + create_future ────────────────────────────────────
     PyObject *loop = PyObject_CallNoArgs(g_get_running_loop);
     if (!loop) throw py::python_error();
     PyObject *create_future = PyObject_GetAttr(loop, g_str_create_future);
-    if (!create_future) throw py::python_error();
+    if (!create_future) { Py_DECREF(loop); throw py::python_error(); }
+
+    try {
+        init_from_path(path, mode, loop, create_future);
+    } catch (...) {
+        Py_DECREF(create_future);
+        // loop 引用不归还：Session 持有的是 borrowed ref，这个 +1 是
+        // 它的续命来源（与原 ctor 行为一致，见 iocp_context.hpp Session）
+        throw;
+    }
+    Py_DECREF(create_future);
+}
+
+// open_async 专用：loop/create_future 由调用方在事件循环线程预取注入
+// （工作线程上 asyncio.get_running_loop() 无 running loop 可用）。引用
+// 由调用方持有并归还；create_session 内部会自行 INCREF 需要留存的部分。
+WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &mode,
+                                   PyObject *loop, PyObject *create_future) {
+    init_from_path(path, mode, loop, create_future);
+}
+
+void WindowsIOBackend::init_from_path(const std::string &path, const std::string &mode,
+                                      PyObject *loop, PyObject *create_future) {
+    auto &cfg = ayafileio::config();
 
     // ── parse mode ────────────────────────────────────────────────────────
     DWORD access = 0, disp = OPEN_EXISTING;
@@ -24,7 +45,6 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     try {
         mi = parse_mode(mode);
     } catch (const std::invalid_argument &e) {
-        Py_DECREF(create_future);
         throw py::value_error(e.what());
     }
     bool canRead    = mi.canRead;
@@ -51,12 +71,16 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     std::wstring wpath = std::filesystem::u8path(path).wstring();
 
     if (h == INVALID_HANDLE_VALUE) {
-        h = CreateFileW(wpath.c_str(), access,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
+        {
+            // 阻塞型系统调用：释放 GIL——open_async 的工作线程借此真正
+            // 并行打开；同步 open 路径也不再冻结整个解释器
+            GilRelease gr;
+            h = CreateFileW(wpath.c_str(), access,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
+        }
         if (h == INVALID_HANDLE_VALUE) {
             DWORD err = GetLastError();
-            Py_DECREF(create_future);
             win_throw_os_error(err, "Failed to open file", path.c_str());
         }
     }
@@ -68,10 +92,8 @@ WindowsIOBackend::WindowsIOBackend(const std::string &path, const std::string &m
     } catch (...) {
         if (!poolKey.path.empty()) handle_pool_evict(poolKey);
         CloseHandle(h);
-        Py_DECREF(create_future);
         throw;
     }
-    Py_DECREF(create_future);
 
     // ── init file position (cachedFileSize already set in create_session) ───
     if (appendMode) {

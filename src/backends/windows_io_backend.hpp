@@ -16,6 +16,11 @@ namespace ayafileio {
 class WindowsIOBackend : public IOBackendBase {
 public:
     WindowsIOBackend(const std::string& path, const std::string& mode);
+    // open_async 专用：loop/create_future 由调用方在事件循环线程预先取好
+    // 注入（工作线程上 asyncio.get_running_loop() 无 running loop 可用）。
+    // 引用由调用方持有并归还（见 bindings.cpp open_async）。
+    WindowsIOBackend(const std::string& path, const std::string& mode,
+                     PyObject* loop, PyObject* create_future);
     WindowsIOBackend(int fd, const std::string& mode, bool owns_fd = false);
     ~WindowsIOBackend() override;
 
@@ -41,6 +46,10 @@ public:
     }
 
 private:
+    // 两个 path 构造函数的公共实现；不负责 loop/create_future 的引用记账
+    void init_from_path(const std::string& path, const std::string& mode,
+                        PyObject* loop, PyObject* create_future);
+
     uint64_t m_sessionId = 0;
 };
 

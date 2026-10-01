@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Async open: `ayafileio.aopen()`.** Same arguments, mode semantics, and returned `AsyncFile` as `ayafileio.open()`, but the OS open itself runs on the C++ global thread pool: the worker constructs the backend holding the GIL while the blocking syscalls inside the constructors (`CreateFileW` / `open` / `openat`-wait / `mmap`) release it via the new `GilRelease` guard, so many workers genuinely open files in parallel. The result (a ready-to-use `AsyncFile` or an exception object) is delivered through the `ResultBatcher` — the same batched-wakeup lane as I/O completions. On Windows the `loop`/`create_future` pair the constructor needs is pre-fetched on the caller's loop thread and injected (there is no running loop on a worker thread); POSIX backends bind the loop lazily at first I/O and ignore the injection. The synchronous `ayafileio.open()` path benefits too: its open syscall no longer freezes the whole interpreter for its duration.
+- **Batch whole-file reads: `ayafileio.read_bytes_many()` / `read_text_many()`.** One call reads many files concurrently — opens go through `aopen` (parallel OS opens), reads through the platform async backend, and a semaphore (`max_concurrency`, default 64) caps in-flight files so a hundred-thousand-path input can't exhaust fds. Results come back in input order; any failure raises the whole call (plain `asyncio.gather` semantics). This turns the correct pattern (`gather` over files) into the shortest one to write.
+
+### CI / Testing
+- Added `tests/test_async_open.py` (aopen round-trips in binary/text/write modes, mode validation parity with `open()`, error delivery through the future, concurrent opens, batch-read ordering, concurrency limiting, error propagation).
+
 ## [1.10.0] - 2026-09-29
 
 ### Performance

@@ -14,6 +14,32 @@ _DEFAULT_READLINE_BUF = 65536  # 64 KB – much faster than 4 KB for large files
 
 _VALID_MODE_CHARS = frozenset("rwaxbt+")
 
+
+def _normalize_mode(mode: str, encoding: "str | None", newline: "str | None") -> "tuple[str, bool]":
+    """校验打开模式并规范化成传给 C++ 的二进制形式，返回 (clean_mode, is_text)。
+
+    ``AsyncFile.__init__`` 与 ``aopen`` 共用——两条打开路径对模式的
+    校验/清洗必须完全一致。
+    """
+    is_text = "b" not in mode
+    if not is_text:
+        if encoding is not None:
+            raise ValueError("Binary mode does not accept an encoding argument.")
+        if newline is not None:
+            raise ValueError("Binary mode does not accept a newline argument.")
+
+    if any(c not in _VALID_MODE_CHARS for c in mode):
+        raise ValueError(f"Invalid mode: '{mode}'")
+
+    clean_mode = mode.replace("t", "")
+    if "b" not in clean_mode:
+        has_plus = "+" in clean_mode
+        base_char = next((c for c in clean_mode if c in "rwax"), None)
+        if not base_char:
+            raise ValueError(f"Invalid mode: '{mode}'")
+        clean_mode = base_char + ("+" if has_plus else "") + "b"
+    return clean_mode, is_text
+
 T = TypeVar("T", str, bytes)
 
 
@@ -425,31 +451,14 @@ class AsyncFile(Generic[T]):
         self._errors = errors or "strict"
         self._auto_flush = auto_flush
 
-        # ── 文本 / 二进制模式判断 ──────────────────────────────────────────
+        # ── 模式校验 + 规范化（传给 C++ 的始终为二进制形式）──────────────
         self._mode = ""
 
-        self._is_text = "b" not in mode
-
+        clean_mode, self._is_text = _normalize_mode(mode, encoding, newline)
         if self._is_text:
             self._encoding = encoding or locale.getpreferredencoding(False)
         else:
-            if encoding is not None:
-                raise ValueError("Binary mode does not accept an encoding argument.")
-            if newline is not None:
-                raise ValueError("Binary mode does not accept a newline argument.")
             self._encoding = "utf-8"
-
-        # ── 规范化传给 C++ 的模式（始终二进制）────────────────────────────
-        if any(c not in _VALID_MODE_CHARS for c in mode):
-            raise ValueError(f"Invalid mode: '{mode}'")
-
-        clean_mode = mode.replace("t", "")
-        if "b" not in clean_mode:
-            has_plus = "+" in clean_mode
-            base_char = next((c for c in clean_mode if c in "rwax"), None)
-            if not base_char:
-                raise ValueError(f"Invalid mode: '{mode}'")
-            clean_mode = base_char + ("+" if has_plus else "") + "b"
 
         self._mode = clean_mode
         self._impl = _AsyncFile(self._path, clean_mode)
@@ -990,19 +999,24 @@ class AsyncFile(Generic[T]):
         return cls(path, mode, encoding, newline, errors, auto_flush)
 
     @classmethod
-    def _from_impl(cls, impl: _AsyncFile, mode: str = "rb") -> "AsyncFile[T]":
+    def _from_impl(cls, impl: _AsyncFile, mode: str = "rb", *,
+                   path: str = "<fd>", is_text: bool = False,
+                   encoding: "str | None" = None,
+                   newline: "str | None" = None,
+                   errors: str = "strict",
+                   auto_flush: bool = False) -> "AsyncFile[T]":
         """从 C++ 层对象创建 AsyncFile（内部使用）"""
         instance = object.__new__(cls)
         instance._impl = impl
-        instance._path = "<fd>"
-        instance._is_text = False
-        instance._encoding = None
+        instance._path = path
+        instance._is_text = is_text
+        instance._encoding = encoding
         instance._line_buffer = bytearray()
         instance._line_pos = 0
         instance._chars = None  # 惰性创建：文本读取首次触达时才建字符流
         instance._closed = False
-        instance._newline = None
-        instance._errors = "strict"
+        instance._newline = newline
+        instance._errors = errors
         instance._mode = mode
-        instance._auto_flush = False
+        instance._auto_flush = auto_flush
         return instance

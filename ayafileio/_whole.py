@@ -6,7 +6,10 @@
 语义与手动逐行写法完全一致。
 """
 
+import asyncio
+
 from ._open import open as _aopen
+from ._open import aopen as _aopen_async
 
 
 async def read_bytes(path) -> bytes:
@@ -57,3 +60,46 @@ async def write_text(path, data: str, encoding: "str | None" = None) -> int:
     """
     async with _aopen(path, "w", encoding=encoding) as f:
         return await f.write(data)
+
+
+async def read_bytes_many(paths, *, max_concurrency: int = 64) -> "list[bytes]":
+    """并发读取多个文件，返回与输入顺序一致的 ``bytes`` 列表。
+
+    打开动作经 :func:`ayafileio.aopen` 下沉到 C++ 线程池（多个 OS open
+    真正并行），读取走各平台真异步后端；``max_concurrency`` 限制最大
+    并发数，避免海量路径打爆 fd。任一路径失败则整体抛出（同
+    ``asyncio.gather`` 默认语义）。
+
+    示例::
+
+        results = await ayafileio.read_bytes_many(model_shard_paths)
+    """
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _one(p) -> bytes:
+        async with sem:
+            async with await _aopen_async(p, "rb") as f:
+                return await f.read()
+
+    return list(await asyncio.gather(*(_one(p) for p in paths)))
+
+
+async def read_text_many(paths, encoding: "str | None" = None, *,
+                         max_concurrency: int = 64) -> "list[str]":
+    """并发读取多个文本文件，返回与输入顺序一致的 ``str`` 列表。
+
+    语义与 :func:`read_bytes_many` 一致；``encoding`` 为 None 时沿用
+    平台 locale 偏好编码（同内置 ``open()``）。
+
+    示例::
+
+        configs = await ayafileio.read_text_many(paths, encoding="utf-8")
+    """
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _one(p) -> str:
+        async with sem:
+            async with await _aopen_async(p, "r", encoding=encoding) as f:
+                return await f.read()
+
+    return list(await asyncio.gather(*(_one(p) for p in paths)))

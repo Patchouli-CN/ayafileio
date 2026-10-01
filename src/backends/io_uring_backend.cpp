@@ -65,31 +65,36 @@ IOUringBackend::IOUringBackend(const std::string& path, const std::string& mode)
     // ── 第一步：用独立的本地 ring 做 OPENAT ──
     m_fd = -1;
     {
-        struct io_uring local_ring;
-        if (io_uring_queue_init(8, &local_ring, 0) == 0) {
-            char* path_copy = strdup(path.c_str());
-            if (path_copy) {
-                struct io_uring_sqe* sqe = io_uring_get_sqe(&local_ring);
-                if (sqe) {
-                    io_uring_prep_openat(sqe, AT_FDCWD, path_copy, flags, 0644);
-                    io_uring_submit(&local_ring);
-                    
-                    struct io_uring_cqe* cqe = nullptr;
-                    int ret = io_uring_wait_cqe(&local_ring, &cqe);
-                    if (ret >= 0 && cqe) {
-                        m_fd = cqe->res;
-                        io_uring_cqe_seen(&local_ring, cqe);
+        // openat 等待与回退 open 都是阻塞系统调用：释放 GIL，open_async
+        // 的工作线程借此真正并行打开（同步 open 路径亦不再冻结解释器）
+        GilRelease gr;
+        {
+            struct io_uring local_ring;
+            if (io_uring_queue_init(8, &local_ring, 0) == 0) {
+                char* path_copy = strdup(path.c_str());
+                if (path_copy) {
+                    struct io_uring_sqe* sqe = io_uring_get_sqe(&local_ring);
+                    if (sqe) {
+                        io_uring_prep_openat(sqe, AT_FDCWD, path_copy, flags, 0644);
+                        io_uring_submit(&local_ring);
+
+                        struct io_uring_cqe* cqe = nullptr;
+                        int ret = io_uring_wait_cqe(&local_ring, &cqe);
+                        if (ret >= 0 && cqe) {
+                            m_fd = cqe->res;
+                            io_uring_cqe_seen(&local_ring, cqe);
+                        }
                     }
+                    free(path_copy);
                 }
-                free(path_copy);
+                io_uring_queue_exit(&local_ring);
             }
-            io_uring_queue_exit(&local_ring);
         }
-    }
-    
-    // ── 第二步：OPENAT 失败 → 回退同步 ──
-    if (m_fd < 0) {
-        m_fd = open(path.c_str(), flags, 0644);
+
+        // ── 第二步：OPENAT 失败 → 回退同步 ──
+        if (m_fd < 0) {
+            m_fd = open(path.c_str(), flags, 0644);
+        }
     }
     
     if (m_fd == -1) {

@@ -19,6 +19,7 @@
 #include "config.hpp"
 #include "pool.hpp"
 #include "global_thread_pool.hpp"
+#include <algorithm>
 
 // nanobind bindings — 实现全部位于 namespace ayafileio，此处引入
 using namespace ayafileio;
@@ -28,6 +29,11 @@ struct PyAsyncFile {
     // 修改构造函数：接受 py::object 或 const char*
     explicit PyAsyncFile(const char* path, const char* mode = "rb")
         : fh(new FileHandle(std::string(path), std::string(mode))) {}
+
+    // open_async 注入路径：loop/create_future 由事件循环线程预取（见
+    // FileHandle 同名构造函数）
+    PyAsyncFile(const char* path, const char* mode, PyObject* loop, PyObject* create_future)
+        : fh(new FileHandle(std::string(path), std::string(mode), loop, create_future)) {}
 
     PyAsyncFile(int fd, const char* mode = "rb", bool owns_fd = false)
         : fh(new FileHandle(fd, std::string(mode), owns_fd)) {}
@@ -115,6 +121,19 @@ struct PyAsyncFile {
     void close_impl() { fh->close_impl(); }
     int fileno() { return fh->fileno(); }
 };
+
+// 取当前 Python 错误的异常实例（owned 引用），供 future.set_exception
+// 使用。调用前错误必须已设置（python_error.restore() / PyErr_SetString）。
+static PyObject* fetch_current_exc() {
+    PyObject *t = nullptr, *v = nullptr, *tb = nullptr;
+    PyErr_Fetch(&t, &v, &tb);
+    PyErr_NormalizeException(&t, &v, &tb);
+    if (!v && t) v = PyObject_CallNoArgs(t);
+    Py_XDECREF(t);
+    Py_XDECREF(tb);
+    if (!v) v = PyObject_CallNoArgs(g_OSError);  // 兜底（实例化也失败的极端情况）
+    return v;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // 统一配置 API
@@ -364,6 +383,97 @@ NB_MODULE(_ayafileio, m) {
         .def("readinto", &PyAsyncFile::readinto, py::arg("buf"))
         .def("fileno", &PyAsyncFile::fileno)
         .def("_close_impl", &PyAsyncFile::close_impl);
+
+    // ── open_async：C++ 线程池异步打开 ────────────────────────────────────
+    // OS open 提交到 GlobalThreadPool：工作线程持 GIL 构造 FileHandle，
+    // 构造内部的阻塞系统调用经 GilRelease 释放 GIL，多 worker 因此真正
+    // 并行打开；结果（包装好的 AsyncFile 实例或异常对象）经 ResultBatcher
+    // 投递，与 I/O 完成共用同一条批量唤醒链路。Windows 构造需要的
+    // loop/create_future 在本线程（有 running loop）预取注入；POSIX 后端
+    // 首次 I/O 时才惰性绑定事件循环，注入参数被忽略。
+    m.def("open_async", [](const char* path, const char* mode) {
+        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
+        if (!loop) throw py::python_error();
+        PyObject* create_future = PyObject_GetAttr(loop, g_str_create_future);
+        if (!create_future) { Py_DECREF(loop); throw py::python_error(); }
+        PyObject* future = PyObject_CallNoArgs(create_future);
+        if (!future) { Py_DECREF(create_future); Py_DECREF(loop); throw py::python_error(); }
+        ResultBatcher* batcher = get_or_create_batcher(loop);
+        PyObject* set_result = PyObject_GetAttr(future, g_str_set_result);
+        if (!set_result) {
+            Py_DECREF(future); Py_DECREF(create_future); Py_DECREF(loop);
+            throw py::python_error();
+        }
+
+        batcher->op_submitted();
+
+        // GlobalThreadPool 是按需启动的：IOCP/uring/GCD 后端都不会启动
+        // 它，只有线程池后端会 ensure_started——open_async 可能是第一个
+        // 用户，必须先确保 worker 在跑，否则任务永远躺在队列里
+        unsigned workers = ayafileio::config().io_worker_count();
+        if (workers == 0) {
+            unsigned hc = std::thread::hardware_concurrency();
+            if (hc == 0) hc = 1;
+            workers = std::max(1u, std::min(hc * 2u, 16u));
+        }
+        GlobalThreadPool::instance().ensure_started(workers);
+
+        std::string p(path), m(mode);
+        GlobalThreadPool::instance().enqueue(
+            [batcher, future, set_result, loop, create_future, p, m]() {
+                PyGILState_STATE gs = PyGILState_Ensure();
+
+                PyObject* set_fn = nullptr;
+                PyObject* val = nullptr;
+                try {
+                    auto* pf = new PyAsyncFile(p.c_str(), m.c_str(), loop, create_future);
+                    py::object obj = py::cast(pf, py::rv_policy::take_ownership);
+                    val = obj.ptr();
+                    Py_INCREF(val);   // batcher 持一个引用；obj 析构归还另一个
+                    set_fn = set_result;
+                    Py_INCREF(set_fn);
+                } catch (py::python_error &e) {
+                    e.restore();
+                    val = fetch_current_exc();
+                    set_fn = PyObject_GetAttr(future, g_str_set_exception);
+                    if (!set_fn) PyErr_Clear();
+                } catch (const py::builtin_exception &e) {
+                    // nanobind 内建异常（value_error 是返回 builtin_exception
+                    // 的工厂函数而非类型，不能直接 catch）。构造路径唯一来源
+                    // 是 parse_mode 的非法模式 → ValueError
+                    PyErr_SetString(g_ValueError, e.what());
+                    val = fetch_current_exc();
+                    set_fn = PyObject_GetAttr(future, g_str_set_exception);
+                    if (!set_fn) PyErr_Clear();
+                } catch (const std::exception &e) {
+                    PyErr_SetString(g_OSError, e.what());
+                    val = fetch_current_exc();
+                    set_fn = PyObject_GetAttr(future, g_str_set_exception);
+                    if (!set_fn) PyErr_Clear();
+                }
+
+                // 与 complete_ok 相同的批量 flush 策略
+                bool last = batcher->op_completed();
+                if (set_fn && val) {
+                    bool threshold = batcher->push(set_fn, val);
+                    if (threshold || last) batcher->flush();
+                } else {
+                    Py_XDECREF(set_fn);
+                    Py_XDECREF(val);
+                }
+
+                Py_DECREF(create_future);
+                // loop 引用不归还：Windows Session 借用 loop（borrowed
+                // ref），这个 +1 是它的续命来源，与同步 open 的 ctor 一致
+                Py_DECREF(future);
+                Py_DECREF(set_result);
+                PyGILState_Release(gs);
+            });
+
+        return py::steal<py::object>(py::handle(future));
+    }, py::arg("path"), py::arg("mode") = "rb",
+    "Open a file asynchronously: the OS open runs on the C++ thread pool, "
+    "resolving to a ready-to-use AsyncFile.");
 
     // 向后兼容的句柄池 API
     m.def("set_handle_pool_limits", &set_handle_pool_limits,

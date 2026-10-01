@@ -77,7 +77,10 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
     m_appendMode = mi.appendMode;
     
     UR_DEBUG_LOG("MacOSGCDBackend: opening file with flags=%d", flags);
-    m_fd = open(path.c_str(), flags, 0644);
+    {
+        GilRelease gr;  // 阻塞系统调用：释放 GIL（见 globals.hpp GilRelease）
+        m_fd = open(path.c_str(), flags, 0644);
+    }
     if (m_fd == -1) {
         UR_DEBUG_LOG("MacOSGCDBackend: open failed, errno=%d", errno);
         throw_os_error("Failed to open file", path.c_str());
@@ -147,8 +150,12 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
     // 小读 mincore 内联快车道的驻留探测映射：只喂给 mincore，从不解引用，
     // 故映射窗口之外的页不会造成 SIGBUS。映射失败仅退化为无快车道。
     if (mi.canRead && m_cachedFileSize > 0) {
-        void* p = mmap(nullptr, static_cast<size_t>(m_cachedFileSize),
-                       PROT_READ, MAP_SHARED, m_fd, 0);
+        void* p;
+        {
+            GilRelease gr;  // 阻塞系统调用：释放 GIL（见 globals.hpp GilRelease）
+            p = mmap(nullptr, static_cast<size_t>(m_cachedFileSize),
+                     PROT_READ, MAP_SHARED, m_fd, 0);
+        }
         if (p != MAP_FAILED) {
             m_mapBase = p;
             m_mapSize = static_cast<size_t>(m_cachedFileSize);
@@ -231,8 +238,12 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
 
     // 小读 mincore 内联快车道的驻留探测映射（同路径构造函数）
     if (mi.canRead && m_cachedFileSize > 0) {
-        void* p = mmap(nullptr, static_cast<size_t>(m_cachedFileSize),
-                       PROT_READ, MAP_SHARED, m_fd, 0);
+        void* p;
+        {
+            GilRelease gr;  // 阻塞系统调用：释放 GIL（见 globals.hpp GilRelease）
+            p = mmap(nullptr, static_cast<size_t>(m_cachedFileSize),
+                     PROT_READ, MAP_SHARED, m_fd, 0);
+        }
         if (p != MAP_FAILED) {
             m_mapBase = p;
             m_mapSize = static_cast<size_t>(m_cachedFileSize);

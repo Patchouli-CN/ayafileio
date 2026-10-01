@@ -259,6 +259,33 @@ One await does open + read/write + close — aimed at `asyncio.gather` over many
 files (per-layer weight loading, bulk config reads). Semantics are identical to
 the hand-written `async with ayafileio.open(...)` form, minus the boilerplate.
 
+### Async open
+
+```python
+async with await ayafileio.aopen("data.bin", "rb") as f:
+    data = await f.read()
+```
+
+`aopen()` takes the same arguments as `open()` and returns the same
+`AsyncFile` — the difference is that the OS open itself runs on the C++ thread
+pool instead of the event-loop thread. Opening many files this way parallelizes
+the open syscalls themselves; a plain synchronous `open()` in the loop still
+costs one short blocking syscall per file.
+
+### Batch whole-file reads
+
+```python
+shards  = await ayafileio.read_bytes_many(model_shard_paths)
+configs = await ayafileio.read_text_many(config_paths, encoding="utf-8")
+```
+
+One call reads many files concurrently: parallel opens via `aopen()`, async
+reads via the platform backend, results in input order. `max_concurrency`
+(default 64) caps in-flight files so huge inputs can't exhaust fds; any failure
+raises the whole call. This is the shortest way to write the pattern that
+actually uses the async backend — a sequential `for` loop over `open()` reads
+one file at a time no matter how fast each read is.
+
 ### Configuration functions
 
 ```python

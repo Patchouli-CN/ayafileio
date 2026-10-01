@@ -84,7 +84,10 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     m_appendMode = appendMode;
 
     UR_DEBUG_LOG("ThreadIOBackend: opening file with flags=%d", flags);
-    m_fd = open(path.c_str(), flags, 0644);
+    {
+        GilRelease gr;  // 阻塞系统调用：释放 GIL（见 globals.hpp GilRelease）
+        m_fd = open(path.c_str(), flags, 0644);
+    }
     if (m_fd == -1) {
         UR_DEBUG_LOG("ThreadIOBackend: open failed, errno=%d", errno);
         throw_os_error("Failed to open file", path.c_str());

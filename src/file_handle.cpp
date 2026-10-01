@@ -14,9 +14,22 @@
 namespace ayafileio {
 
 // 从路径文件打开
-FileHandle::FileHandle(const std::string &path, const std::string &mode) {
+FileHandle::FileHandle(const std::string &path, const std::string &mode)
+    : FileHandle(path, mode, nullptr, nullptr) {}
+
+FileHandle::FileHandle(const std::string &path, const std::string &mode,
+                       PyObject *loop, PyObject *create_future) {
+#ifndef _WIN32
+    // POSIX 后端惰性绑定事件循环（首次 I/O 时），注入参数仅 Windows 使用
+    (void)loop; (void)create_future;
+#endif
 #ifdef _WIN32
-    m_backend = new WindowsIOBackend(path, mode);
+    if (loop) {
+        // open_async 注入路径：工作线程无 running loop，用预取的 loop
+        m_backend = new WindowsIOBackend(path, mode, loop, create_future);
+    } else {
+        m_backend = new WindowsIOBackend(path, mode);
+    }
 #elif defined(__APPLE__)
     // macOS: 优先使用 Dispatch I/O 实现真异步
     try {

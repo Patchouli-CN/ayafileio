@@ -12,6 +12,10 @@ namespace ayafileio {
 class FileHandle {
 public:
     FileHandle(const std::string& path, const std::string& mode);
+    // open_async 专用（Windows）：loop/create_future 在事件循环线程预取注入；
+    // POSIX 后端惰性绑定事件循环（首次 I/O 时），忽略这两个参数
+    FileHandle(const std::string& path, const std::string& mode,
+               PyObject* loop, PyObject* create_future);
     FileHandle(int fd, const std::string& mode, bool owns_fd = false);  // ← 新增
     ~FileHandle();
 

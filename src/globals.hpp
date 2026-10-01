@@ -47,6 +47,22 @@ void set_worker_count(unsigned count);
 void cache_globals();
 
 // ════════════════════════════════════════════════════════════════════════════
+// GilRelease — RAII：持 GIL 的线程上临时释放 GIL（包裹阻塞型系统调用）
+//
+// 用于构造函数内的 open/CreateFile/mmap 等：open_async 的工作线程并行
+// 打开文件时，系统调用期间不持 GIL，彼此真正并行；构造中的 Python 对象
+// 操作（错误路径、session 登记）仍在 GIL 保护下进行。同步 open 路径同样
+// 受益：open 系统调用不再冻结整个解释器。
+// ════════════════════════════════════════════════════════════════════════════
+struct GilRelease {
+    PyThreadState* state;
+    GilRelease() : state(PyEval_SaveThread()) {}
+    ~GilRelease() { PyEval_RestoreThread(state); }
+    GilRelease(const GilRelease&) = delete;
+    GilRelease& operator=(const GilRelease&) = delete;
+};
+
+// ════════════════════════════════════════════════════════════════════════════
 // Windows 错误处理
 // ════════════════════════════════════════════════════════════════════════════
 #ifdef _WIN32
