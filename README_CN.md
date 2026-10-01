@@ -250,12 +250,14 @@ text = await ayafileio.read_text("config.yaml", encoding="utf-8")
 ### 异步打开
 
 ```python
-async with await ayafileio.aopen("data.bin", "rb") as f:
+async with ayafileio.aopen("data.bin", "rb") as f:
     data = await f.read()
 ```
 
 `aopen()` 与 `open()` 参数一致、返回同样的 `AsyncFile`——区别是 OS open
-本身跑在 C++ 线程池，而不是阻塞事件循环线程。批量打开大量文件时，open
+本身跑在 C++ 线程池，而不是阻塞事件循环线程。返回的是惰性句柄
+（aiofiles 同款）：`async with` 在 `__aenter__` 里触发打开，写
+`await ayafileio.aopen(...)` 显式等待也可以。批量打开大量文件时，open
 系统调用本身也能并行；循环里同步 `open()` 则每个文件仍要付出一次短暂的
 阻塞系统调用。
 

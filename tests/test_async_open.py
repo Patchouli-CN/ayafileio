@@ -48,6 +48,31 @@ class TestAsyncOpen(unittest.TestCase):
                 return await f.read()
         self.assertEqual(asyncio.run(run()), self._expected(self.files[3]))
 
+    def test_aopen_lazy_context_manager(self):
+        """惰性句柄：async with 免 await（aiofiles 同款用法）"""
+        async def run():
+            async with ayafileio.aopen(self.files[5], "rb") as f:
+                return await f.read()
+        self.assertEqual(asyncio.run(run()), self._expected(self.files[5]))
+
+    def test_aopen_lazy_await(self):
+        """惰性句柄：显式 await 拿到 AsyncFile"""
+        async def run():
+            f = await ayafileio.aopen(self.files[6], "rb")
+            try:
+                return await f.read()
+            finally:
+                await f.close()
+        self.assertEqual(asyncio.run(run()), self._expected(self.files[6]))
+
+    def test_aopen_lazy_exception_propagates(self):
+        """惰性句柄：__aenter__ 阶段的打开失败照常抛出"""
+        async def run():
+            async with ayafileio.aopen(os.path.join(self.dir, "nope2.bin"), "rb"):
+                pass
+        with self.assertRaises(FileNotFoundError):
+            asyncio.run(run())
+
     def test_aopen_text_mode(self):
         """aopen 文本模式（"r"）：模式清洗与解码正确"""
         p = os.path.join(self.dir, "text.txt")

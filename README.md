@@ -262,15 +262,17 @@ the hand-written `async with ayafileio.open(...)` form, minus the boilerplate.
 ### Async open
 
 ```python
-async with await ayafileio.aopen("data.bin", "rb") as f:
+async with ayafileio.aopen("data.bin", "rb") as f:
     data = await f.read()
 ```
 
 `aopen()` takes the same arguments as `open()` and returns the same
 `AsyncFile` — the difference is that the OS open itself runs on the C++ thread
-pool instead of the event-loop thread. Opening many files this way parallelizes
-the open syscalls themselves; a plain synchronous `open()` in the loop still
-costs one short blocking syscall per file.
+pool instead of the event-loop thread. The returned handle is lazy (aiofiles
+style): `async with` triggers the open in `__aenter__`, and
+`await ayafileio.aopen(...)` works too. Opening many files this way
+parallelizes the open syscalls themselves; a plain synchronous `open()` in the
+loop still costs one short blocking syscall per file.
 
 ### Batch whole-file reads
 

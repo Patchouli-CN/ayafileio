@@ -8,7 +8,7 @@
 ## [1.11.0] - 2026-10-01
 
 ### 新增
-- **异步打开：`ayafileio.aopen()`。** 参数、模式语义、返回的 `AsyncFile` 与 `ayafileio.open()` 完全一致，但 OS open 本身跑在 C++ 全局线程池：工作线程持 GIL 构造后端，构造函数内部的阻塞系统调用（`CreateFileW` / `open` / `openat` 等待 / `mmap`）经新增的 `GilRelease` 守卫释放 GIL，多个 worker 因此真正并行打开文件。结果（可直接使用的 `AsyncFile` 或异常对象）经 `ResultBatcher` 投递，与 I/O 完成共用同一条批量唤醒链路。Windows 构造所需的 `loop`/`create_future` 在调用方的事件循环线程预取注入（工作线程上没有 running loop）；POSIX 后端首次 I/O 时才惰性绑定事件循环，忽略注入。同步 `ayafileio.open()` 路径同样受益：open 系统调用期间不再冻结整个解释器。
+- **异步打开：`ayafileio.aopen()`。** 参数、模式语义、返回的 `AsyncFile` 与 `ayafileio.open()` 完全一致，但 OS open 本身跑在 C++ 全局线程池：工作线程持 GIL 构造后端，构造函数内部的阻塞系统调用（`CreateFileW` / `open` / `openat` 等待 / `mmap`）经新增的 `GilRelease` 守卫释放 GIL，多个 worker 因此真正并行打开文件。结果（可直接使用的 `AsyncFile` 或异常对象）经 `ResultBatcher` 投递，与 I/O 完成共用同一条批量唤醒链路。返回惰性句柄（aiofiles 同款），`async with ayafileio.aopen(...) as f` 与 `await ayafileio.aopen(...)` 两种写法等价。Windows 构造所需的 `loop`/`create_future` 在调用方的事件循环线程预取注入（工作线程上没有 running loop）；POSIX 后端首次 I/O 时才惰性绑定事件循环，忽略注入。同步 `ayafileio.open()` 路径同样受益：open 系统调用期间不再冻结整个解释器。
 - **批量整文件读：`ayafileio.read_bytes_many()` / `read_text_many()`。** 一次调用并发读取多个文件——打开走 `aopen`（OS open 并行），读取走各平台异步后端，信号量（`max_concurrency`，默认 64）限制在飞文件数，十万级路径输入也不会打爆 fd。返回顺序与输入一致；任一失败整体抛出（`asyncio.gather` 默认语义）。把"正确写法"（对文件 gather）变成最短的写法。
 
 ### 修复
