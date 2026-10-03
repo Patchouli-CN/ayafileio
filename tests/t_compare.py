@@ -33,9 +33,10 @@ Scenarios:
   Batch scenarios drain the Windows handle pool once per round, so every
   round starts cold; later batches within a round reuse cached handles,
   which is the out-of-the-box behavior of each library. On POSIX the soft
-  RLIMIT_NOFILE is raised to the hard limit (macOS defaults to 256, fatal
-  for a 1024-file batch); if even that is impossible the batch shrinks and
-  the effective size lands in the scenario metadata.
+  RLIMIT_NOFILE is raised toward the hard limit and the batch is then sized
+  against the *enforced* budget via a behavioral probe — getrlimit lies on
+  macOS (kern.maxfilesperproc caps below it), and each open costs more than
+  one fd with asynchronous reclamation on top.
 
 aiofiles is opened with its defaults (buffered), ayafileio is unbuffered;
 this reflects what a user gets out of the box from each library.
@@ -126,13 +127,17 @@ def prepare_batch_dir(dirpath: str, count: int) -> list[str]:
 
 
 def ensure_fd_headroom() -> int:
-    """Fit the batch-open scenario under the process fd limit.
+    """Fit the batch-open scenario under the process's *enforced* fd budget.
 
-    macOS defaults to a 256-entry soft RLIMIT_NOFILE, fatal for a 1024-file
-    batch — the limit is an environment artifact, not a property of the
-    workload, so raise the soft limit to the hard limit where permitted and
-    only shrink the batch when even that is impossible. Returns the batch
-    size to use (BATCH_FILES when nothing needed adjusting).
+    Never trust getrlimit alone: on macOS the sysctl kern.maxfilesperproc
+    caps the real budget below any RLIMIT_NOFILE value, and the library
+    itself costs more than one fd per open (the backend dups a second for
+    its dispatch channel) with asynchronous reclamation on top — the first
+    CI run died with EMFILE at file 575 of a 1024-file batch while
+    getrlimit happily reported 16K. So: raise the soft limit as far as the
+    hard limit allows, then *ask the kernel* how many descriptors actually
+    open right now, and size the batch from that with a 4x margin (two fds
+    per file, two for reclamation lag). Returns the batch size to use.
     """
     files = BATCH_FILES
     if os.name != "posix":
@@ -140,21 +145,24 @@ def ensure_fd_headroom() -> int:
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        want = max(BATCH_FILES * 16, 4096)
         if hard == resource.RLIM_INFINITY:
-            hard = want
-        target = min(max(soft, want), hard)
-        if target > soft:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
-        soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            hard = 65536
+        if hard > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
     except (ImportError, OSError, ValueError):
-        soft = 256
-    # Headroom, in files, not fds: each opened file can cost more than one fd
-    # (macOS dups a second one for its dispatch channel) and closed fds are
-    # reclaimed asynchronously, so peak usage overshoots the concurrency cap
-    # by roughly an order of magnitude before the reaper catches up.
-    files = min(BATCH_FILES, max(32, soft // 16))
-    return files
+        pass
+    # Behavioral probe: how many descriptors does the kernel actually grant?
+    budget = 0
+    opened = []
+    try:
+        while budget < 8192:
+            opened.append(os.open(os.devnull, os.O_RDONLY))
+            budget += 1
+    except OSError:
+        pass
+    for fd in opened:
+        os.close(fd)
+    return min(BATCH_FILES, max(32, budget // 4))
 
 
 # ── Scenario runners ────────────────────────────────────────────────────────
