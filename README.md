@@ -349,8 +349,14 @@ you, check a recent run's artifact rather than any single number.
 
 ### Windows and macOS
 
-GitHub's Windows runners throttle small I/O too hard for the CI numbers to be
-representative, so the Windows figures are *local* NVMe measurements:
+GitHub's Windows runners throttle raw sequential throughput too hard for those
+CI cells to be representative — the last windows-2022 run measured 64 KiB
+sequential read at 0.79x and 4 KiB small reads at 0.62x over aiofiles — so the
+headline Windows figures remain *local* NVMe measurements. The concurrency
+cells do run healthy on that same runner since the 1.11.0 accounting fix
+(random 4 KiB reads, per-task handles): 12.0K vs 7.4K ops/s at x1 (1.6x),
+28.3K vs 5.4K at x16 (5.3x), 31.3K vs 8.7K at x64 (3.6x); sequential writes
+lead everywhere (64 KiB: 60.9K vs 8.2K ops/s, 7.4x).
 
 - Windows (IOCP), sequential write: 1,363 → 2,858 MB/s at 1 MiB blocks,
   929 → 3,046 MB/s at 4 MiB (1.47x over aiofiles). 4 KiB random `read_at`

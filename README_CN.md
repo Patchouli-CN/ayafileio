@@ -329,8 +329,12 @@ artifact 挂在每次运行上。除非标注*本地*，以下数字来自最近
 
 ### Windows 和 macOS
 
-GitHub 的 Windows runner 对小 I/O 限流太狠，CI 数字没有代表性，Windows 这边
-用*本地* NVMe 实测：
+GitHub 的 Windows runner 对原始顺序吞吐限流太狠，这几个 CI 格子没有代表性——
+最近一次 windows-2022 上，64 KiB 顺序读只有对 aiofiles 的 0.79x、4 KiB 小读
+0.62x——所以门面数字仍用*本地* NVMe 实测。但 1.11.0 记账修复之后，同一 runner
+上的并发格子已经健康（随机 4 KiB 读、各自句柄）：x1 12.0K vs 7.4K ops/s
+（1.6x）、x16 28.3K vs 5.4K（5.3x）、x64 31.3K vs 8.7K（3.6x）；顺序写则全面
+领先（64 KiB：60.9K vs 8.2K ops/s，7.4x）。
 
 - Windows (IOCP) 顺序写：1 MiB 块 1,363 → 2,858 MB/s，4 MiB 块 929 → 3,046 MB/s
   （对 aiofiles 1.47x）；4 KiB 随机 `read_at`、16 在飞：21.4K ops/s。
