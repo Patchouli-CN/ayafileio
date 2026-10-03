@@ -21,6 +21,18 @@ Scenarios:
   D. rand_read_own   random 4 KiB positioned reads, one handle per worker (ops/s)
   E. rand_read_at    random 4 KiB read_at on a single shared handle,
                      ayafileio only — aiofiles has no positioned I/O (ops/s)
+  F. batch_open      BATCH_FILES tiny files per batch, opened+read+closed
+                     concurrently (files/s): ayafileio read_bytes_many
+                     (parallel aopen + async reads), ayafileio
+                     gather(read_bytes) (synchronous open on the loop thread
+                     — the isolation row that attributes the lead to aopen),
+                     and aiofiles' default gather(open+read+close).
+  G. batch_open_only opens only, one batch per round (files/s): aopen vs
+                     aiofiles open+close (two executor round-trips).
+
+  Batch scenarios drain the Windows handle pool once per round, so every
+  round starts cold; later batches within a round reuse cached handles,
+  which is the out-of-the-box behavior of each library.
 
 aiofiles is opened with its defaults (buffered), ayafileio is unbuffered;
 this reflects what a user gets out of the box from each library.
@@ -32,6 +44,7 @@ import json
 import os
 import platform
 import random
+import shutil
 import statistics
 import sys
 import tempfile
@@ -63,6 +76,11 @@ SMALL_CHUNK = 4096
 CONCURRENCY_LEVELS = [1, 16, 64, 256]
 RNG_SEED = 42
 
+# Batch-open scenarios: many tiny files opened concurrently per batch.
+# 64 B payloads keep the cost in open/teardown rather than read throughput.
+BATCH_FILES = 1024
+BATCH_PAYLOAD = 64
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -91,6 +109,17 @@ def random_offsets(count: int, chunk: int) -> list[int]:
     rng = random.Random(RNG_SEED)
     max_off = (FILE_SIZE - chunk) // chunk
     return [rng.randrange(max_off) * chunk for _ in range(count)]
+
+
+def prepare_batch_dir(dirpath: str, count: int) -> list[str]:
+    """Create `count` tiny files; returns their paths in order."""
+    os.makedirs(dirpath, exist_ok=True)
+    payload = random.Random(RNG_SEED).randbytes(BATCH_PAYLOAD)
+    paths = [os.path.join(dirpath, f"f{i:05d}.bin") for i in range(count)]
+    for p in paths:
+        with open(p, "wb") as f:
+            f.write(payload)
+    return paths
 
 
 # ── Scenario runners ────────────────────────────────────────────────────────
@@ -160,10 +189,61 @@ async def aio_rand_read_own(f, offsets: list[int], pos: list[int], chunk: int, s
     return ops
 
 
+# ── Batch-open runners (one batch = BATCH_FILES tiny files) ──────────────────
+
+async def aya_batch_many(paths: list[str], stop: float) -> int:
+    """read_bytes_many: parallel opens (aopen) + real async reads, one call."""
+    files = 0
+    while time.perf_counter() < stop:
+        await ayafileio.read_bytes_many(paths)
+        files += len(paths)
+    return files
+
+
+async def aya_batch_gather_rb(paths: list[str], stop: float) -> int:
+    """gather(read_bytes): synchronous open() on the loop thread + async reads."""
+    files = 0
+    while time.perf_counter() < stop:
+        await asyncio.gather(*(ayafileio.read_bytes(p) for p in paths))
+        files += len(paths)
+    return files
+
+
+async def aio_batch_gather(paths: list[str], stop: float) -> int:
+    """aiofiles at its defaults: open, read and close each ride the executor."""
+    files = 0
+    while time.perf_counter() < stop:
+        async def one(p):
+            async with aiofiles.open(p, "rb") as f:
+                return await f.read()
+        await asyncio.gather(*(one(p) for p in paths))
+        files += len(paths)
+    return files
+
+
+async def aya_batch_open_only(paths: list[str], stop: float) -> int:
+    """Exactly one batch of aopens, no reads — the batch is the unit."""
+    async def one(p):
+        async with ayafileio.aopen(p, "rb") as f:
+            pass
+    await asyncio.gather(*(one(p) for p in paths))
+    return len(paths)
+
+
+async def aio_batch_open_only(paths: list[str], stop: float) -> int:
+    """Exactly one batch of aiofiles open+close (two executor round-trips)."""
+    async def one(p):
+        async with aiofiles.open(p, "rb") as f:
+            pass
+    await asyncio.gather(*(one(p) for p in paths))
+    return len(paths)
+
+
 # ── Measurement engine ──────────────────────────────────────────────────────
 
 async def measure_once(kind: str, backend: str, path: str, chunk: int,
-                       budget: float, concurrency: int = 1) -> tuple[int, float]:
+                       budget: float, concurrency: int = 1,
+                        paths: list[str] | None = None) -> tuple[int, float]:
     """Run one measurement. Returns (ops, elapsed_seconds)."""
     stop = time.perf_counter() + budget
     start = time.perf_counter()
@@ -215,6 +295,23 @@ async def measure_once(kind: str, backend: str, path: str, chunk: int,
                 HARD_CAP_SECONDS)
         ops = sum(counts)
 
+    elif kind in ("batch_open", "batch_open_only"):
+        # Many tiny files per batch, all opened concurrently. The Windows
+        # handle pool is drained first so every round starts cold; batches
+        # repeated inside the round then reuse cached handles, which is the
+        # out-of-the-box behavior of each library. The opens-only variants
+        # measure exactly one batch per round (a time-boxed loop would be
+        # dominated by pool hits, not by open cost).
+        ayafileio.drain_handle_pool()
+        if kind == "batch_open":
+            runner = {"aya_many": aya_batch_many,
+                      "aya_sync": aya_batch_gather_rb,
+                      "aio": aio_batch_gather}[backend]
+        else:
+            runner = {"aya": aya_batch_open_only,
+                      "aio": aio_batch_open_only}[backend]
+        ops = await asyncio.wait_for(runner(paths, stop), HARD_CAP_SECONDS)
+
     else:
         raise ValueError(f"unknown scenario kind: {kind}")
 
@@ -222,12 +319,12 @@ async def measure_once(kind: str, backend: str, path: str, chunk: int,
 
 
 async def run_cell(kind: str, backend: str, path: str, chunk: int,
-                   concurrency: int = 1) -> dict:
+                   concurrency: int = 1, paths: list[str] | None = None) -> dict:
     """Warmup + ROUNDS measured rounds for one cell. Returns raw round data."""
-    await measure_once(kind, backend, path, chunk, WARMUP_SECONDS, concurrency)
+    await measure_once(kind, backend, path, chunk, WARMUP_SECONDS, concurrency, paths)
     rounds = []
     for _ in range(ROUNDS):
-        ops, elapsed = await measure_once(kind, backend, path, chunk, ROUND_SECONDS, concurrency)
+        ops, elapsed = await measure_once(kind, backend, path, chunk, ROUND_SECONDS, concurrency, paths)
         rounds.append({"ops": ops, "elapsed": round(elapsed, 4),
                        "ops_per_s": round(ops / elapsed, 1)})
     return {"rounds": rounds, "median_ops_per_s": statistics.median(r["ops_per_s"] for r in rounds)}
@@ -368,12 +465,45 @@ async def main() -> int:
         results["scenarios"]["rand_read_at"] = {"unit": "ops/s", "cells": cells}
         detailed["scenarios"]["rand_read_at"] = det
 
+        # ── F. batch open: many tiny files, all opened concurrently ────────
+        rows, cells, det = [], {}, {}
+        batch_dir = os.path.join(tmpdir, "batch")
+        batch_paths = prepare_batch_dir(batch_dir, BATCH_FILES)
+        r_aio = await run_cell("batch_open", "aio", data_path, SMALL_CHUNK, paths=batch_paths)
+        r_many = await run_cell("batch_open", "aya_many", data_path, SMALL_CHUNK, paths=batch_paths)
+        r_sync = await run_cell("batch_open", "aya_sync", data_path, SMALL_CHUNK, paths=batch_paths)
+        aio_rate = r_aio["median_ops_per_s"]
+        for label, r in (("read_bytes_many", r_many), ("gather(rb)", r_sync)):
+            row = {"label": label, "aya": r["median_ops_per_s"], "aio": aio_rate}
+            cells[label] = row
+            rows.append(row)
+            det[label] = r
+        det["aiofiles"] = r_aio
+        print_table(f"F. Batch open ({BATCH_FILES} files x {BATCH_PAYLOAD}B)", "files/s", rows)
+        results["scenarios"]["batch_open"] = {"unit": "files/s", "cells": cells}
+        detailed["scenarios"]["batch_open"] = det
+
+        # ── G. batch open, opens only (aopen vs executor round-trips) ──────
+        rows, cells, det = [], {}, {}
+        r_aio_o = await run_cell("batch_open_only", "aio", data_path, SMALL_CHUNK, paths=batch_paths)
+        r_aya_o = await run_cell("batch_open_only", "aya", data_path, SMALL_CHUNK, paths=batch_paths)
+        row = {"label": "aopen only", "aya": r_aya_o["median_ops_per_s"],
+               "aio": r_aio_o["median_ops_per_s"]}
+        cells["aopen only"] = row
+        rows.append(row)
+        det["aopen only"] = r_aya_o
+        det["aiofiles"] = r_aio_o
+        print_table(f"G. Batch open, opens only ({BATCH_FILES} files)", "files/s", rows)
+        results["scenarios"]["batch_open_only"] = {"unit": "files/s", "cells": cells}
+        detailed["scenarios"]["batch_open_only"] = det
+
     finally:
         for p in (data_path, write_path):
             try:
                 os.unlink(p)
             except OSError:
                 pass
+        shutil.rmtree(os.path.join(tmpdir, "batch"), ignore_errors=True)
         try:
             os.rmdir(tmpdir)
         except OSError:

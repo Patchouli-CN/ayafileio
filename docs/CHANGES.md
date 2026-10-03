@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### CI / Testing
+- `tests/t_compare.py` gains two batch-open scenarios: **F. Batch open** (1024 files × 64 B per batch, all opened concurrently — `read_bytes_many` vs `gather(read_bytes)` vs aiofiles' default `gather(open+read+close)`) and **G. Batch open, opens only** (`aopen` vs aiofiles open+close, two executor round-trips per file). The Windows handle pool is drained once per round so every round starts cold; later batches within a round reuse cached handles, which is each library's out-of-the-box behavior. The `gather(read_bytes)` row is the attribution measurement: with synchronous opens on the loop thread, ayafileio's async reads alone do not beat aiofiles (≈1.0x on the author's machine) — the lead in the first row belongs to `aopen`, not to the read path.
+
 ## [1.11.0] - 2026-10-01
 
 ### Added

@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+### CI / 测试
+- `tests/t_compare.py` 新增两个批量打开场景：**F. Batch open**（每批 1024 个 64B 小文件、全部并发打开——`read_bytes_many` vs `gather(read_bytes)` vs aiofiles 默认的 `gather(open+read+close)`）与 **G. Batch open, opens only**（只开不读：`aopen` vs aiofiles 开+关，每个文件两次 executor 往返）。Windows 句柄池每轮 drain 一次保证冷启；轮内重复的批次复用缓存句柄，即两个库的开箱行为。`gather(read_bytes)` 是归因测量：同步 open 挂在 loop 线程上时，光靠异步读打不过 aiofiles（作者机器实测 ≈1.0x）——第一行的领先全部归 `aopen`，与读路径无关。
+
 ## [1.11.0] - 2026-10-01
 
 ### 新增
