@@ -32,11 +32,12 @@ Scenarios:
 
   Batch scenarios drain the Windows handle pool once per round, so every
   round starts cold; later batches within a round reuse cached handles,
-  which is the out-of-the-box behavior of each library. On POSIX the soft
-  RLIMIT_NOFILE is raised toward the hard limit and the batch is then sized
-  against the *enforced* budget via a behavioral probe — getrlimit lies on
-  macOS (kern.maxfilesperproc caps below it), and each open costs more than
-  one fd with asynchronous reclamation on top.
+  which is the out-of-the-box behavior of each library. On POSIX the batch
+  is sized by probing what the library itself can open before the OS refuses
+  (sequentially, so reclamation lag cannot confuse the count): each open
+  costs more than one fd — a dup for the dispatch channel plus an mmap for
+  the mincore fast path, which counts against macOS's kern.maxfilesperproc —
+  and the batch runs at a quarter of the probed budget.
 
 aiofiles is opened with its defaults (buffered), ayafileio is unbuffered;
 this reflects what a user gets out of the box from each library.
@@ -126,22 +127,21 @@ def prepare_batch_dir(dirpath: str, count: int) -> list[str]:
     return paths
 
 
-def ensure_fd_headroom() -> int:
-    """Fit the batch-open scenario under the process's *enforced* fd budget.
+async def probe_batch_size(paths: list[str]) -> int:
+    """Size the batch by asking the library itself where the OS says no.
 
-    Never trust getrlimit alone: on macOS the sysctl kern.maxfilesperproc
-    caps the real budget below any RLIMIT_NOFILE value, and the library
-    itself costs more than one fd per open (the backend dups a second for
-    its dispatch channel) with asynchronous reclamation on top — the first
-    CI run died with EMFILE at file 575 of a 1024-file batch while
-    getrlimit happily reported 16K. So: raise the soft limit as far as the
-    hard limit allows, then *ask the kernel* how many descriptors actually
-    open right now, and size the batch from that with a 4x margin (two fds
-    per file, two for reclamation lag). Returns the batch size to use.
+    Measuring the fd limit directly is not enough on macOS: each open costs
+    more than a descriptor here — the backend dups a second fd for its
+    dispatch channel and memory-maps the file for the mincore fast path, and
+    mmaps count against kern.maxfilesperproc — while closed fds are reclaimed
+    asynchronously and getrlimit over-reports all of it. So open+read+close
+    the probe files sequentially (no concurrency, no abandoned siblings, no
+    reclamation lag to confuse the count) until an OSError stops us, and use
+    a quarter of that budget for the batch: the 4x margin is what a 64-way
+    semaphore can overshoot before the reaper catches up.
     """
-    files = BATCH_FILES
     if os.name != "posix":
-        return files
+        return min(BATCH_FILES, len(paths))
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -151,18 +151,18 @@ def ensure_fd_headroom() -> int:
             resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
     except (ImportError, OSError, ValueError):
         pass
-    # Behavioral probe: how many descriptors does the kernel actually grant?
     budget = 0
-    opened = []
-    try:
-        while budget < 8192:
-            opened.append(os.open(os.devnull, os.O_RDONLY))
-            budget += 1
-    except OSError:
-        pass
-    for fd in opened:
-        os.close(fd)
-    return min(BATCH_FILES, max(32, budget // 4))
+    for p in paths:
+        try:
+            async with ayafileio.aopen(p, "rb") as f:
+                await f.read()
+        except OSError:
+            break
+        budget += 1
+    size = max(8, min(BATCH_FILES, budget // 4))
+    if size != BATCH_FILES:
+        print(f"  note: batch size {size} (probed budget {budget} opens)")
+    return size
 
 
 # ── Scenario runners ────────────────────────────────────────────────────────
@@ -509,12 +509,11 @@ async def main() -> int:
         detailed["scenarios"]["rand_read_at"] = det
 
         # ── F. batch open: many tiny files, all opened concurrently ────────
-        n_batch = ensure_fd_headroom()
-        if n_batch != BATCH_FILES:
-            print(f"  note: batch size {n_batch} (fd limit)")
         rows, cells, det = [], {}, {}
         batch_dir = os.path.join(tmpdir, "batch")
-        batch_paths = prepare_batch_dir(batch_dir, n_batch)
+        all_batch_paths = prepare_batch_dir(batch_dir, BATCH_FILES)
+        n_batch = await probe_batch_size(all_batch_paths)
+        batch_paths = all_batch_paths[:n_batch]
         r_aio = await run_cell("batch_open", "aio", data_path, SMALL_CHUNK, paths=batch_paths)
         r_many = await run_cell("batch_open", "aya_many", data_path, SMALL_CHUNK, paths=batch_paths)
         r_sync = await run_cell("batch_open", "aya_sync", data_path, SMALL_CHUNK, paths=batch_paths)
