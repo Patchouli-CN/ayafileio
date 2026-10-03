@@ -32,7 +32,10 @@ Scenarios:
 
   Batch scenarios drain the Windows handle pool once per round, so every
   round starts cold; later batches within a round reuse cached handles,
-  which is the out-of-the-box behavior of each library.
+  which is the out-of-the-box behavior of each library. On POSIX the soft
+  RLIMIT_NOFILE is raised to the hard limit (macOS defaults to 256, fatal
+  for a 1024-file batch); if even that is impossible the batch shrinks and
+  the effective size lands in the scenario metadata.
 
 aiofiles is opened with its defaults (buffered), ayafileio is unbuffered;
 this reflects what a user gets out of the box from each library.
@@ -120,6 +123,37 @@ def prepare_batch_dir(dirpath: str, count: int) -> list[str]:
         with open(p, "wb") as f:
             f.write(payload)
     return paths
+
+
+def ensure_fd_headroom() -> int:
+    """Fit the batch-open scenario under the process fd limit.
+
+    macOS defaults to a 256-entry soft RLIMIT_NOFILE, fatal for a 1024-file
+    batch — the limit is an environment artifact, not a property of the
+    workload, so raise the soft limit to the hard limit where permitted and
+    only shrink the batch when even that is impossible. Returns the batch
+    size to use (BATCH_FILES when nothing needed adjusting).
+    """
+    files = BATCH_FILES
+    if os.name != "posix":
+        return files
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = max(BATCH_FILES * 4, 4096)
+        if hard == resource.RLIM_INFINITY:
+            hard = want
+        target = min(max(soft, want), hard)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except (ImportError, OSError, ValueError):
+        soft = 256
+    # Headroom beyond the batch itself: stdio, the data files, event-loop
+    # internals, plus fds still awaiting asynchronous reclamation.
+    while files * 4 > soft and files > 64:
+        files //= 2
+    return files
 
 
 # ── Scenario runners ────────────────────────────────────────────────────────
@@ -466,9 +500,12 @@ async def main() -> int:
         detailed["scenarios"]["rand_read_at"] = det
 
         # ── F. batch open: many tiny files, all opened concurrently ────────
+        n_batch = ensure_fd_headroom()
+        if n_batch != BATCH_FILES:
+            print(f"  note: batch size {n_batch} (fd limit)")
         rows, cells, det = [], {}, {}
         batch_dir = os.path.join(tmpdir, "batch")
-        batch_paths = prepare_batch_dir(batch_dir, BATCH_FILES)
+        batch_paths = prepare_batch_dir(batch_dir, n_batch)
         r_aio = await run_cell("batch_open", "aio", data_path, SMALL_CHUNK, paths=batch_paths)
         r_many = await run_cell("batch_open", "aya_many", data_path, SMALL_CHUNK, paths=batch_paths)
         r_sync = await run_cell("batch_open", "aya_sync", data_path, SMALL_CHUNK, paths=batch_paths)
@@ -479,8 +516,8 @@ async def main() -> int:
             rows.append(row)
             det[label] = r
         det["aiofiles"] = r_aio
-        print_table(f"F. Batch open ({BATCH_FILES} files x {BATCH_PAYLOAD}B)", "files/s", rows)
-        results["scenarios"]["batch_open"] = {"unit": "files/s", "cells": cells}
+        print_table(f"F. Batch open ({n_batch} files x {BATCH_PAYLOAD}B)", "files/s", rows)
+        results["scenarios"]["batch_open"] = {"unit": "files/s", "batch_files": n_batch, "cells": cells}
         detailed["scenarios"]["batch_open"] = det
 
         # ── G. batch open, opens only (aopen vs executor round-trips) ──────
@@ -493,8 +530,8 @@ async def main() -> int:
         rows.append(row)
         det["aopen only"] = r_aya_o
         det["aiofiles"] = r_aio_o
-        print_table(f"G. Batch open, opens only ({BATCH_FILES} files)", "files/s", rows)
-        results["scenarios"]["batch_open_only"] = {"unit": "files/s", "cells": cells}
+        print_table(f"G. Batch open, opens only ({n_batch} files)", "files/s", rows)
+        results["scenarios"]["batch_open_only"] = {"unit": "files/s", "batch_files": n_batch, "cells": cells}
         detailed["scenarios"]["batch_open_only"] = det
 
     finally:
