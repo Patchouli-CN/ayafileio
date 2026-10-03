@@ -68,7 +68,11 @@ public:
     // 提交时 +1、完成处理时 -1。最后一个在飞 op 完成（计数归 0）说明
     // 短期内不会再有新完成到达，调用方应立即 flush —— 串行/小并发负载
     // 不再为空闲超时买单，每-op 延迟从 ~idle_timeout_ms 降到事件循环
-    // 唤醒级别。计数失衡（泄露）只会退化为原来的空闲超时行为，无害。
+    // 唤醒级别。⚠ 计数失衡（任何只加不减的路径）会永久关闭该优化：
+    // m_outstanding 永不归零后，异步完成的 op 全部退化为等空闲清扫
+    // （实测单 op 延迟从亚毫秒涨到 ~7ms，整体掉两个数量级）。
+    // 新增 submit 路径务必配平；`debug_batcher_outstanding()` +
+    // tests/test_batcher_accounting.py 守着这条不变量。
     void op_submitted() { m_outstanding.fetch_add(1, std::memory_order_relaxed); }
     bool op_completed() { return m_outstanding.fetch_sub(1, std::memory_order_acq_rel) == 1; }
 
