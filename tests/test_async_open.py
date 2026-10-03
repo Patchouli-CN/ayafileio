@@ -148,6 +148,25 @@ class TestAsyncOpen(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             asyncio.run(ayafileio.read_bytes_many(paths))
 
+    def test_aopen_concurrent_failures(self):
+        """并发大量失败打开：异常经 future/batcher 投递，不踩坏 future（回归）"""
+        missing = [os.path.join(self.dir, f"miss{i:03d}.bin") for i in range(128)]
+        async def run():
+            for _ in range(3):
+                results = await asyncio.gather(
+                    *(ayafileio.aopen(p, "rb") for p in missing),
+                    return_exceptions=True)
+                for r in results:
+                    if not isinstance(r, FileNotFoundError):
+                        raise r
+        asyncio.run(run())
+
+    def test_read_bytes_many_all_fail(self):
+        """批量全失败：整体抛出，错误路径在压力下不留残骸（回归）"""
+        missing = [os.path.join(self.dir, f"gone{i:03d}.bin") for i in range(128)]
+        with self.assertRaises(FileNotFoundError):
+            asyncio.run(ayafileio.read_bytes_many(missing))
+
     def test_read_text_many(self):
         """批量文本读：编码与顺序正确"""
         paths = []

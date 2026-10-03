@@ -408,6 +408,14 @@ NB_MODULE(_ayafileio, m) {
 
         batcher->op_submitted();
 
+        // worker 结尾会 DECREF future——但下面 return 的那份 steal 引用属于
+        // Python 调用方，不是 worker 的。原先两者共享 CallNoArgs 的那一份
+        // 引用：正常情况下 batcher 里的 set_result 绑定方法临时持有的一份
+        // 恰好盖住窗口，但在并发大量失败（如 EMFILE）触发立即 flush 时窗口
+        // 会被击中，future 提前释放 → await 方读到已释放对象 → 段错误。
+        // 让 worker 持有自己的那一份（macOS CI 实测修复，见回归场景）。
+        Py_INCREF(future);
+
         // GlobalThreadPool 是按需启动的：IOCP/uring/GCD 后端都不会启动
         // 它，只有线程池后端会 ensure_started——open_async 可能是第一个
         // 用户，必须先确保 worker 在跑，否则任务永远躺在队列里

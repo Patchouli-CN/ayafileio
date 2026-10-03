@@ -7,9 +7,12 @@
 
 ## [Unreleased]
 
+### 修复
+- **`aopen` 错误路径：并发失败时返回 future 的 use-after-free。** `open_async` 用一份自有引用创建 future，随后把*同一份*引用交给了两个主人：线程池 worker 收工時 `Py_DECREF` 它，绑定层又用 `py::steal` 把它返回给 Python。通常情况下 batcher 里绑定的 `set_result`/`set_exception` 方法临时持有的那份引用恰好盖住窗口，相安无事；但当大量 open 同时失败时（最后一个在飞 op 触发 batcher 立即 flush），future 可能在 await 方仍持有时就被释放——macOS 批量打开 CI 场景实测为 `OSError: EMFILE` 之后接 `RuntimeError: Future object is not initialized.` 再 SIGSEGV（await 协程读到已释放的 Future 对象）。现 worker 持有自己的那一份引用，恢复"worker 里每个 `Py_DECREF` 都配平它自己拥有的引用"这一不变量。（同批复查了兄弟捕获——`set_result`、`create_future`——所有权均正确。）
+
 ### CI / 测试
-- `tests/t_compare.py` 新增两个批量打开场景：**F. Batch open**（每批 1024 个 64B 小文件、全部并发打开——`read_bytes_many` vs `gather(read_bytes)` vs aiofiles 默认的 `gather(open+read+close)`）与 **G. Batch open, opens only**（只开不读：`aopen` vs aiofiles 开+关，每个文件两次 executor 往返）。Windows 句柄池每轮 drain 一次保证冷启；轮内重复的批次复用缓存句柄，即两个库的开箱行为。POSIX 上会先把 `RLIMIT_NOFILE` 软限制抬到硬限制（macOS 默认 256——这个批量的文件数直接爆；首次 CI 跑 macOS 时第 571 个文件就 `EMFILE`，因为 macOS 异步回收关闭的 fd，信号量读数因此低估了真实 fd 压力），实在抬不动才缩小批量；有效批量数记入场景元数据。
-- 首批实测（files/s 中位数，对 aiofiles）：`read_bytes_many` 全平台胜——作者 Windows/NVMe 机器 **2.1x**、windows-2022 CI **3.0x**、ubuntu-24.04 CI **2.4x**。`gather(read_bytes)` 归因行是微妙的那行：open 贵的地方它塌到 ≈1.0x（本地 NVMe）——同步 open 串行在 loop 线程上时，光靠异步读打不过线程池，那份领先当归 `aopen`；open 便宜的地方（CI VM、缓存存储）它照样赢（windows-2022 **2.7x**、ubuntu-24.04 **3.1x**）。批量的胜势是稳健的，`aopen` 的*边际*价值则跟随单 open 成本起伏。只开不读（G）：`aopen` 本地 **2.5x**、windows-2022 **3.3x**、ubuntu-24.04 **2.1x**。
+- `tests/t_compare.py` 新增两个批量打开场景：**F. Batch open**（每批 1024 个 64B 小文件、全部并发打开——`read_bytes_many` vs `gather(read_bytes)` vs aiofiles 默认的 `gather(open+read+close)`）与 **G. Batch open, opens only**（只开不读：`aopen` vs aiofiles 开+关，每个文件两次 executor 往返）。Windows 句柄池每轮 drain 一次保证冷启；轮内重复的批次复用缓存句柄，即两个库的开箱行为。POSIX 上先把 `RLIMIT_NOFILE` 软限制抬到硬限制（macOS 默认 256——这个批量的文件数直接爆；首次 CI 跑 macOS 时第 571 个文件就 `EMFILE`，因为 macOS 每个 open 要占*两个* fd——后端给 dispatch channel dup 了一份——且关闭的 fd 异步回收，真实用量以数量级超过信号量给出的并发上限），之后按这个余量定批量大小；有效批量数记入场景元数据。
+- 首批实测（files/s 中位数，对 aiofiles）：`read_bytes_many` 全平台胜——作者 Windows/NVMe 机器 **2.1x**、windows-2022 CI **3.0x**、ubuntu-24.04 CI **2.4x**。`gather(read_bytes)` 归因行是微妙的那行：open 贵的地方它塌到 ≈1.0x（本地 NVMe）——同步 open 串行在 loop 线程上时，光靠异步读打不过线程池，那份领先当归 `aopen`；open 便宜的地方（CI VM、缓存存储）它照样赢（windows-2022 **2.7x**、ubuntu-24.04 **3.1x**）。批量的胜势是稳健的，`aopen` 的*边际*价值则跟随单 open 成本起伏。只开不读（G）：`aopen` 本地 **2.5x**、windows-2022 **3.3x**、ubuntu-24.04 CI **2.1x**。
 
 ## [1.11.0] - 2026-10-01
 

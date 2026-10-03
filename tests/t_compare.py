@@ -140,7 +140,7 @@ def ensure_fd_headroom() -> int:
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        want = max(BATCH_FILES * 4, 4096)
+        want = max(BATCH_FILES * 16, 4096)
         if hard == resource.RLIM_INFINITY:
             hard = want
         target = min(max(soft, want), hard)
@@ -149,10 +149,11 @@ def ensure_fd_headroom() -> int:
         soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
     except (ImportError, OSError, ValueError):
         soft = 256
-    # Headroom beyond the batch itself: stdio, the data files, event-loop
-    # internals, plus fds still awaiting asynchronous reclamation.
-    while files * 4 > soft and files > 64:
-        files //= 2
+    # Headroom, in files, not fds: each opened file can cost more than one fd
+    # (macOS dups a second one for its dispatch channel) and closed fds are
+    # reclaimed asynchronously, so peak usage overshoots the concurrency cap
+    # by roughly an order of magnitude before the reaper catches up.
+    files = min(BATCH_FILES, max(32, soft // 16))
     return files
 
 
