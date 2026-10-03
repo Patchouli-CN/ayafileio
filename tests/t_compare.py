@@ -33,17 +33,19 @@ Scenarios:
   Batch scenarios drain the Windows handle pool once per round, so every
   round starts cold; later batches within a round reuse cached handles,
   which is the out-of-the-box behavior of each library. On POSIX the batch
-  is sized by probing what the library itself can open before the OS refuses
-  (sequentially, so reclamation lag cannot confuse the count): each open
-  costs more than one fd — a dup for the dispatch channel plus an mmap for
-  the mincore fast path, which counts against macOS's kern.maxfilesperproc —
-  and the batch runs at a quarter of the probed budget.
+  is sized by doubling the real concurrent batch until the library itself
+  refuses: getrlimit lies on macOS (XNU clips at MIN(RLIMIT_NOFILE,
+  kern.maxfilesperproc) at open time, and GitHub's macOS runners sit on
+  launchd's default 256), and a sequential probe cannot see the budget
+  because the semaphore plus asynchronous reclamation make peak usage a
+  multiple of the in-flight count.
 
 aiofiles is opened with its defaults (buffered), ayafileio is unbuffered;
 this reflects what a user gets out of the box from each library.
 """
 
 import asyncio
+import gc
 import io
 import json
 import os
@@ -128,41 +130,50 @@ def prepare_batch_dir(dirpath: str, count: int) -> list[str]:
 
 
 async def probe_batch_size(paths: list[str]) -> int:
-    """Size the batch by asking the library itself where the OS says no.
+    """Size the batch by doubling the real (concurrent) batch until it fails.
 
-    Measuring the fd limit directly is not enough on macOS: each open costs
-    more than a descriptor here — the backend dups a second fd for its
-    dispatch channel and memory-maps the file for the mincore fast path, and
-    mmaps count against kern.maxfilesperproc — while closed fds are reclaimed
-    asynchronously and getrlimit over-reports all of it. So open+read+close
-    the probe files sequentially (no concurrency, no abandoned siblings, no
-    reclamation lag to confuse the count) until an OSError stops us, and use
-    a quarter of that budget for the batch: the 4x margin is what a 64-way
-    semaphore can overshoot before the reaper catches up.
+    Two macOS traps make every static model wrong here. First, getrlimit
+    lies: XNU stores whatever RLIMIT_NOFILE you set and clips at
+    MIN(RLIMIT_NOFILE, kern.maxfilesperproc) when a file is actually opened,
+    so a reported 64K can enforce 256 (GitHub's macOS runners run under
+    launchd's default 256, and raising it is not permitted). Second, a
+    sequential probe cannot see the budget either: the semaphore keeps ~64
+    files open at once and reclamation lags, so peak usage is several times
+    the in-flight count. So probe with the library's own concurrent path —
+    double the batch until read_bytes_many itself refuses, then settle for
+    the largest size that passed.
     """
     if os.name != "posix":
         return min(BATCH_FILES, len(paths))
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"  fd limits: soft={soft} hard={hard}")
         if hard == resource.RLIM_INFINITY:
             hard = 65536
         if hard > soft:
             resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            print(f"  fd limits raised to: soft={soft} hard={hard}")
     except (ImportError, OSError, ValueError):
         pass
-    budget = 0
-    for p in paths:
+    size = 0
+    n = 16
+    while n <= len(paths):
         try:
-            async with ayafileio.aopen(p, "rb") as f:
-                await f.read()
+            await ayafileio.read_bytes_many(paths[:n])
         except OSError:
             break
-        budget += 1
-    size = max(8, min(BATCH_FILES, budget // 4))
-    if size != BATCH_FILES:
-        print(f"  note: batch size {size} (probed budget {budget} opens)")
-    return size
+        size = n
+        # A refused batch abandons in-flight siblings whose fds are reclaimed
+        # asynchronously; give the reaper a moment before asking for more.
+        gc.collect()
+        await asyncio.sleep(0.25)
+        n *= 2
+    result = max(4, size)
+    if result != BATCH_FILES:
+        print(f"  note: batch size {result} (probed with the real API)")
+    return result
 
 
 # ── Scenario runners ────────────────────────────────────────────────────────
