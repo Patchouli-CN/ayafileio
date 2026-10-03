@@ -366,8 +366,9 @@ lead everywhere (64 KiB: 60.9K vs 8.2K ops/s, 7.4x).
   (27.2x over aiofiles), 4 KiB random read at x1 4.6K → 432K ops/s (54.2x;
   x64: 416K, 25.7x), 64 KiB sequential read 384 → 6,441 MB/s (6.7x); the
   write path is untouched (4 MiB sequential write 8.2 GB/s). Measured on the
-  macos-15 CI runner (Python 3.14, `tests/t_compare.py` methodology) — these
-  cells jumped again after the macOS fd-leak fix, which had been taxing every
+  macos-15 CI runner (Python 3.14, `tests/t_compare.py` methodology); the
+  small-read cells swing ~2x run-to-run on this shared runner — these are the
+  latest run's numbers, after the macOS fd-leak fix stopped taxing every
   open/close cycle.
 
 ### Whole-file copy (`acopy`, *local*, 512 MiB cache-hot file)

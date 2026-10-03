@@ -342,8 +342,9 @@ GitHub 的 Windows runner 对原始顺序吞吐限流太狠，这几个 CI 格�
   4 KiB 顺序读 6.8K → 499K ops/s（对 aiofiles 27.2x）、4 KiB 随机读 x1
   4.6K → 432K ops/s（54.2x；x64 416K，25.7x）、64 KiB 顺序读 384 → 6,441
   MB/s（6.7x）；写路径不走快车道（4 MiB 顺序写 8.2 GB/s）。macos-15 CI
-  runner 实测（Python 3.14，`tests/t_compare.py` 口径）——修复 fd 泄漏后
-  这组数字又上了一截：此前每个 open/close 都在漏 fd、持续拖累吞吐。
+  runner 实测（Python 3.14，`tests/t_compare.py` 口径）；小读格子在共享
+  runner 上轮间抖动约 2x——此处引用的是最新一轮的数字，在 macOS fd 泄漏
+  修复（它此前一直在对每个 open/close 收税）之后测得。
 
 ### 整文件复制（`acopy`，*本地*，512 MiB 缓存热文件）
 
