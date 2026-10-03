@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [1.11.1] - 2026-10-03
 
 ### 修复
 - **macOS：每次 open/close 泄漏一个文件描述符。** Dispatch I/O channel 由一个 `dup()` 出来的 fd 创建，但这个号码只存在于构造函数局部变量里，`close_impl` 也只是 `dispatch_io_close()` 后把指针置空——channel 的 +1 引用从未 `dispatch_release`，dup 出来的 fd 也无人关闭。按 `dispatch_io` 的契约，系统只是把 fd 的**控制权交还**应用，关闭它永远是应用的职责。于是每个 open/close 周期永久泄漏一个 fd。CI 新增的批量打开场景把它抖了出来：约 2,600 次开关后 `EMFILE`；对用户则是长跑进程缓慢走向 "too many open files"。现在后端会记住这个 dup、在 cleanup barrier 跑完后 release channel，并**自己关闭**该 fd（先探测再关，避免对已关过的实现双关误杀复用号）。macos-15 CI 实测连带收益：所有要开文件的 benchmark 格子都跑在了恢复后的预算上——4 KiB 小读 187K → 499K ops/s（对 aiofiles 27.2x）、随机 4 KiB x1 236K → 432K ops/s（54.2x）。

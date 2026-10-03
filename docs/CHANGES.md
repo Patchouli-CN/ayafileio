@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.11.1] - 2026-10-03
 
 ### Fixed
 - **macOS: one file descriptor leaked on every open/close.** The Dispatch I/O channel is created from a `dup()`ed descriptor, but the number was kept in a constructor local and `close_impl` only called `dispatch_io_close()` before nulling the pointer — the channel's +1 reference was never `dispatch_release`d, and nobody ever closed the dup. Per the `dispatch_io` contract the system merely *relinquishes* control over the descriptor and leaves closing it to the application, so every cycle leaked one fd for the life of the process. The new CI batch-open scenario flushed this out as `EMFILE` after ~2,600 open/close cycles; for users it means long-running processes slowly marching toward "too many open files". The backend now stores the dup, releases the channel after the cleanup barrier has run, and closes the descriptor itself — probing first so a libdispatch that already closed it is not double-closed. Measured side effect on macos-15 CI: every benchmark cell that opens files runs on the recovered budget — 4 KiB small reads 187K → 499K ops/s (27.2x aiofiles), random 4 KiB at x1 236K → 432K ops/s (54.2x).
