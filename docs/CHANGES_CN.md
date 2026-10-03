@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### 修复
+- **macOS：每次 open/close 泄漏一个文件描述符。** Dispatch I/O channel 由一个 `dup()` 出来的 fd 创建，但这个号码只存在于构造函数局部变量里，`close_impl` 也只是 `dispatch_io_close()` 后把指针置空——channel 的 +1 引用从未 `dispatch_release`，dup 出来的 fd 也无人关闭。按 `dispatch_io` 的契约，系统只是把 fd 的**控制权交还**应用，关闭它永远是应用的职责。于是每个 open/close 周期永久泄漏一个 fd。CI 新增的批量打开场景把它抖了出来：约 2,600 次开关后 `EMFILE`；对用户则是长跑进程缓慢走向 "too many open files"。现在后端会记住这个 dup、在 cleanup barrier 跑完后 release channel，并**自己关闭**该 fd（先探测再关，避免对已关过的实现双关误杀复用号）。
 - **`aopen` 错误路径：并发失败时返回 future 的 use-after-free。** `open_async` 用一份自有引用创建 future，随后把*同一份*引用交给了两个主人：线程池 worker 收工時 `Py_DECREF` 它，绑定层又用 `py::steal` 把它返回给 Python。通常情况下 batcher 里绑定的 `set_result`/`set_exception` 方法临时持有的那份引用恰好盖住窗口，相安无事；但当大量 open 同时失败时（最后一个在飞 op 触发 batcher 立即 flush），future 可能在 await 方仍持有时就被释放——macOS 批量打开 CI 场景实测为 `OSError: EMFILE` 之后接 `RuntimeError: Future object is not initialized.` 再 SIGSEGV（await 协程读到已释放的 Future 对象）。现 worker 持有自己的那一份引用，恢复"worker 里每个 `Py_DECREF` 都配平它自己拥有的引用"这一不变量。（同批复查了兄弟捕获——`set_result`、`create_future`——所有权均正确。）
 
 ### CI / 测试

@@ -125,6 +125,7 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
         throw std::runtime_error("Failed to create dispatch I/O channel");
     }
     UR_DEBUG_LOG("MacOSGCDBackend: dispatch_io_create success, channel=%p", (void*)m_channel);
+    m_gcd_fd = gcd_fd;  // 记下号码：控制权交还后由 close_impl 负责 close
     
     // 配置缓冲区参数
     dispatch_io_set_high_water(m_channel, m_cached_buffer_size);
@@ -218,7 +219,8 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
         ::close(gcd_fd);  // GCD 未接管，自己关 dup fd
         throw std::runtime_error("Failed to create dispatch I/O channel from fd");
     }
-    
+    m_gcd_fd = gcd_fd;  // 记下号码：控制权交还后由 close_impl 负责 close
+
     dispatch_io_set_high_water(m_channel, m_cached_buffer_size);
     dispatch_io_set_low_water(m_channel, m_cached_buffer_size / 4);
     
@@ -890,6 +892,7 @@ void MacOSGCDBackend::close_impl() {
         UR_DEBUG_LOG0("MacOSGCDBackend: mincore mapping released");
     }
 
+    dispatch_io_t channel = nullptr;
     if (m_channel) {
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl closing dispatch channel");
         // DISPATCH_IO_STOP stops I/O immediately and schedules the cleanup
@@ -900,6 +903,7 @@ void MacOSGCDBackend::close_impl() {
         // Fix: flush the queue with a barrier so the cleanup is guaranteed to
         // have run before we return and the fd can be safely reused.
         dispatch_io_close(m_channel, DISPATCH_IO_STOP);
+        channel = m_channel;  // release 推迟到 barrier 之后
         m_channel = nullptr;
     }
 
@@ -914,11 +918,31 @@ void MacOSGCDBackend::close_impl() {
         m_queue = nullptr;
     }
 
+    if (channel) {
+        // dispatch_io_create 返回 +1 引用：只置空指针从不 release，channel
+        // 对象永不销毁、cleanup handler 永不运行、dup 的 fd 永不关闭——
+        // 每次 open/close 漏一个 fd（CI 实测：两千余次开关后直接 EMFILE，
+        // 长跑进程会在某个月黑风高时刻集体 "too many open files"）。
+        // barrier 已保证 cleanup 跑完、fd 控制权交还，此刻 release 安全。
+        dispatch_release(channel);
+    }
+
     if (m_owns_fd && m_fd != -1) {
         ::close(m_fd);
     }
-
     m_fd = -1;
+
+    // dup 给 GCD 的那份 fd：cleanup 已跑、控制权已交还给我们，自己关。
+    // 个别 libdispatch 实现可能在 cleanup 里已经关过——先探后关，避免
+    // 双关误杀一个已被复用的编号（EBADF 即已关，跳过）。
+    if (m_gcd_fd != -1) {
+        if (::fcntl(m_gcd_fd, F_GETFD) != -1) {
+            ::close(m_gcd_fd);
+        } else {
+            UR_DEBUG_LOG0("MacOSGCDBackend: gcd fd already closed by dispatch");
+        }
+        m_gcd_fd = -1;
+    }
 
     UR_DEBUG_LOG0("MacOSGCDBackend::close_impl done");
 }

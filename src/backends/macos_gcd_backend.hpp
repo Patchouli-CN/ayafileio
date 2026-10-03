@@ -36,6 +36,10 @@ private:
     dispatch_io_t m_channel = nullptr;
     dispatch_queue_t m_queue = nullptr;
     int m_fd = -1;
+    // dup 给 GCD channel 的那份 fd。GCD 只在 control 交还后让我们"可以
+    // close"，从不觉着替我们关——这个号码必须记着，由 close_impl 归还，
+    // 否则每次 open/close 漏一个 fd。
+    int m_gcd_fd = -1;
     std::atomic<bool> m_running{false};
     std::mutex m_posMtx;
     uint64_t m_filePos = 0;
