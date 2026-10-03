@@ -339,10 +339,11 @@ GitHub 的 Windows runner 对原始顺序吞吐限流太狠，这几个 CI 格�
 - Windows (IOCP) 顺序写：1 MiB 块 1,363 → 2,858 MB/s，4 MiB 块 929 → 3,046 MB/s
   （对 aiofiles 1.47x）；4 KiB 随机 `read_at`、16 在飞：21.4K ops/s。
 - macOS (Dispatch I/O)：缓存命中的小读在调用线程内联完成（mincore + pread）——
-  4 KiB 顺序读 6.8K → 416K ops/s（对 aiofiles 24.3x）、4 KiB 随机读 x1
-  4.6K → 289K ops/s（37.7x）、64 KiB 顺序读 384 → 7,474 MB/s（7.3x）；写路径
-  不走快车道（1 MiB 顺序写 5.4 GB/s）。macos-15 CI runner 实测（Python 3.14，
-  `tests/t_compare.py` 口径）。
+  4 KiB 顺序读 6.8K → 499K ops/s（对 aiofiles 27.2x）、4 KiB 随机读 x1
+  4.6K → 432K ops/s（54.2x；x64 416K，25.7x）、64 KiB 顺序读 384 → 6,441
+  MB/s（6.7x）；写路径不走快车道（4 MiB 顺序写 8.2 GB/s）。macos-15 CI
+  runner 实测（Python 3.14，`tests/t_compare.py` 口径）——修复 fd 泄漏后
+  这组数字又上了一截：此前每个 open/close 都在漏 fd、持续拖累吞吐。
 
 ### 整文件复制（`acopy`，*本地*，512 MiB 缓存热文件）
 
