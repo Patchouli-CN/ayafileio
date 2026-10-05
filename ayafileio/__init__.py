@@ -10,7 +10,16 @@ ayafileio - 跨平台异步文件 I/O 库
 提供与 aiofiles 兼容的 API, 但性能更优。
 """
 
-__version__ = "1.11.1"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+try:
+    # 单一事实来源是 pyproject.toml；运行时从安装元数据读，杜绝发版忘 bump
+    __version__ = _pkg_version("ayafileio")
+except PackageNotFoundError:  # 源码树直跑（未安装）时兜底
+    __version__ = "0.0.0+unknown"
+
+del _pkg_version, PackageNotFoundError
 
 from .util import warn_fake_async
 
@@ -40,7 +49,7 @@ from ._compat import (
     set_io_worker_count,
     set_iocp_worker_count,
     drain_handle_pool,
-    drain_buffer_pool
+    drain_buffer_pool,
 )
 
 __all__ = [
