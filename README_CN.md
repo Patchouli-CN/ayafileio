@@ -35,8 +35,8 @@
 - 真异步平台零线程开销——没有后台线程，也不需要 `run_in_executor`
 - 内核级完成通知：IOCP / io_uring / Dispatch I/O
 - 缓存命中内联快车道：热路径小读在调用线程就地完成，await 不让出事件循环（IOCP 同步完成 / io_uring COOP_TASKRUN / macOS mincore + pread）
-- 单文件句柄上轻松扛数千并发操作
-- 与 aiofiles 兼容的 API，就是普通的 `async/await`
+- 单文件句柄抗住数千并发操作
+- 与 aiofiles 兼容的 API，与标准 `async/await` 用法一致
 - 文本/二进制模式，自动编解码
 - 异步整文件复制：`acopy()`，Linux/Windows 走 OS 级快车道
 - 所有后端共享一套运行时可调的配置
@@ -77,7 +77,7 @@ asyncio.run(main())
 
 ## 打开一次，操作多次
 
-开关文件的开销已经是微秒级，但在循环里反复打开同一个文件，每轮还是要白搭一次协程调度：
+开关文件的开销已经是微秒级，但在循环里反复打开同一个文件，每轮仍要多付一次协程调度开销：
 
 ```python
 # 慢：循环内反复 open/close
@@ -231,7 +231,7 @@ n = await ayafileio.acopy("model.gguf", "backup/model.gguf")
 
 `acopy(src, dst, *, chunk_size=4 MiB, concurrency=8, copy_stat=False)` 复制整个
 文件，返回复制的字节数。Linux 上走内核态零拷贝 `copy_file_range`，Windows 上走
-`CopyFile2`（顺带保留元数据），都在 worker 线程里执行。没有快车道可用（或文件
+`CopyFile2`（顺带保留元数据），都在 worker 线程里执行。没有快速路径可用（或文件
 系统拒绝）时，回退到 `read_at`/`write_at` 流水线：最多 `concurrency` 个块在飞，
 内存占用不超过 `concurrency × chunk_size`。目标文件先截断；复制到自身抛
 `shutil.SameFileError`；`copy_stat=True` 时完成后附加 `shutil.copystat`。
@@ -257,7 +257,7 @@ async with ayafileio.aopen("data.bin", "rb") as f:
 
 `aopen()` 与 `open()` 参数一致、返回同样的 `AsyncFile`——区别是 OS open
 本身跑在 C++ 线程池，而不是阻塞事件循环线程。返回的是惰性句柄
-（aiofiles 同款）：`async with` 在 `__aenter__` 里触发打开，写
+（与 aiofiles 相同）：`async with` 在 `__aenter__` 里触发打开，写
 `await ayafileio.aopen(...)` 显式等待也可以。批量打开大量文件时，open
 系统调用本身也能并行；循环里同步 `open()` 则每个文件仍要付出一次短暂的
 阻塞系统调用。
@@ -275,7 +275,7 @@ counts  = await ayafileio.write_text_many(items, encoding="utf-8")
 平台异步后端、返回顺序与输入一致（写系列接收 `(path, data)` 对，
 返回字节数）。`max_concurrency`（默认 64）限制在飞文件数，海量输入
 不会打爆 fd；任一失败整体抛出——批量不是事务，写批量失败时部分文件
-可能已经落盘。这是吃到异步后端性能的最短写法——串行 `for` 循环配
+可能已经落盘。这是发挥异步后端性能的建议写法——串行 `for` 循环配
 `open()` 无论单次操作多快，同一时刻都只有一个文件在飞。
 
 ### 配置函数
@@ -329,9 +329,9 @@ artifact 挂在每次运行上。除非标注*本地*，以下数字来自最近
 
 ### Windows 和 macOS
 
-GitHub 的 Windows runner 对原始顺序吞吐限流太狠，这几个 CI 格子没有代表性——
+GitHub 的 Windows runner 对原始顺序吞吐限流明显，这几个 CI 格子没有代表性——
 最近一次 windows-2022 上，64 KiB 顺序读只有对 aiofiles 的 0.79x、4 KiB 小读
-0.62x——所以门面数字仍用*本地* NVMe 实测。但 1.11.0 记账修复之后，同一 runner
+0.62x——所以性能测试数字用的是*本地* NVMe 实测得出。但 1.11.0 记账修复之后，同一 runner
 上的并发格子已经健康（随机 4 KiB 读、各自句柄）：x1 12.0K vs 7.4K ops/s
 （1.6x）、x16 28.3K vs 5.4K（5.3x）、x64 31.3K vs 8.7K（3.6x）；顺序写则全面
 领先（64 KiB：60.9K vs 8.2K ops/s，7.4x）。
@@ -341,10 +341,11 @@ GitHub 的 Windows runner 对原始顺序吞吐限流太狠，这几个 CI 格�
 - macOS (Dispatch I/O)：缓存命中的小读在调用线程内联完成（mincore + pread）——
   4 KiB 顺序读 6.8K → 499K ops/s（对 aiofiles 27.2x）、4 KiB 随机读 x1
   4.6K → 432K ops/s（54.2x；x64 416K，25.7x）、64 KiB 顺序读 384 → 6,441
-  MB/s（6.7x）；写路径不走快车道（4 MiB 顺序写 8.2 GB/s）。macos-15 CI
+  MB/s（6.7x）；写路径不走快速路径（4 MiB 顺序写 8.2 GB/s）。macos-15 CI
   runner 实测（Python 3.14，`tests/t_compare.py` 口径）；小读格子在共享
   runner 上轮间抖动约 2x——此处引用的是最新一轮的数字，在 macOS fd 泄漏
-  修复（它此前一直在对每个 open/close 收税）之后测得。
+  修复（修复前每次 open/close 都有额外同步开销——open 是同步版本，
+  返回底层同步创建的异步文件句柄）之后测得。
 
 ### 整文件复制（`acopy`，*本地*，512 MiB 缓存热文件）
 
@@ -362,7 +363,7 @@ GitHub 的 Windows runner 对原始顺序吞吐限流太狠，这几个 CI 格�
 ### 调优
 
 默认值就是调优的终点。特别快的 NVMe 上，Windows 可以试试 `iocp_batch_size`
-128–256 配 `buffer_size` 128 KiB，也许还能再榨一点。
+128–256 配 `buffer_size` 128 KiB，按自己需求自己调整。
 
 ## 贡献
 

@@ -387,7 +387,7 @@ sync-writes-in-a-threadpool across runs.
 
 ### Tuning
 
-The defaults are where the tuning ended up. On very fast NVMe drives,
+The defaults reflect where tuning converged. On very fast NVMe drives,
 `iocp_batch_size` 128–256 with `buffer_size` 128 KiB can squeeze out a bit
 more on Windows.
 
