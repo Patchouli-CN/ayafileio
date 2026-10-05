@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.11.2] - 2026-10-06
+
+### 变更
+- **`ayafileio.types` 更名为 `ayafileio._types`。** 原名遮蔽了标准库 `types` 模块——包内绝对引用无碍，但源码目录一旦进入 `sys.path` 就是隐患。公共导入路径不变：`from ayafileio import AyaFileIO` 照旧。直接导入过内部模块（`from ayafileio.types import ...`）的代码请切到公共路径。（社区反馈）
+
+### 修复
+- **Python 3.10 运行时不再需要 `typing_extensions`。** `types.py` 的 `Self` 与 `_config.py` 的 `TypedDict`/`NotRequired` 在 3.10 上依赖 `typing_extensions`，但包从未声明该依赖——全新安装的 3.10 环境 import 即失败。`Self` 移入 `TYPE_CHECKING` 并配合惰性注解（运行时永不求值），`TypedDict` 改用标准库（3.8+ 自带），`NotRequired` 包装移除（该 TypedDict 本已 `total=False`）。（社区反馈）
+
+### 文档
+- README 双语措辞收紧：技术叙述的口语化表达改为精确措辞，射命丸文签名元素保留。补充英文仓库简介。
+
 ## [1.11.1] - 2026-10-03
 
 ### 修复

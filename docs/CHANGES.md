@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.2] - 2026-10-06
+
+### Changed
+- **`ayafileio.types` renamed to `ayafileio._types`.** The module shadowed Python's standard-library `types` module — harmless inside the package (absolute imports), but a trap whenever the source directory ends up on `sys.path`, and a lint red flag. The public import path is unchanged: `from ayafileio import AyaFileIO` works exactly as before. Code that imported the internal module directly (`from ayafileio.types import ...`) should switch to the public path. (Community feedback.)
+
+### Fixed
+- **Python 3.10 no longer needs `typing_extensions` at runtime.** `types.py` imported `Self` and `_config.py` imported `TypedDict`/`NotRequired` from `typing_extensions` on 3.10, but the package never declared that dependency — a fresh 3.10 install would fail at import time. `Self` now lives under `TYPE_CHECKING` behind lazy annotations (never evaluated at runtime), `TypedDict` comes from the stdlib (3.8+), and the `NotRequired` wrappers were dropped (the TypedDict is already `total=False`). (Community feedback.)
+
+### Documentation
+- README wording pass (both languages): tightened colloquial phrasing in the technical prose; the Aya signature bits stay. Added the English repository description.
+
 ## [1.11.1] - 2026-10-03
 
 ### Fixed
