@@ -87,9 +87,9 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
     }
     UR_DEBUG_LOG("MacOSGCDBackend: file opened, fd=%d", m_fd);
 
-    // dup fd 隔离：dispatch_io_create 会接管 fd 并在 dispatch_io_close 时
-    // 异步关闭它。如果 fd 号在 GCD 内核层 close 完成前被复用，GCD 的延迟
-    // close 会误关新文件。dup 一份副本给 GCD，原始 fd 由我们完全控制。
+    // dup fd 隔离：channel 存续期间 fd 处于 libdispatch 控制之下（含
+    // GUARD_CLOSE 守卫），应用不得触碰。dup 一份副本给 GCD，原始 fd
+    // 由我们完全控制；dup 的关闭职责交给 cleanup handler（见下）。
     int gcd_fd = dup(m_fd);
     if (gcd_fd == -1) {
         UR_DEBUG_LOG("MacOSGCDBackend: dup failed, errno=%d", errno);
@@ -106,14 +106,25 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
     m_queue = dispatch_queue_create("com.ayafileio.gcd", attr);
     UR_DEBUG_LOG("MacOSGCDBackend: GCD queue created, queue=%p", (void*)m_queue);
 
+    // cleanup handler 独占 dup fd 的关闭：契约上 handler 入队即控制权
+    // 交还（"making it safe for the application to close(2)"），handler
+    // 在 close_queue 上排在 fd_entry teardown（unguard / LIST_REMOVE /
+    // free）之后，此刻 close 不会踩守卫、不会与 teardown 抢 fd 号。
+    // shared_ptr 捕获：handler 由 block 生命周期保活，对象析构后迟到的
+    // handler 也不碰 this。
+    auto fd_cleanup = std::make_shared<GcdFdCleanup>();
+    fd_cleanup->fd = gcd_fd;
+    fd_cleanup->done = dispatch_semaphore_create(0);
+
     // 创建 Dispatch I/O 通道（随机访问模式，支持 seek）
-    // 传入 dup 的 fd，GCD 接管其生命周期
     m_channel = dispatch_io_create(
         DISPATCH_IO_RANDOM,
         gcd_fd,
         m_queue,
         ^(int error) {
             UR_DEBUG_LOG("MacOSGCDBackend: dispatch_io_create cleanup handler, error=%d", error);
+            ::close(fd_cleanup->fd);
+            dispatch_semaphore_signal(fd_cleanup->done);
         }
     );
 
@@ -125,7 +136,7 @@ MacOSGCDBackend::MacOSGCDBackend(const std::string& path, const std::string& mod
         throw std::runtime_error("Failed to create dispatch I/O channel");
     }
     UR_DEBUG_LOG("MacOSGCDBackend: dispatch_io_create success, channel=%p", (void*)m_channel);
-    m_gcd_fd = gcd_fd;  // 记下号码：控制权交还后由 close_impl 负责 close
+    m_fd_cleanup = std::move(fd_cleanup);  // close_impl 等待 cleanup 跑完的凭据
     
     // 配置缓冲区参数
     dispatch_io_set_high_water(m_channel, m_cached_buffer_size);
@@ -191,7 +202,8 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
 
     m_appendMode = mi.appendMode;
 
-    // dup fd 隔离：防止 GCD 异步 close 与 fd 复用产生竞态
+    // dup fd 隔离：channel 存续期间 fd 处于 libdispatch 控制之下，dup 的
+    // 关闭职责归 cleanup handler（同路径构造函数）
     int gcd_fd = dup(m_fd);
     if (gcd_fd == -1) {
         UR_DEBUG_LOG("MacOSGCDBackend: dup failed in fd ctor, errno=%d", errno);
@@ -204,13 +216,19 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
     m_queue = dispatch_queue_create("com.ayafileio.gcd", attr);
 
-    // 创建 Dispatch I/O 通道（用 dup 的 fd，GCD 接管其生命周期）
+    auto fd_cleanup = std::make_shared<GcdFdCleanup>();
+    fd_cleanup->fd = gcd_fd;
+    fd_cleanup->done = dispatch_semaphore_create(0);
+
+    // 创建 Dispatch I/O 通道（用 dup 的 fd；cleanup handler 独占其关闭）
     m_channel = dispatch_io_create(
         DISPATCH_IO_RANDOM,
         gcd_fd,
         m_queue,
         ^(int error) {
             UR_DEBUG_LOG("MacOSGCDBackend: fd channel cleanup, error=%d", error);
+            ::close(fd_cleanup->fd);
+            dispatch_semaphore_signal(fd_cleanup->done);
         }
     );
 
@@ -219,7 +237,7 @@ MacOSGCDBackend::MacOSGCDBackend(int fd, const std::string& mode, bool owns_fd)
         ::close(gcd_fd);  // GCD 未接管，自己关 dup fd
         throw std::runtime_error("Failed to create dispatch I/O channel from fd");
     }
-    m_gcd_fd = gcd_fd;  // 记下号码：控制权交还后由 close_impl 负责 close
+    m_fd_cleanup = std::move(fd_cleanup);
 
     dispatch_io_set_high_water(m_channel, m_cached_buffer_size);
     dispatch_io_set_low_water(m_channel, m_cached_buffer_size / 4);
@@ -895,21 +913,54 @@ void MacOSGCDBackend::close_impl() {
     dispatch_io_t channel = nullptr;
     if (m_channel) {
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl closing dispatch channel");
-        // DISPATCH_IO_STOP stops I/O immediately and schedules the cleanup
-        // handler on the channel's queue.  Because dispatch_io_close is
-        // asynchronous the system may close the underlying fd on a later GCD
-        // callback.  If the fd number is reused by a subsequent open() before
-        // that callback runs, the new file is closed instead → EBADF (errno 9).
-        // Fix: flush the queue with a barrier so the cleanup is guaranteed to
-        // have run before we return and the fd can be safely reused.
+        // DISPATCH_IO_STOP stops I/O immediately.  The cleanup handler is NOT
+        // enqueued synchronously: it reaches m_queue via a multi-hop async
+        // chain (stop → channel->queue → barrier_queue → close_queue resume
+        // → trampoline → m_queue), so a barrier on m_queue alone cannot
+        // guarantee it has run — that was the 1.11.1 race: close_impl probed
+        // and closed the dup while teardown was still in flight, the fd
+        // number went back to the kernel early, and teardown's own late
+        // touches (or a second close on implementations that close in
+        // teardown) landed on whatever file had reused the number → the new
+        // file's next write failed with EBADF (errno 9).  The cleanup
+        // handler is now the sole closer (see the constructors), and we
+        // *wait* for it below.
         dispatch_io_close(m_channel, DISPATCH_IO_STOP);
-        channel = m_channel;  // release 推迟到 barrier 之后
+        channel = m_channel;  // release 之后马上做：dispose 才会释放 fd_entry
         m_channel = nullptr;
+    }
+
+    if (channel) {
+        // dispatch_io_create 返回 +1 引用：只置空指针从不 release，channel
+        // 对象永不销毁、cleanup handler 永不运行、dup 的 fd 永不关闭——
+        // 每次 open/close 漏一个 fd（CI 实测：两千余次开关后直接 EMFILE，
+        // 长跑进程会在某个月黑风高时刻集体 "too many open files"）。
+        dispatch_release(channel);
+    }
+
+    if (m_fd_cleanup) {
+        // 等 cleanup handler 跑完（它已在 handler 里 close 了 dup fd）。
+        // 等待把 fd 号回收串行化到 libdispatch teardown 完成之后：fd_entry
+        // 是 libdispatch 进程内按 fd 号全局缓存的， teardown 未跑完就复用
+        // 该号会让新 channel 挂到将死的 fd_entry 上（UAF / 标志位错乱）。
+        // 超时兜底：handler 仍会迟到执行（block 捕获 shared_ptr 保活），
+        // fd 由它关闭，无泄漏、无双关。
+        std::shared_ptr<GcdFdCleanup> cleanup = m_fd_cleanup;
+        int64_t ns = static_cast<int64_t>(m_cached_close_timeout_ms) * 1000000LL;
+        UR_DEBUG_LOG0("MacOSGCDBackend::close_impl waiting for channel cleanup");
+        Py_BEGIN_ALLOW_THREADS  // cleanup handler 不需要 GIL，但别占着它等
+        long rc = dispatch_semaphore_wait(cleanup->done,
+                                          dispatch_time(DISPATCH_TIME_NOW, ns));
+        Py_END_ALLOW_THREADS
+        if (rc != 0) {
+            UR_DEBUG_LOG0("MacOSGCDBackend::close_impl cleanup wait timed out; fd close deferred to cleanup handler");
+        }
+        m_fd_cleanup.reset();
     }
 
     if (m_queue) {
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl waiting for queue drain");
-        // Release the GIL while waiting — GCD callbacks need it for complete_ok/error
+        // cleanup handler 已在 m_queue 上跑完，此处仅排空残余块再 release
         Py_BEGIN_ALLOW_THREADS
         dispatch_barrier_sync(m_queue, ^{});
         Py_END_ALLOW_THREADS
@@ -918,31 +969,10 @@ void MacOSGCDBackend::close_impl() {
         m_queue = nullptr;
     }
 
-    if (channel) {
-        // dispatch_io_create 返回 +1 引用：只置空指针从不 release，channel
-        // 对象永不销毁、cleanup handler 永不运行、dup 的 fd 永不关闭——
-        // 每次 open/close 漏一个 fd（CI 实测：两千余次开关后直接 EMFILE，
-        // 长跑进程会在某个月黑风高时刻集体 "too many open files"）。
-        // barrier 已保证 cleanup 跑完、fd 控制权交还，此刻 release 安全。
-        dispatch_release(channel);
-    }
-
     if (m_owns_fd && m_fd != -1) {
         ::close(m_fd);
     }
     m_fd = -1;
-
-    // dup 给 GCD 的那份 fd：cleanup 已跑、控制权已交还给我们，自己关。
-    // 个别 libdispatch 实现可能在 cleanup 里已经关过——先探后关，避免
-    // 双关误杀一个已被复用的编号（EBADF 即已关，跳过）。
-    if (m_gcd_fd != -1) {
-        if (::fcntl(m_gcd_fd, F_GETFD) != -1) {
-            ::close(m_gcd_fd);
-        } else {
-            UR_DEBUG_LOG0("MacOSGCDBackend: gcd fd already closed by dispatch");
-        }
-        m_gcd_fd = -1;
-    }
 
     UR_DEBUG_LOG0("MacOSGCDBackend::close_impl done");
 }

@@ -104,6 +104,40 @@ async def test_wrap_closed_error():
         os.close(fd)
 
 
+async def test_fd_reuse_after_wrap_close():
+    """回归：wrap-close 释放的 fd 号被后续 open 复用时不得 EBADF。
+
+    macOS 上 dispatch_io 的 cleanup 是多级异步链路，close() 返回后
+    teardown 可能仍在飞；若 dup fd 被过早关回内核，复用该号的新文件
+    会被迟到的清理误关（CI 实录：write 炸 EBADF/errno 9）。
+    循环放大这个窗口：wrap → close → os.close(原 fd) → 立即 open+write。
+    """
+    print("=== test_fd_reuse_after_wrap_close ===")
+
+    path = tempfile.mktemp()
+    payload = b"normal open works!"
+    try:
+        for i in range(100):
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+            aio = ayafileio.wrap_file(fd, "wb")
+            await aio.write(b"wrap cycle")
+            await aio.close()
+            os.close(fd)
+
+            # 立即复用刚释放的 fd 号：普通 open + write 必须成功
+            async with ayafileio.open(path, "wb") as f:
+                n = await f.write(payload)
+                assert n == len(payload)
+
+            async with ayafileio.open(path, "rb") as f:
+                data = await f.read()
+                assert data == payload, f"iteration {i}: data mismatch"
+    finally:
+        os.unlink(path)
+
+    print("  PASSED\n")
+
+
 async def test_normal_open_still_works():
     """测试：原有的 open() 不受影响"""
     print("=== test_normal_open_still_works ===")
@@ -125,6 +159,7 @@ async def main():
     await test_owns_fd_true()
     await test_wrap_text_mode()
     await test_wrap_closed_error()
+    await test_fd_reuse_after_wrap_close()
     await test_normal_open_still_works()
 
     print("=" * 40)

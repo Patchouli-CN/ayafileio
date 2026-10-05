@@ -12,6 +12,7 @@
 
 ### 修复
 - **Python 3.10 运行时不再需要 `typing_extensions`。** `types.py` 的 `Self` 与 `_config.py` 的 `TypedDict`/`NotRequired` 在 3.10 上依赖 `typing_extensions`，但包从未声明该依赖——全新安装的 3.10 环境 import 即失败。`Self` 移入 `TYPE_CHECKING` 并配合惰性注解（运行时永不求值），`TypedDict` 改用标准库（3.8+ 自带），`NotRequired` 包装移除（该 TypedDict 本已 `total=False`）。（社区反馈）
+- **macOS：wrap/close 周期可能误杀无关文件的描述符——新 `open()` 的文件首次 write 即 `OSError: [Errno 9]`（EBADF）。** 1.11.1 的泄漏修复在 `close_impl` 里于 channel 队列的 `dispatch_barrier_sync` 之后、先用 `fcntl(F_GETFD)` 探测再关闭那个 `dup()` 出来的 fd。问题在于 barrier 只能对*已入队*的块建立顺序，而 channel 的 cleanup handler 要经过多级异步链路才落到该队列（`dispatch_io_close` → channel 内部队列 → barrier queue → `close_queue` 恢复 → trampoline → 我们的队列）：`close_impl` 可能在 libdispatch teardown 仍在飞时就探测并关闭了 dup。过早关闭两个方向都错：fd 还带着 libdispatch 的 `GUARD_CLOSE` 守卫时，裸 `close()` 直接 `EPERM` 失败——本要回收的 fd 被静默重新泄漏；若关闭成功，fd 号在 teardown 仍引用它时被还给内核，teardown 迟到的操作就落在复用该号的新文件头上。探测对此无能为力——`fcntl` 回答的是"号还有效吗"，不是"所有权还归我们吗"（教科书 ABA）——CI 红绿纯由 teardown 时序决定，两次纯 Python 改动在同一 wrap-then-open 序列上翻红的原因即在此。dup 现在由 channel 的 cleanup handler 独占关闭、恰好一次：那是 `dispatch_io_create(3)` 契约明确交还 fd 控制权的时点（"safe for the application to `close(2)`"），且被调度在 libdispatch 自己的 fd_entry teardown（解除守卫、全局 fd 表摘除）完成之后——无需探测，也不会踩守卫。`close_impl` 改为 release channel 后等待 handler 信号量，保持"`close()` 返回时 fd 号真正回收"的旧保证；`close_timeout_ms` 超时兜底时 handler 仍会迟到关闭（block 捕获的 `shared_ptr` 让状态活得过后端析构）——迟到但仍恰好一次：无双关、无泄漏。回归覆盖：`tests/test_wrap_file.py` 新增 100 次 wrap → close → `os.close` → 立即重开写入的循环，每轮都复用刚释放的 fd 号。
 
 ### 文档
 - README 双语措辞收紧：技术叙述的口语化表达改为精确措辞，射命丸文签名元素保留。补充英文仓库简介。
