@@ -32,7 +32,7 @@ from ._whole import (
     write_text_many,
 )
 from ._wrap import wrap_file
-from .types import AyaFileIO
+from ._types import AyaFileIO
 from ._config import configure, get_config, reset_config, get_backend_info
 from ._compat import (
     set_handle_pool_limits,

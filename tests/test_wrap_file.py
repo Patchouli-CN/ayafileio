@@ -6,7 +6,7 @@ import io
 import os
 import tempfile
 import ayafileio
-from ayafileio.types import AyaFileIO
+from ayafileio import AyaFileIO
 
 # 设置 Windows 控制台编码
 if sys.platform == "win32":

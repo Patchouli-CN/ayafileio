@@ -1,14 +1,18 @@
 """AyaIO 类型定义"""
 
-from typing import Protocol, runtime_checkable, TypeVar
-from pathlib import Path
-from collections.abc import Iterable
-import sys
+from __future__ import annotations
 
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing_extensions import Self
+import sys
+from collections.abc import Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
+
+if TYPE_CHECKING:
+    # 惰性注解下 Self 只存在于类型检查期：3.10 运行时也无需 typing_extensions
+    if sys.version_info >= (3, 11):
+        from typing import Self
+    else:
+        from typing_extensions import Self
 
 T = TypeVar("T", str, bytes, covariant=True)
 
@@ -42,6 +46,6 @@ class AyaFileIO(Protocol[T]):
 class _HasFileno(Protocol):
     """任何能提供文件描述符的对象（鸭子类型）"""
     def fileno(self) -> int: ...
-    
+
 FileObj = _HasFileno
 """ 真实文件对象 """

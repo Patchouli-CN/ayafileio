@@ -1,11 +1,6 @@
 """统一配置 API"""
 
-import sys
-
-if sys.version_info >= (3, 11):
-    from typing import TypedDict, NotRequired
-else:
-    from typing_extensions import TypedDict, NotRequired
+from typing import TypedDict
 
 from ._ayafileio import (  # type: ignore[missing-imports]
     configure as _configure,
@@ -27,26 +22,26 @@ _CACHE_ENABLED = True
 
 
 class AyafileioConfig(TypedDict, total=False):
-    """ayafileio 配置字典类型 — 所有键均为可选"""
+    """ayafileio 配置字典类型 — 所有键均为可选（total=False，无需 NotRequired）"""
 
     # ── 跨平台 / 通用 ──────────────────────────────────────────────────────
-    io_worker_count: NotRequired[int]
-    buffer_pool_max: NotRequired[int]
-    buffer_size: NotRequired[int]
-    close_timeout_ms: NotRequired[int]
+    io_worker_count: int
+    buffer_pool_max: int
+    buffer_size: int
+    close_timeout_ms: int
 
     # ── Windows / IOCP ─────────────────────────────────────────────────────
-    handle_pool_max_per_key: NotRequired[int]
-    handle_pool_max_total: NotRequired[int]
-    iocp_batch_size: NotRequired[int]
+    handle_pool_max_per_key: int
+    handle_pool_max_total: int
+    iocp_batch_size: int
 
     # ── Linux / io_uring ──────────────────────────────────────────────────
-    io_uring_queue_depth: NotRequired[int]
-    io_uring_sqpoll: NotRequired[bool]
+    io_uring_queue_depth: int
+    io_uring_sqpoll: bool
 
     # ── ResultBatcher / 自适应批处理 ────────────────────────────────
-    adaptive_batch: NotRequired[bool]
-    adaptive_target_latency_us: NotRequired[int]
+    adaptive_batch: bool
+    adaptive_target_latency_us: int
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,7 @@
 from .util import is_real_file
 from ._ayafileio import AsyncFile as _AsyncFile
 from ._async_file import AsyncFile
-from .types import FileObj
+from ._types import FileObj
 
 def wrap_file(file: int | FileObj, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[bytes]:
     """将现有**文件**包装为异步 I/O 对象。
