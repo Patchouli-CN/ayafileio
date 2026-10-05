@@ -948,9 +948,10 @@ void MacOSGCDBackend::close_impl() {
         std::shared_ptr<GcdFdCleanup> cleanup = m_fd_cleanup;
         int64_t ns = static_cast<int64_t>(m_cached_close_timeout_ms) * 1000000LL;
         UR_DEBUG_LOG0("MacOSGCDBackend::close_impl waiting for channel cleanup");
+        long rc;  // Py_*_ALLOW_THREADS 是块作用域宏，rc 须在块外声明
         Py_BEGIN_ALLOW_THREADS  // cleanup handler 不需要 GIL，但别占着它等
-        long rc = dispatch_semaphore_wait(cleanup->done,
-                                          dispatch_time(DISPATCH_TIME_NOW, ns));
+        rc = dispatch_semaphore_wait(cleanup->done,
+                                     dispatch_time(DISPATCH_TIME_NOW, ns));
         Py_END_ALLOW_THREADS
         if (rc != 0) {
             UR_DEBUG_LOG0("MacOSGCDBackend::close_impl cleanup wait timed out; fd close deferred to cleanup handler");
