@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.11.3] - 2026-10-08
+
+### 修复
+- **Debian 12 / GCC 12 下源码编译失败：`error: 'atomic' in namespace 'ayafileio::std' does not name a template type`。** `src/globals.hpp` 的 POSIX 分支把 `#include <cstring>` 写在了 `namespace ayafileio` **里面**——在命名空间内引入标准库头文件会把其中的声明一并注入该命名空间，GCC 12 的 libstdc++ 因此凭空多出 `ayafileio::std`，其后所有 `std::` 引用全部解析错误、编译中止。更新的工具链（GCC 13+、clang、MSVC）恰好容忍这种写法，所以 CI 与预编译 wheel 从未察觉；而在 Debian 12 自带工具链上从源码构建的用户会立刻踩中。`<cstring>` 现移至命名空间外的全局 include 区。预编译 wheel 用户不受影响。本项由 [@N0zoM1z0](https://github.com/N0zoM1z0) **报告并修复**——issue（[#5](https://github.com/Patchouli-CN/ayafileio/issues/5)）环境、复现步骤、根因分析俱全，随后直接提交补丁（[#6](https://github.com/Patchouli-CN/ayafileio/pull/6)），并在 Debian 12 / GCC 12.2.0 上实测：Release 构建通过，io_uring 开/关两种配置下 139 项检查全绿。项目收到的首个外部代码贡献——感谢！
+
 ## [1.11.2] - 2026-10-06
 
 ### 变更

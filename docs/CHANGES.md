@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.3] - 2026-10-08
+
+### Fixed
+- **Source builds failed on Debian 12 / GCC 12: `error: 'atomic' in namespace 'ayafileio::std' does not name a template type`.** The POSIX branch of `src/globals.hpp` included `<cstring>` *inside* `namespace ayafileio`. Pulling a standard header into a namespace injects that header's declarations there — on GCC 12's libstdc++ this materializes an `ayafileio::std` namespace, after which every later `std::` reference resolves against it and the compile dies. Newer toolchains (GCC 13+, clang, MSVC) happen to tolerate the pattern, which is why CI and the prebuilt wheels never noticed; anyone building from source on Debian 12's stock toolchain hit it immediately. `<cstring>` now sits in the global include section, above the namespace. Prebuilt-wheel users were never affected. Reported *and* fixed by [@N0zoM1z0](https://github.com/N0zoM1z0) — issue ([#5](https://github.com/Patchouli-CN/ayafileio/issues/5)) with environment, reproduction, and root cause, then the patch itself ([#6](https://github.com/Patchouli-CN/ayafileio/pull/6)), validated on Debian 12 / GCC 12.2.0 with Release builds and all 139 checks passing under io_uring both enabled and disabled. First external code contribution to the project — thank you!
+
 ## [1.11.2] - 2026-10-06
 
 ### Changed
