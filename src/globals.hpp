@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 using DWORD = uint32_t;
 using HANDLE = int;
 static constexpr HANDLE INVALID_HANDLE_VALUE = (HANDLE)-1;
@@ -86,7 +87,6 @@ static inline PyObject *map_win_error(DWORD err) {
 // ════════════════════════════════════════════════════════════════════════════
 #else
 #include <cerrno>
-#include <cstring>
 
 // POSIX 错误码到 Python 异常类的映射
 static inline PyObject *map_posix_error(int err) {
