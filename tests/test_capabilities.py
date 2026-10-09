@@ -55,7 +55,13 @@ def test_library_features():
 
     # fast_file_copy 必须与 acopy 实际会走的快车道一致
     if sys.platform == "win32":
-        check("Windows 有 CopyFile2", feats["fast_file_copy"] is True)
+        try:
+            from _winapi import CopyFile2  # noqa: F401  # 3.12+ 才有
+            expect = True
+        except ImportError:
+            expect = False
+        check(f"fast_file_copy 与 _winapi.CopyFile2 一致 ({expect})",
+              feats["fast_file_copy"] is expect)
     elif sys.platform == "linux":
         expect = hasattr(os, "copy_file_range")
         check(f"fast_file_copy 与 os.copy_file_range 一致 ({expect})",

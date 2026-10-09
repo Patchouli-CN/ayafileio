@@ -129,73 +129,42 @@ py::dict io_uring_detail() {
     d["features"] = feats;
 
     // opcode 能力探测：IORING_REGISTER_PROBE（内核 5.6+）。
-    // 问内核"哪些操作真支持"，而不是按版本号猜——backport 内核上两者会不一致
+    // 问内核"哪些操作真支持"，而不是按版本号猜——backport 内核上两者会不一致。
+    //
+    // opcode 编号是 uapi ABI（只增不改；编号对照内核
+    // include/uapi/linux/io_uring.h 的 enum io_uring_op）。IORING_OP_* 是
+    // 枚举常量而非宏，#ifdef 防御不到旧版头文件；直接用 ABI 编号反而更稳：
+    // 编译不依赖头文件版本，运行时 io_uring_opcode_supported 自带边界检查
+    // （op > last_op → 不支持）。
     struct io_uring_probe* probe = io_uring_get_probe_ring(&ring);
     if (probe) {
+        static const struct { int op; const char* name; } kProbeOps[] = {
+            { 0,  "nop" },
+            { 1,  "readv" },
+            { 2,  "writev" },
+            { 3,  "fsync" },
+            { 4,  "read_fixed" },
+            { 5,  "write_fixed" },
+            { 8,  "sync_file_range" },
+            { 17, "fallocate" },
+            { 18, "openat" },
+            { 19, "close" },
+            { 21, "statx" },
+            { 22, "read" },
+            { 23, "write" },
+            { 24, "fadvise" },
+            { 25, "madvise" },
+            { 28, "openat2" },
+            { 30, "splice" },
+            { 35, "renameat" },
+            { 36, "unlinkat" },
+            { 37, "mkdirat" },
+            { 49, "read_multishot" },
+        };
         py::dict ops;
-#ifdef IORING_OP_NOP
-        ops["nop"] = io_uring_opcode_supported(probe, IORING_OP_NOP) != 0;
-#endif
-#ifdef IORING_OP_READ
-        ops["read"] = io_uring_opcode_supported(probe, IORING_OP_READ) != 0;
-#endif
-#ifdef IORING_OP_WRITE
-        ops["write"] = io_uring_opcode_supported(probe, IORING_OP_WRITE) != 0;
-#endif
-#ifdef IORING_OP_READV
-        ops["readv"] = io_uring_opcode_supported(probe, IORING_OP_READV) != 0;
-#endif
-#ifdef IORING_OP_WRITEV
-        ops["writev"] = io_uring_opcode_supported(probe, IORING_OP_WRITEV) != 0;
-#endif
-#ifdef IORING_OP_READ_FIXED
-        ops["read_fixed"] = io_uring_opcode_supported(probe, IORING_OP_READ_FIXED) != 0;
-#endif
-#ifdef IORING_OP_WRITE_FIXED
-        ops["write_fixed"] = io_uring_opcode_supported(probe, IORING_OP_WRITE_FIXED) != 0;
-#endif
-#ifdef IORING_OP_FSYNC
-        ops["fsync"] = io_uring_opcode_supported(probe, IORING_OP_FSYNC) != 0;
-#endif
-#ifdef IORING_OP_SYNC_FILE_RANGE
-        ops["sync_file_range"] = io_uring_opcode_supported(probe, IORING_OP_SYNC_FILE_RANGE) != 0;
-#endif
-#ifdef IORING_OP_FALLOCATE
-        ops["fallocate"] = io_uring_opcode_supported(probe, IORING_OP_FALLOCATE) != 0;
-#endif
-#ifdef IORING_OP_FADVISE
-        ops["fadvise"] = io_uring_opcode_supported(probe, IORING_OP_FADVISE) != 0;
-#endif
-#ifdef IORING_OP_MADVISE
-        ops["madvise"] = io_uring_opcode_supported(probe, IORING_OP_MADVISE) != 0;
-#endif
-#ifdef IORING_OP_OPENAT
-        ops["openat"] = io_uring_opcode_supported(probe, IORING_OP_OPENAT) != 0;
-#endif
-#ifdef IORING_OP_OPENAT2
-        ops["openat2"] = io_uring_opcode_supported(probe, IORING_OP_OPENAT2) != 0;
-#endif
-#ifdef IORING_OP_CLOSE
-        ops["close"] = io_uring_opcode_supported(probe, IORING_OP_CLOSE) != 0;
-#endif
-#ifdef IORING_OP_STATX
-        ops["statx"] = io_uring_opcode_supported(probe, IORING_OP_STATX) != 0;
-#endif
-#ifdef IORING_OP_SPLICE
-        ops["splice"] = io_uring_opcode_supported(probe, IORING_OP_SPLICE) != 0;
-#endif
-#ifdef IORING_OP_MKDIRAT
-        ops["mkdirat"] = io_uring_opcode_supported(probe, IORING_OP_MKDIRAT) != 0;
-#endif
-#ifdef IORING_OP_RENAMEAT
-        ops["renameat"] = io_uring_opcode_supported(probe, IORING_OP_RENAMEAT) != 0;
-#endif
-#ifdef IORING_OP_UNLINKAT
-        ops["unlinkat"] = io_uring_opcode_supported(probe, IORING_OP_UNLINKAT) != 0;
-#endif
-#ifdef IORING_OP_READ_MULTISHOT
-        ops["read_multishot"] = io_uring_opcode_supported(probe, IORING_OP_READ_MULTISHOT) != 0;
-#endif
+        for (const auto& k : kProbeOps) {
+            ops[k.name] = io_uring_opcode_supported(probe, k.op) != 0;
+        }
         d["opcodes"] = ops;
         io_uring_free_probe(probe);
     } else {
