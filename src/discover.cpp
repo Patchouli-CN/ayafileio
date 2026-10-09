@@ -5,6 +5,8 @@
 #include "discover.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #ifdef HAVE_IO_URING
 #include <liburing.h>
@@ -93,16 +95,21 @@ py::dict io_uring_detail() {
     d["available"] = true;
     d["completion_model"] = true;  // SQE/CQE 提交-完成模型
 
+    // 特性位：读 io_uring_queue_init_params 回填的 params.features——
+    // 那是内核写进我们自己结构体的字段，uapi 自 5.1 起就有；不碰
+    // ring.features（liburing 2.x 才把 features 收进 struct io_uring，
+    // manylinux_2_28 的老 liburing 没有这个成员，发版 CI 实测编译失败）
+    struct io_uring_params params;
+    memset(&params, 0, sizeof(params));
     struct io_uring ring;
-    if (io_uring_queue_init(8, &ring, 0) != 0) {
+    if (io_uring_queue_init_params(8, &ring, &params) != 0) {
         // 可用性探测通过但重建失败（fd 耗尽等瞬态）：报半个结果
         d["probe_error"] = true;
         return d;
     }
 
-    // ring.features：setup 时内核回报的特性位。
     // 逐位 #ifdef 防御：发行版 backport 的 liburing 头文件可能缺新宏
-    unsigned f = ring.features;
+    unsigned f = params.features;
     py::dict feats;
 #ifdef IORING_FEAT_SINGLE_MMAP
     feats["single_mmap"] = (f & IORING_FEAT_SINGLE_MMAP) != 0;
@@ -180,7 +187,9 @@ py::dict io_uring_detail() {
             ops[k.name] = io_uring_opcode_supported(probe, k.op) != 0;
         }
         d["opcodes"] = ops;
-        io_uring_free_probe(probe);
+        // get_probe* 返回的是 malloc 内存；io_uring_free_probe 是
+        // liburing 2.x 才有的包装，老版本直接 free（语义相同）
+        free(probe);
     } else {
         d["opcodes"] = py::none();  // 内核 < 5.6，没有 PROBE 注册命令
     }
