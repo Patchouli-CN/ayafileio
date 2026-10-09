@@ -2,6 +2,8 @@
 
 from typing import TypedDict
 
+from ._types import BackendInfo
+
 from ._ayafileio import (  # type: ignore[missing-imports]
     configure as _configure,
     get_config as _get_config,
@@ -108,8 +110,6 @@ def get_config() -> AyafileioConfig:
     """
     config = _get_config()
     return config  # type: ignore[return-value]
-
-
 def reset_config() -> None:
     """重置配置为默认值。"""
     global _CACHE_MAX_SIZE, _CACHE_ENABLED
@@ -118,7 +118,7 @@ def reset_config() -> None:
     _reset_config()
 
 
-def get_backend_info() -> dict[str, str]:
+def get_backend_info() -> BackendInfo:
     """获取当前后端信息。
 
     :rtype: 包含 ``platform``、``backend``、``is_truly_async``、``os_version``

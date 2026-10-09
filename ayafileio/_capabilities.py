@@ -9,7 +9,9 @@
 
 import os
 import sys
-from typing import Any
+from typing import cast
+
+from ._types import Capabilities
 
 from ._ayafileio import get_capabilities as _native_get_capabilities
 
@@ -27,7 +29,7 @@ def _fast_copy_available() -> bool:
     return hasattr(os, "copy_file_range")
 
 
-def get_capabilities() -> dict[str, Any]:
+def get_capabilities() -> Capabilities:
     """获取能力矩阵：后端身份 + 库级特性 + 后端原生能力明细。
 
     返回字典包含 ``get_backend_info()`` 的全部键，外加：
@@ -54,7 +56,7 @@ def get_capabilities() -> dict[str, Any]:
         if caps["backend_detail"].get("sqpoll"):
             ayafileio.configure({"io_uring_sqpoll": True})
     """
-    caps: dict[str, Any] = _native_get_capabilities()
+    caps = cast(Capabilities, _native_get_capabilities())
     caps["features"] = {
         "positional_io": True,
         "batch_positional_io": True,

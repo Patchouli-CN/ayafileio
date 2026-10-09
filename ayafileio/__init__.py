@@ -39,9 +39,9 @@ from ._whole import (
     write_text_many,
 )
 from ._wrap import wrap_file
-from ._types import AyaFileIO
+from ._types import AyaFileIO, BackendInfo, Capabilities
 from ._capabilities import get_capabilities
-from ._config import configure, get_config, reset_config, get_backend_info
+from ._config import AyafileioConfig, configure, get_config, reset_config, get_backend_info
 from ._compat import (
     set_handle_pool_limits,
     get_handle_pool_limits,
@@ -69,6 +69,9 @@ __all__ = [
     "write_text_many",
     "AyaFileIO",
     "AsyncFile",
+    "AyafileioConfig",
+    "BackendInfo",
+    "Capabilities",
     "get_capabilities",
     "configure",
     "get_config",
