@@ -110,10 +110,39 @@ def test_cached_consistency():
     check("重复调用结果一致（探测已缓存）", a == b)
 
 
+def test_feature_validation():
+    print("[test_feature_validation]")
+    caps = ayafileio.get_capabilities()
+    try:
+        if sys.platform == "linux" and caps["backend"] == "io_uring":
+            if caps["backend_detail"]["sqpoll"]:
+                ayafileio.configure({"io_uring_sqpoll": True})
+                check("sqpoll 支持时可开启", ayafileio.get_config()["io_uring_sqpoll"] is True)
+            else:
+                try:
+                    ayafileio.configure({"io_uring_sqpoll": True})
+                    raise SystemExit("应该抛 ValueError")
+                except ValueError:
+                    check("sqpoll 不支持时显式报错", True)
+        else:
+            # 线程池降级 / Windows / macOS：开启 io_uring_sqpoll 显式报错
+            try:
+                ayafileio.configure({"io_uring_sqpoll": True})
+                raise SystemExit("应该抛 ValueError")
+            except ValueError:
+                check("非 io_uring 后端开启 sqpoll 报错", True)
+        # 关闭永远允许——跨平台代码可以无条件写 False
+        ayafileio.configure({"io_uring_sqpoll": False})
+        check("sqpoll=False 无条件允许", ayafileio.get_config()["io_uring_sqpoll"] is False)
+    finally:
+        ayafileio.reset_config()
+
+
 if __name__ == "__main__":
     test_backend_info()
     test_capabilities_structure()
     test_library_features()
     test_backend_detail()
+    test_feature_validation()
     test_cached_consistency()
     print(f"\nAll {PASSED} checks passed.")

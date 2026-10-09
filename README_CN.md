@@ -157,7 +157,7 @@ ayafileio.reset_config()  # 恢复默认
 | `close_timeout_ms` | 4000 | 关闭时等待 pending I/O 的超时 (ms) |
 | `iocp_batch_size` | 64 | IOCP 批量收割完成事件数 (Windows, 1–256) |
 | `io_uring_queue_depth` | 256 | io_uring 队列深度 (Linux) |
-| `io_uring_sqpoll` | False | 是否启用 SQPOLL 模式 (Linux) |
+| `io_uring_sqpoll` | False | 是否启用 SQPOLL 模式 (Linux)。开启时按探测到的内核能力校验，不支持则抛 `ValueError`——建议先查 `get_capabilities()` |
 
 ## API 参考
 

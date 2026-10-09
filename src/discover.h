@@ -23,6 +23,10 @@ std::string os_version();
 // io_uring 运行时可用性（试建一个 ring；结果缓存）
 bool io_uring_available();
 
+// SQPOLL 实测支持（试建 SQPOLL ring；结果缓存）。
+// 5.11 之前需要特权，版本号说了不算，直接建一个最诚实
+bool io_uring_sqpoll_supported();
+
 // io_uring 能力明细：ring.features 特性位 + opcode PROBE + SQPOLL 实测。
 // 调用前需确认 io_uring_available() 为 true。
 py::dict io_uring_detail();

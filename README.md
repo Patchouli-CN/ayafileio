@@ -161,7 +161,7 @@ ayafileio.reset_config()  # back to defaults
 | `close_timeout_ms` | 4000 | Close timeout for pending I/O (ms) |
 | `iocp_batch_size` | 64 | IOCP batch completion harvest size (Windows, 1–256) |
 | `io_uring_queue_depth` | 256 | io_uring queue depth (Linux) |
-| `io_uring_sqpoll` | False | Enable SQPOLL mode (Linux) |
+| `io_uring_sqpoll` | False | Enable SQPOLL mode (Linux). Validated against probed kernel capabilities — raises `ValueError` if unsupported; check `get_capabilities()` first |
 
 ## API reference
 

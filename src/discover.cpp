@@ -62,6 +62,20 @@ std::string os_version() {
 
 #ifdef HAVE_IO_URING
 
+bool io_uring_sqpoll_supported() {
+    // SQPOLL 实测：5.11 之前需要特权，版本号说了不算，建一个试试最诚实
+    static const bool supported = []() {
+        if (!io_uring_available()) return false;
+        struct io_uring ring;
+        if (io_uring_queue_init(2, &ring, IORING_SETUP_SQPOLL) == 0) {
+            io_uring_queue_exit(&ring);
+            return true;
+        }
+        return false;
+    }();
+    return supported;
+}
+
 bool io_uring_available() {
     static const bool available = []() {
         struct io_uring ring;
@@ -173,14 +187,7 @@ py::dict io_uring_detail() {
 
     io_uring_queue_exit(&ring);
 
-    // SQPOLL 实测：5.11 之前需要特权，版本号说了不算，建一个试试最诚实
-    struct io_uring sqring;
-    if (io_uring_queue_init(2, &sqring, IORING_SETUP_SQPOLL) == 0) {
-        d["sqpoll"] = true;
-        io_uring_queue_exit(&sqring);
-    } else {
-        d["sqpoll"] = false;
-    }
+    d["sqpoll"] = io_uring_sqpoll_supported();
     return d;
 }
 

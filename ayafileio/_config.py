@@ -77,6 +77,9 @@ def configure(options: AyafileioConfig) -> None:
         提交队列深度（默认 256，范围 1-4096）。
     ``io_uring_sqpoll``
         是否启用 SQPOLL 模式（默认 ``False``）。
+        设为 ``True`` 时会按探测到的内核能力校验，不支持则抛
+        ``ValueError``——建议先查
+        ``get_capabilities()['backend_detail']['sqpoll']``。
 
     **ResultBatcher / 自适应批处理**
     ``adaptive_batch``

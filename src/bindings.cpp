@@ -174,7 +174,29 @@ static void py_configure(py::dict options) {
         cfg.iocp_batch_size = val;
     }
     if (options.contains("io_uring_sqpoll")) {
-        cfg.io_uring_sqpoll = py::cast<bool>(options["io_uring_sqpoll"]);
+        bool val = py::cast<bool>(options["io_uring_sqpoll"]);
+        if (val) {
+            // 能力校验：请求内核不支持的能力时显式报错，不静默接受。
+            // 关（false）永远允许——跨平台代码可以无条件写 False
+#ifdef HAVE_IO_URING
+            if (!io_uring_available()) {
+                throw py::value_error(
+                    "io_uring_sqpoll=True requested, but io_uring is unavailable "
+                    "on this system (backend: thread_pool). "
+                    "Check ayafileio.get_capabilities()['backend_detail'] first.");
+            }
+            if (!io_uring_sqpoll_supported()) {
+                throw py::value_error(
+                    "io_uring_sqpoll=True requested, but this kernel cannot create "
+                    "an SQPOLL ring (needs kernel 5.11+ or privileges). "
+                    "Check ayafileio.get_capabilities()['backend_detail']['sqpoll'] first.");
+            }
+#else
+            throw py::value_error(
+                "io_uring_sqpoll is only meaningful on the Linux io_uring backend");
+#endif
+        }
+        cfg.io_uring_sqpoll = val;
     }
     if (options.contains("adaptive_batch")) {
         cfg.adaptive_batch = py::cast<bool>(options["adaptive_batch"]);
