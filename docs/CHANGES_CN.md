@@ -5,6 +5,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.12.0] - 2026-10-10
+
+### 新增
+- **运行时能力发现：`ayafileio.get_capabilities()`。** 返回 `get_backend_info()` 的全部内容，外加两个字典：`features`（库级能力，键跨平台统一：`positional_io` / `batch_positional_io` / `zero_copy_readinto` / `chunked_streaming` / `async_open` / `adaptive_batching` / `fast_file_copy`）和 `backend_detail`（当前后端在此机器上探测到的原生能力）。探测原则是**问内核，不猜版本号**：io_uring 的 opcode 支持走 `IORING_REGISTER_PROBE` 逐个实测（read/write/statx/renameat/mkdirat 等 21 项），SQPOLL 直接试建一个 ring 验证（5.11 之前需要特权，版本号说了不算），特性位读 `ring.features`——backport 内核报的也是真实能力。Windows 上报 `completion_model` / `batch_harvest` / `handle_pool`；macOS 诚实标注 `completion_model: false`（GCD 文件通道由内核托管 workqueue 线程执行阻塞 pread/pwrite，非提交-完成模型）并保留 `mincore_fastpath` 标记。探测逻辑独立为 `src/discover.{h,cpp}`，结果进程内缓存，重复调用零开销。
+- **`get_backend_info()` 新增 `os_version` 键。** Windows 走 `RtlGetVersion`（不受 manifest 兼容模式欺骗），POSIX 走 `uname(2)`。纯新增，向后兼容。
+- **能力校验的特性开关。** `configure({"io_uring_sqpoll": True})` 现在按探测到的内核能力校验：内核不支持 SQPOLL、io_uring 后端不可用、或非 Linux 平台时当场抛 `ValueError` 并指引先查 `get_capabilities()`——不再静默接受一个建 ring 时才失败的配置。设为 `False` 无条件允许，跨平台代码可以放心写。SQPOLL 探测抽为缓存的 `io_uring_sqpoll_supported()`，能力矩阵与 configure 校验共用同一次试建，不重复建 ring。
+- **字典返回值的 TypedDict 注解。** 新增 `BackendInfo`（`platform`/`backend` 为 Literal）、`Capabilities`（继承 BackendInfo，含 `LibraryFeatures` 与各后端的 detail TypedDict 联合）、`AyafileioConfig` 顶层导出——`py.typed` 包的用户现在在 IDE 里对能力矩阵有完整补全。
+
+### 变更
+- **`warn_fake_async()` 改为读取扩展的权威探测结论。** 原实现跑在 import 时、扩展加载之前，只能靠 ctypes 加载 liburing、解析内核版本字符串、检查头文件路径三重猜测——且可能与真实后端不一致（容器 seccomp 禁掉 io_uring syscall 时，ctypes 说"有"、建 ring 却失败）。现在调用点挪到扩展加载之后，直接读 `get_backend_info()` 的 `is_truly_async`（Linux 上是真的试建过 ring 的结论），警告消息附带平台、内核版本与 `get_capabilities()` 自查指引。删除约 100 行猜测代码。
+
+### CI / 测试
+- `tests/test_capabilities.py`（26 项检查，含平台分支断言与缓存一致性）接入三平台测试流程；"Check backend info" 步骤现在输出完整能力矩阵，CI 日志兼职内核能力探测器。
+- 修复 CI 抓到的两处问题：io_uring opcode 探测改用 uapi ABI 编号（`IORING_OP_*` 是枚举常量而非宏，`#ifdef` 全部静默为假导致矩阵为空——编号已对照内核 `include/uapi/linux/io_uring.h` 核实，`io_uring_opcode_supported` 自带 `op > last_op` 边界检查，编译不再依赖 liburing 头文件年代）；Windows 上 `_winapi.CopyFile2` 为 Python 3.12+ 才有，3.10/3.11 的 `fast_file_copy` 现在与 `acopy` 的实际行为一致地报 `False`。
+
 ## [1.11.3] - 2026-10-08
 
 ### 修复

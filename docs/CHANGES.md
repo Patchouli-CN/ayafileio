@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-10-10
+
+### Added
+- **Runtime capability discovery: `ayafileio.get_capabilities()`.** Returns everything in `get_backend_info()` plus two dicts: `features` (library-level capabilities with uniform keys across platforms: `positional_io` / `batch_positional_io` / `zero_copy_readinto` / `chunked_streaming` / `async_open` / `adaptive_batching` / `fast_file_copy`) and `backend_detail` (natively probed capabilities of the active backend on this machine). The probing principle is **ask the kernel, don't parse version strings**: io_uring opcode support is probed per-op via `IORING_REGISTER_PROBE` (21 ops: read/write/statx/renameat/mkdirat/...), SQPOLL is verified by actually creating a trial ring (it needs privileges before 5.11 — version numbers can't answer that), feature bits come from `ring.features` — backported kernels report what they truly support. Windows reports `completion_model` / `batch_harvest` / `handle_pool`; macOS honestly reports `completion_model: false` (GCD file channels run blocking pread/pwrite on kernel-managed workqueue threads, not a submission/completion model) alongside its `mincore_fastpath`. Probing lives in new `src/discover.{h,cpp}`, results cached process-wide.
+- **`get_backend_info()` gains an `os_version` key.** `RtlGetVersion` on Windows (immune to manifest compatibility lies), `uname(2)` elsewhere. Additive and backward compatible.
+- **Capability-validated feature switches.** `configure({"io_uring_sqpoll": True})` is now validated against the probed kernel capability: raises `ValueError` with guidance when SQPOLL is unsupported, when the io_uring backend itself is unavailable, or on non-Linux platforms — instead of silently accepting a configuration that would only fail at ring-creation time. Setting `False` is always allowed, so cross-platform code can write it unconditionally. The SQPOLL trial-ring probe is now a cached `io_uring_sqpoll_supported()` shared by the capability matrix and the `configure()` validation — one probe, two consumers.
+- **TypedDict annotations for the returned dicts.** New `BackendInfo` (`platform`/`backend` as Literals), `Capabilities` (extends BackendInfo with `LibraryFeatures` and a per-backend detail union), and top-level export of `AyafileioConfig` — `py.typed` users get full IDE autocomplete on the capability matrix.
+
+### Changed
+- **`warn_fake_async()` now reads the extension's authoritative probe.** The old implementation ran at import time, before the native extension loaded, so it guessed with ctypes liburing loading, kernel version string parsing, and header-path checks — and could disagree with the real backend (seccomp-blocked io_uring in containers: ctypes says yes, ring creation says no). The call site moved below the extension import and now reads `get_backend_info()`'s `is_truly_async` (on Linux, a conclusion from actually building a ring). The warning message carries platform, kernel version, and a pointer to `get_capabilities()`. ~100 lines of guesswork deleted.
+
+### CI / Tests
+- `tests/test_capabilities.py` (26 checks with per-platform branches and cache-consistency) wired into the test steps on all three platforms; the "Check backend info" step now dumps the full capability matrix — CI logs double as a kernel capability probe.
+- Fixed two issues CI caught: io_uring opcode probing switched to uapi ABI numbers (`IORING_OP_*` are enum members, not macros — every `#ifdef` silently evaluated false and the matrix came back empty; numbers verified against the kernel's `include/uapi/linux/io_uring.h`, and `io_uring_opcode_supported` bounds-checks `op > last_op` at runtime, so builds no longer depend on liburing header vintage); `_winapi.CopyFile2` exists only on Python 3.12+, so `fast_file_copy` on 3.10/3.11 now honestly reports `False`, matching `acopy`'s actual behavior.
+
 ## [1.11.3] - 2026-10-08
 
 ### Fixed
