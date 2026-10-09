@@ -101,9 +101,36 @@ async with ayafileio.open("data.bin", "rb") as f:
 import ayafileio
 
 print(ayafileio.get_backend_info())
-# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True}
-# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True}
-# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True}
+# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, 'os_version': '10.0.19045', ...}
+# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, 'os_version': 'Linux 6.5.0-...', ...}
+# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True, 'os_version': 'Darwin 24.5.0', ...}
+```
+
+## Capability discovery
+
+`get_capabilities()` returns everything in `get_backend_info()` plus two extra
+dicts: `features` (library-level capabilities with uniform keys across
+platforms) and `backend_detail` (natively probed capabilities of the active
+backend). Probing asks the kernel directly — io_uring opcodes are checked via
+`IORING_REGISTER_PROBE` rather than version-number tables, so backported
+kernels report what they actually support. Results are cached process-wide.
+
+```python
+caps = ayafileio.get_capabilities()
+
+caps["features"]
+# {'positional_io': True, 'batch_positional_io': True, 'zero_copy_readinto': True,
+#  'chunked_streaming': True, 'async_open': True, 'adaptive_batching': True,
+#  'fast_file_copy': True}   # fast_file_copy: copy_file_range / CopyFile2 available
+
+caps["backend_detail"]   # keys depend on the backend, e.g. Linux io_uring:
+# {'available': True, 'completion_model': True, 'sqpoll': True,
+#  'features': {'single_mmap': True, 'fast_poll': True, ...},
+#  'opcodes': {'read': True, 'write': True, 'statx': True, ...}}  # None on kernels < 5.6
+
+# Typical use: gate optional features on what the kernel actually offers
+if caps["backend_detail"].get("sqpoll"):
+    ayafileio.configure({"io_uring_sqpoll": True})
 ```
 
 ## Configuration
@@ -301,6 +328,7 @@ def configure(options: dict) -> None: ...      # apply unified configuration
 def get_config() -> dict: ...                  # current configuration
 def reset_config() -> None: ...                # reset to defaults
 def get_backend_info() -> dict: ...            # active backend information
+def get_capabilities() -> dict: ...            # capability matrix (features + backend_detail)
 ```
 
 ### Wrapping an existing file

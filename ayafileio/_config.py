@@ -118,6 +118,7 @@ def reset_config() -> None:
 def get_backend_info() -> dict[str, str]:
     """获取当前后端信息。
 
-    :rtype: 包含 ``platform``、``backend``、``is_truly_async`` 和 ``description`` 的字典。
+    :rtype: 包含 ``platform``、``backend``、``is_truly_async``、``os_version``
+        和 ``description`` 的字典。
     """
     return _get_backend_info()

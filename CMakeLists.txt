@@ -92,6 +92,7 @@ set(SOURCES
     src/result_batcher.cpp
     src/file_handle.cpp
     src/io_backend.cpp
+    src/discover.cpp
 )
 
 # 根据平台添加后端源文件

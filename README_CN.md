@@ -98,9 +98,35 @@ async with ayafileio.open("data.bin", "rb") as f:
 import ayafileio
 
 print(ayafileio.get_backend_info())
-# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True}
-# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True}
-# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True}
+# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, 'os_version': '10.0.19045', ...}
+# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, 'os_version': 'Linux 6.5.0-...', ...}
+# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True, 'os_version': 'Darwin 24.5.0', ...}
+```
+
+## 能力发现
+
+`get_capabilities()` 返回 `get_backend_info()` 的全部内容，外加两个字典：
+`features`（库级能力，键跨平台统一）和 `backend_detail`（当前后端在此机器
+上探测到的原生能力）。探测直接问内核——io_uring 的 opcode 支持情况走
+`IORING_REGISTER_PROBE` 实测，不查版本号表，backport 内核报的也是真实
+能力。结果进程内缓存，重复调用零开销。
+
+```python
+caps = ayafileio.get_capabilities()
+
+caps["features"]
+# {'positional_io': True, 'batch_positional_io': True, 'zero_copy_readinto': True,
+#  'chunked_streaming': True, 'async_open': True, 'adaptive_batching': True,
+#  'fast_file_copy': True}   # fast_file_copy：copy_file_range / CopyFile2 可用
+
+caps["backend_detail"]   # 键随后端不同，以 Linux io_uring 为例：
+# {'available': True, 'completion_model': True, 'sqpoll': True,
+#  'features': {'single_mmap': True, 'fast_poll': True, ...},
+#  'opcodes': {'read': True, 'write': True, 'statx': True, ...}}  # 内核 < 5.6 时为 None
+
+# 典型用法：按内核实际能力决定是否启用可选特性
+if caps["backend_detail"].get("sqpoll"):
+    ayafileio.configure({"io_uring_sqpoll": True})
 ```
 
 ## 配置
@@ -285,6 +311,7 @@ def configure(options: dict) -> None: ...      # 统一配置
 def get_config() -> dict: ...                   # 获取当前配置
 def reset_config() -> None: ...                 # 重置为默认值
 def get_backend_info() -> dict: ...             # 获取后端信息
+def get_capabilities() -> dict: ...             # 能力矩阵（features + backend_detail）
 ```
 
 ### 包装已有文件

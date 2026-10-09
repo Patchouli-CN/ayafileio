@@ -19,7 +19,9 @@
 #include "handle_pool.hpp"
 #include "config.hpp"
 #include "pool.hpp"
+#include "discover.h"
 #include "global_thread_pool.hpp"
+#include <nanobind/stl/string.h>
 #include <algorithm>
 
 // nanobind bindings — 实现全部位于 namespace ayafileio，此处引入
@@ -225,27 +227,17 @@ static void py_reset_config() {
 
 static py::dict py_get_backend_info() {
     py::dict info;
-    
+    info["os_version"] = os_version();
+
 #ifdef _WIN32
     info["platform"] = "windows";
     info["backend"] = "iocp";
     info["is_truly_async"] = true;
     info["description"] = "I/O Completion Ports - native async I/O";
-    
+
 #elif defined(HAVE_IO_URING)
-    // 运行时检测 io_uring 是否真的可用
-    static bool io_uring_available = []() {
-        struct io_uring ring;
-        int ret = io_uring_queue_init(8, &ring, 0);
-        if (ret == 0) {
-            io_uring_queue_exit(&ring);
-            return true;
-        }
-        return false;
-    }();
-    
     info["platform"] = "linux";
-    if (io_uring_available) {
+    if (io_uring_available()) {
         info["backend"] = "io_uring";
         info["is_truly_async"] = true;
         info["description"] = "io_uring - native async I/O (Linux 5.1+)";
@@ -254,56 +246,11 @@ static py::dict py_get_backend_info() {
         info["is_truly_async"] = false;
         info["description"] = "Thread pool - fallback mode (io_uring not available)";
     }
-    
+
 #elif defined(__APPLE__)
     info["platform"] = "macos";
-    
-    // 运行时检测 Dispatch I/O 是否真的可用
-    static bool gcd_available = []() {
-        // 尝试创建测试用的 dispatch queue
-        dispatch_queue_t test_queue = dispatch_queue_create(
-            "com.ayafileio.test", 
-            DISPATCH_QUEUE_SERIAL
-        );
-        if (!test_queue) {
-            return false;
-        }
-        
-        // 创建临时文件测试 Dispatch I/O
-        char tmp_path[] = "/tmp/ayafileio_test_XXXXXX";
-        int fd = mkstemp(tmp_path);
-        if (fd == -1) {
-            dispatch_release(test_queue);
-            return false;
-        }
-        
-        // 尝试创建 dispatch I/O channel
-        dispatch_io_t test_channel = dispatch_io_create(
-            DISPATCH_IO_RANDOM,
-            fd,
-            test_queue,
-            ^(int error) {
-                // cleanup handler - 文件描述符会在这里被关闭
-            }
-        );
-        
-        bool available = (test_channel != nullptr);
-        
-        if (test_channel) {
-            dispatch_io_close(test_channel, DISPATCH_IO_STOP);
-            dispatch_release(test_channel);
-        } else {
-            // 如果 channel 创建失败，手动关闭 fd
-            close(fd);
-        }
-        
-        unlink(tmp_path);
-        dispatch_release(test_queue);
-        
-        return available;
-    }();
-    
-    if (gcd_available) {
+
+    if (gcd_dispatch_io_available()) {
         info["backend"] = "dispatch_io";
         info["is_truly_async"] = true;
         info["description"] = "Dispatch I/O (GCD) - native async I/O";
@@ -312,15 +259,23 @@ static py::dict py_get_backend_info() {
         info["is_truly_async"] = false;
         info["description"] = "Thread pool - fallback mode (Dispatch I/O not available)";
     }
-    
+
 #else
     info["platform"] = "posix";
     info["backend"] = "thread_pool";
     info["is_truly_async"] = false;
     info["description"] = "Thread pool - fallback mode";
 #endif
-    
+
     return info;
+}
+
+// 能力发现：身份信息之外，附加当前后端在此机器上探测到的原生能力明细
+// （库级能力矩阵由 Python 层 _capabilities.py 拼装）
+static py::dict py_get_capabilities() {
+    py::dict caps = py_get_backend_info();
+    caps["backend_detail"] = backend_detail();
+    return caps;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -555,19 +510,50 @@ Example:
     m.def("reset_config", &py_reset_config, 
           "Reset configuration to defaults");
 
-    m.def("get_backend_info", &py_get_backend_info, 
+    m.def("get_backend_info", &py_get_backend_info,
           R"doc(Get current backend information.
 
 Returns:
     Dictionary with keys:
         - platform: str ("windows", "linux", "macos", "posix")
-        - backend: str ("iocp", "io_uring", "thread_pool")
+        - backend: str ("iocp", "io_uring", "dispatch_io", "thread_pool")
         - is_truly_async: bool
+        - os_version: str (kernel version, e.g. "10.0.26100" / "Linux 6.5.0-...")
         - description: str
 
 Example:
     >>> info = ayafileio.get_backend_info()
     >>> print(info)
-    {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, 'description': '...'}
+    {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, ...}
+)doc");
+
+    m.def("get_capabilities", &py_get_capabilities,
+          R"doc(Get backend identity plus natively probed capability detail.
+
+Everything in get_backend_info(), plus a backend_detail dict whose keys
+depend on the active backend:
+
+    iocp (Windows):
+        completion_model, batch_harvest, handle_pool
+    io_uring (Linux):
+        available, completion_model, sqpoll,
+        features (ring.features bit matrix, e.g. single_mmap, fast_poll),
+        opcodes (per-opcode support via IORING_REGISTER_PROBE; None on
+                 kernels < 5.6 that lack the probe command)
+    dispatch_io (macOS):
+        dispatch_io, completion_model, kernel_managed_workqueue,
+        mincore_fastpath
+    thread_pool (fallback):
+        completion_model (False), note
+
+Capabilities are probed by asking the kernel directly (probe ring /
+trial ring creation) rather than parsing kernel version strings, so
+backported kernels report what they actually support. Results are
+cached process-wide; repeated calls are free.
+
+Example:
+    >>> caps = ayafileio.get_capabilities()["backend_detail"]
+    >>> caps["sqpoll"]          # Linux io_uring only
+    True
 )doc");
 }
