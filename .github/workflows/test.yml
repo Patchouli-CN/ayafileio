@@ -77,7 +77,7 @@ jobs:
     - name: Check backend info
       timeout-minutes: 1
       run: |
-        python -c "import ayafileio; print(ayafileio.get_backend_info())"
+        python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
     - name: Configure core dump
       run: |
         ulimit -c unlimited
@@ -98,9 +98,11 @@ jobs:
         EXIT_BASE=$?
         python tests/test_wrap_file.py
         EXIT_WRAP=$?
-        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP))
+        python tests/test_capabilities.py
+        EXIT_CAP=$?
+        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP + EXIT_CAP))
         set -e
-        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP"
+        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -189,7 +191,7 @@ jobs:
     - name: Check backend info
       timeout-minutes: 1
       run: |
-        python -c "import ayafileio; print(ayafileio.get_backend_info())"
+        python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
     - name: Configure crash dumps (Windows)
       timeout-minutes: 1
       shell: pwsh
@@ -214,8 +216,10 @@ jobs:
         $EXIT_BASE = $LASTEXITCODE
         python tests/test_wrap_file.py
         $EXIT_WRAP = $LASTEXITCODE
-        $EXIT_CODE = $EXIT_BASE + $EXIT_WRAP
-        Write-Host "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP"
+        python tests/test_capabilities.py
+        $EXIT_CAP = $LASTEXITCODE
+        $EXIT_CODE = $EXIT_BASE + $EXIT_WRAP + $EXIT_CAP
+        Write-Host "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP"
         echo "EXIT_CODE=$EXIT_CODE" >> $env:GITHUB_ENV
         if ($EXIT_CODE -ne 0) { exit $EXIT_CODE }
     - name: Collect and analyze crash dumps (Windows)
@@ -296,7 +300,7 @@ jobs:
     - name: Check backend info
       timeout-minutes: 1
       run: |
-        python -c "import ayafileio; print(ayafileio.get_backend_info())"
+        python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
     - name: Configure core dump (macOS)
       run: |
         ulimit -c unlimited
@@ -311,8 +315,10 @@ jobs:
         EXIT_BASE=$?
         python tests/test_wrap_file.py
         EXIT_WRAP=$?
-        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP))
-        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP"
+        python tests/test_capabilities.py
+        EXIT_CAP=$?
+        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP + EXIT_CAP))
+        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -365,7 +371,7 @@ jobs:
         pip install -e . -v
     - name: Check backend info
       run: |
-        python -c "import ayafileio; print(ayafileio.get_backend_info())"
+        python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
     - name: Configure crash dumps (Windows)
       if: runner.os == 'Windows'
       timeout-minutes: 1
