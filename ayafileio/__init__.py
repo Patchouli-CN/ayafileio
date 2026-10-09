@@ -23,11 +23,9 @@ del _pkg_version, PackageNotFoundError
 
 from .util import warn_fake_async
 
-warn_fake_async()
-
 from . import _cleanup  # noqa: F401  # 副作用：注册 atexit
 
-from ._async_file import AsyncFile
+from ._async_file import AsyncFile  # 加载 _ayafileio 原生扩展
 from ._copy import acopy
 from ._open import open, aopen
 from ._whole import (
@@ -52,6 +50,9 @@ from ._compat import (
     drain_handle_pool,
     drain_buffer_pool,
 )
+
+# 扩展已加载，后端探测结论可信：此时发出假异步警告（如有）
+warn_fake_async()
 
 __all__ = [
     "open",
