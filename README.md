@@ -245,7 +245,9 @@ async with ayafileio.open("data.bin", "w+b") as f:
 accepts an iterable of `(offset, data)` pairs and returns counts in input order.
 Both require a writable binary file, reject append mode, and preserve the logical
 file position. They accept `bytes`, `bytearray`, and contiguous `memoryview`
-buffers, which the backend copies on submission. Positioned writes rewind and
+buffers. Writes are zero-copy: the backend holds the caller's buffer until the
+write completes, so don't resize or modify it in place while the write is in
+flight (same contract as `readinto()`). Positioned writes rewind and
 discard any `readline()` read-ahead so subsequent reads see the updated content.
 An empty batch returns `[]`; an empty buffer returns `0`. Offsets must be
 nonnegative, offset plus length must fit a signed 64-bit integer, and each buffer

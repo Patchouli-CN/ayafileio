@@ -239,7 +239,8 @@ async with ayafileio.open("data.bin", "w+b") as f:
 
 `write_at(offset, data)` 返回实际写入字节数；`write_many(writes)` 接受可迭代的
 `(offset, data)`，并按输入顺序返回字节数列表。二者仅支持可写的二进制文件，拒绝追加模式，
-不改变逻辑文件位置。支持 `bytes`、`bytearray` 和连续 `memoryview`；底层提交时复制数据。
+不改变逻辑文件位置。支持 `bytes`、`bytearray` 和连续 `memoryview`；写入走零拷贝，
+后端在写完成前一直持有调用方缓冲区，期间不要 resize 或原地修改它（与 `readinto()` 同级契约）。
 位置写入会丢弃并回退 `readline()` 的预读缓存，以保证后续读取能看到新内容。
 空批次返回 `[]`，空数据返回 `0`；偏移必须非负，偏移加长度不能超过有符号 64 位范围，
 每项数据长度最多为 4 GiB − 1 字节。与 `write()` 一样，调用者应检查短写返回值。

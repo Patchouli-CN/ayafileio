@@ -848,7 +848,8 @@ class AsyncFile(Generic[T]):
         Semantics match write_at(). This is not an atomic transaction: an
         error can leave other writes committed. Submitted I/O is drained
         before an error is raised. Avoid overlapping ranges when ordering
-        matters. Mutable buffers are copied by the backend on submission.
+        matters. Buffers are held zero-copy until each write completes; do
+        not resize or mutate them while the batch is in flight.
         """
         self._check_positioned_write()
         await self._rewind_readahead()

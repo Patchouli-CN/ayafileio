@@ -157,6 +157,8 @@ submitted requests drain, and earlier writes may already be on disk.
 Overlapping ranges have unspecified ordering; await them separately when
 order matters. Offsets must be nonnegative and fit signed 64-bit together
 with the length. Check for short writes as you would with `write()`.
+Writes are zero-copy: the backend holds your buffer until the write completes,
+so don't resize or modify it in place while it is in flight.
 
 This is the API to reach for when your data layout is known up front: model
 shards, database pages, index regions.
