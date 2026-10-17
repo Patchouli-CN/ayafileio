@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.12.1] - 2026-10-17
+
+### 变更
+- **Windows IOCP 的 `submit_close()` 改为完成信号唤醒，不再 Sleep 轮询。** `pending == 0` 的快速关闭、`CancelIoEx`、GIL 释放、关闭超时和 Session 生命周期语义保持不变；在飞请求改由每个 Session 的计数信号量唤醒 close，同步完成、异步完成、inline 完成和提交失败路径都会发出通知。每次唤醒都会重新检查 pending，早到或冗余信号不会导致提前关闭句柄，同时消除了指数退避轮询带来的等待延迟。
+
+### CI / 测试
+- `tests/test_base.py` 新增 128 个在飞 `read_at` 请求存在时关闭文件的回归场景，验证取消与排空、成功读取内容、任务收尾和 closed 状态。
+
 ## [1.12.0] - 2026-10-10
 
 ### 新增

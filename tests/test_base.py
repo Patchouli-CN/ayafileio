@@ -1069,6 +1069,46 @@ async def test_manual_close():
         path.unlink(missing_ok=True)
 
 
+async def test_close_with_inflight_reads():
+    """Windows IOCP：在飞读取取消并排空后 close 才返回"""
+    if sys.platform != "win32":
+        return
+
+    path = get_temp_path(".bin")
+    block_size = 1024 * 1024
+    block_count = 16
+    try:
+        with open(path, "wb") as file:
+            for index in range(block_count):
+                file.write(bytes([index]) * block_size)
+
+        file = ayafileio.open(path, "rb")
+        try:
+            tasks = [
+                asyncio.create_task(
+                    file.read_at((index % block_count) * block_size, block_size)
+                )
+                for index in range(128)
+            ]
+            await asyncio.sleep(0)
+            await file.close()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            assert file.closed
+            assert len(results) == len(tasks)
+            for index, result in enumerate(results):
+                if isinstance(result, bytes):
+                    expected = bytes([index % block_count]) * block_size
+                    assert result == expected
+                else:
+                    assert isinstance(result, OSError), repr(result)
+        finally:
+            if not file.closed:
+                await file.close()
+    finally:
+        path.unlink(missing_ok=True)
+
+
 async def test_async_iteration():
     path = get_temp_path(".txt")
     try:
@@ -1811,6 +1851,7 @@ def main():
     print("\n📋 上下文管理器测试:")
     runner.run_async("自动关闭", test_auto_close)
     runner.run_async("手动关闭", test_manual_close)
+    runner.run_async("带有在飞读取时关闭", test_close_with_inflight_reads)
 
     print("\n📋 异步迭代器测试:")
     runner.run_async("异步迭代", test_async_iteration)

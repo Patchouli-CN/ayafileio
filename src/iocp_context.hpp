@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <thread>
 #include <vector>
+#include <semaphore>
 
 namespace ayafileio {
 
@@ -35,6 +36,7 @@ struct Session {
                                              // 打开时解析缓存，完成热路径免锁免查表
     PyObject       *create_future = nullptr; // owned
     std::atomic<long> pending{0};
+    std::counting_semaphore<INT32_MAX> close_wake{0};
     bool            owns_fd = true;
     PoolKey         poolKey;
 
@@ -51,6 +53,12 @@ struct Session {
     size_t          cached_buffer_size = 65536;
     size_t          cached_buffer_pool_max = 512;
     unsigned        cached_close_timeout_ms = 4000;
+
+    long complete_request() {
+        long prev = pending.fetch_sub(1, std::memory_order_release);
+        close_wake.release();
+        return prev;
+    }
 
     ~Session() {
         Py_XDECREF(create_future);

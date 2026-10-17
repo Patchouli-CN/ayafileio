@@ -361,7 +361,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
                 session = it->second;
         }
         if (session) {
-            long prev = session->pending.fetch_sub(1, std::memory_order_release);
+            long prev = session->complete_request();
             UR_DEBUG_LOG("process_one SYNC req=%p sid=%llu pending %ld→%ld — deleting",
                          (void*)req, sessionId, prev, prev - 1);
         } else {
@@ -388,7 +388,7 @@ void IOCPContext::process_one(uint64_t sessionId, IORequest *req,
         session = it->second;
     }
 
-    long prev_pending = session->pending.fetch_sub(1, std::memory_order_release);
+    long prev_pending = session->complete_request();
     UR_DEBUG_LOG("process_one ASYNC req=%p sid=%llu pending %ld→%ld err=%lu",
                  (void*)req, sessionId, prev_pending, prev_pending - 1, (unsigned long)err);
 
@@ -700,7 +700,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
             // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
             // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
             // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
-            s->pending.fetch_sub(1, std::memory_order_release);
+            s->complete_request();
             complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
@@ -711,7 +711,7 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
-            s->pending.fetch_sub(1, std::memory_order_relaxed);
+            s->complete_request();
             req->batcher->op_completed();
             UR_DEBUG_LOG("submit_read FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
@@ -823,7 +823,7 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
             // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
             // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
             // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
-            s->pending.fetch_sub(1, std::memory_order_release);
+            s->complete_request();
             complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
@@ -834,7 +834,7 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
-            s->pending.fetch_sub(1, std::memory_order_relaxed);
+            s->complete_request();
             req->batcher->op_completed();
             UR_DEBUG_LOG("submit_read_at FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
@@ -950,7 +950,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
             // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
             // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
             // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
-            s->pending.fetch_sub(1, std::memory_order_release);
+            s->complete_request();
             complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
@@ -961,7 +961,7 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
-            s->pending.fetch_sub(1, std::memory_order_relaxed);
+            s->complete_request();
             req->batcher->op_completed();
             UR_DEBUG_LOG("submit_write FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "WriteFile failed");
@@ -1212,7 +1212,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
             // 完成包，否则 m_outstanding 只增不减，"最后一个在飞 op 完成
             // 立即 flush"永久失效，异步完成的 op 全部退化到等空闲清扫
             // 周期（CI windows-2022 上实测 x1 随机读因此只有 144 ops/s）
-            s->pending.fetch_sub(1, std::memory_order_release);
+            s->complete_request();
             complete_tracked_op(req->batcher);  // 配平记账；归零且有滞留结果时顺手 flush
             mark_sync_done(req);
             REQ_FREE(req);
@@ -1223,7 +1223,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
-            s->pending.fetch_sub(1, std::memory_order_relaxed);
+            s->complete_request();
             req->batcher->op_completed();
             UR_DEBUG_LOG("submit_readinto FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
             PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "ReadFile failed");
@@ -1287,20 +1287,25 @@ PyObject *IOCPContext::submit_close(uint64_t session_id) {
                          session_id, s->cached_close_timeout_ms);
             CancelIoEx(s->handle, NULL);
 
-            unsigned timeout_ms = s->cached_close_timeout_ms;
-            int w = 1;
-            int elapsed = 0;
-            while (elapsed < (int)timeout_ms &&
-                   s->pending.load(std::memory_order_acquire) > 0) {
+            // 完成路径会释放 close_wake；收到信号立即复查，不再 Sleep 轮询。
+            auto wait_started = std::chrono::steady_clock::now();
+            auto deadline = wait_started
+                + std::chrono::milliseconds(s->cached_close_timeout_ms);
+            while (s->pending.load(std::memory_order_acquire) > 0) {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) break;
+                auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now);
+                if (remain.count() <= 0) break;
                 Py_BEGIN_ALLOW_THREADS
-                Sleep(w);
+                [[maybe_unused]] bool acquired = s->close_wake.try_acquire_for(remain);
                 Py_END_ALLOW_THREADS
-                elapsed += w;
-                w = std::min(w * 2, 32);
             }
-            long final_pending = s->pending.load(std::memory_order_acquire);
-            UR_DEBUG_LOG("submit_close sid=%llu — wait done elapsed=%dms final_pending=%ld",
-                         session_id, elapsed, final_pending);
+            [[maybe_unused]] long final_pending = s->pending.load(std::memory_order_acquire);
+            [[maybe_unused]] auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - wait_started).count();
+            UR_DEBUG_LOG("submit_close sid=%llu — wait done elapsed=%lldms final_pending=%ld",
+                         session_id, static_cast<long long>(elapsed), final_pending);
         }
 
         if (s->owns_fd) {

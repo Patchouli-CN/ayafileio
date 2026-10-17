@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] - 2026-10-17
+
+### Changed
+- **Windows IOCP `submit_close()` now wakes on completion signals instead of Sleep polling.** The zero-pending fast path, `CancelIoEx`, GIL release, close timeout, and Session lifetime semantics are unchanged. A per-session counting semaphore now wakes close after synchronous, asynchronous, inline, and failed request completions. Every wake rechecks pending, so early or redundant signals cannot close the handle early, while exponential-backoff polling latency is removed.
+
+### CI / Tests
+- `tests/test_base.py` adds a regression covering close with 128 in-flight `read_at` operations, verifying cancellation and draining, successful read contents, task completion, and the closed state.
+
 ## [1.12.0] - 2026-10-10
 
 ### Added
