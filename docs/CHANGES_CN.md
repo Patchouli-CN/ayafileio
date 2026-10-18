@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [1.13.0] - 2026-10-18
+
+### 新增
+- **Linux 原生 `aopen`（io_uring `OPENAT`）。** Linux 的 io_uring 可用时，`aopen` 现在直接向每个事件循环共享的 ring 提交 `IORING_OP_OPENAT`，CQE 返回 fd 后构造 `AsyncFile`，不再为每次打开创建独立本地 ring 并同步 `io_uring_wait_cqe`，也不再把打开任务交给用户态 C++ 线程池。共享 SQ 溢出补提交、reaper、inline harvest 和 ResultBatcher 均复用现有 I/O 基础设施；ring 或请求初始化失败时保留原 C++ 线程池回退，真实打开错误（如 `ENOENT`/`EACCES`）直接投递。Windows 与 macOS 行为不变。
+- **后端解耦的原生打开架构。** `PyAsyncFile` 移至 `file_handle.hpp`，原生提交与完成逻辑归入 `io_uring_backend`，`file_handle` 负责平台分发，`bindings.cpp` 仅保留通用注册与调用。完成路径明确处理 path/mode/Future 生命周期、fd 接管与异常所有权，避免静默回退、重复 batcher 配平和异常双关。
+
+### CI / 测试
+- `tests/test_async_open.py` 改由 pytest 接入三平台测试流程，并计入 CI 退出码。新增 `test_linux_native_aopen_submission`：通过 `debug_native_aopen_count` 断言 `aopen` 确实走了 io_uring 原生提交，而不是静默回退；Linux CI 实测 20 项全部通过，Windows/macOS 的对应平台专属用例按预期跳过。
+
 ## [1.12.1] - 2026-10-17
 
 ### 变更

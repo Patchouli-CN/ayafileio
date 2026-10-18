@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-10-18
+
+### Added
+- **Native Linux `aopen` via io_uring `OPENAT`.** When io_uring is available, `aopen` now submits `IORING_OP_OPENAT` directly to the shared ring for the current event loop and constructs an `AsyncFile` from the fd returned by the CQE. It no longer creates a separate local ring and synchronously waits with `io_uring_wait_cqe` for every open, and no longer depends on the userspace C++ thread pool for the native path. Existing SQ overflow submission, reaper, inline harvest, and ResultBatcher infrastructure is reused. Ring/request initialization failures retain the original C++ thread-pool fallback, while real open errors such as `ENOENT`/`EACCES` are delivered directly. Windows and macOS behavior is unchanged.
+- **Decoupled native-open architecture.** `PyAsyncFile` moved to `file_handle.hpp`; native submission and completion live in `io_uring_backend`, with `file_handle` providing platform dispatch and `bindings.cpp` limited to generic registration and calls. Completion paths explicitly manage path/mode/Future lifetimes, fd handoff, and exception ownership, avoiding silent fallback, duplicate batcher accounting, and double closes.
+
+### CI / Tests
+- `tests/test_async_open.py` now runs through pytest on all three platforms and contributes to the CI exit code. The new `test_linux_native_aopen_submission` uses `debug_native_aopen_count` to prove that `aopen` actually submits through io_uring instead of silently falling back. All 20 tests pass in Linux CI; the platform-specific case is skipped as expected on Windows/macOS.
+
 ## [1.12.1] - 2026-10-17
 
 ### Changed
