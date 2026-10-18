@@ -20,7 +20,7 @@ namespace ayafileio {
 class IOBackendBase;
 class ResultBatcher;
 
-enum class ReqType : uint8_t { Read, Write, Other };
+enum class ReqType : uint8_t { Read, Write, Other, Open };
 
 /// Lifecycle state for an IORequest — used to detect double‑delivery
 /// of IOCP completions under extreme concurrency.
@@ -36,6 +36,7 @@ struct IORequest {
 #endif
     IOBackendBase *file       = nullptr;
     ResultBatcher *batcher    = nullptr;
+    void         (*open_complete)(IORequest*, int) = nullptr;
     PyObject      *future        = nullptr;
     PyObject      *set_result    = nullptr;
     PyObject      *set_exception = nullptr;

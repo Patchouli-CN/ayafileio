@@ -27,117 +27,6 @@
 // nanobind bindings — 实现全部位于 namespace ayafileio，此处引入
 using namespace ayafileio;
 
-struct PyAsyncFile {
-    FileHandle *fh;
-    // 修改构造函数：接受 py::object 或 const char*
-    explicit PyAsyncFile(const char* path, const char* mode = "rb")
-        : fh(new FileHandle(std::string(path), std::string(mode))) {}
-
-    // open_async 注入路径：loop/create_future 由事件循环线程预取（见
-    // FileHandle 同名构造函数）
-    PyAsyncFile(const char* path, const char* mode, PyObject* loop, PyObject* create_future)
-        : fh(new FileHandle(std::string(path), std::string(mode), loop, create_future)) {}
-
-    PyAsyncFile(int fd, const char* mode = "rb", bool owns_fd = false)
-        : fh(new FileHandle(fd, std::string(mode), owns_fd)) {}
-
-    ~PyAsyncFile() { delete fh; }
-
-    py::object read(int64_t size = -1) {
-        PyObject *r = fh->read(size);
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-    py::object read_at(int64_t offset, int64_t size = -1) {
-        PyObject *r = fh->read_at(offset, size);
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-    py::object write(py::object data) {
-        // 使用 Python C API 获取 buffer
-        Py_buffer view;
-        if (PyObject_GetBuffer(data.ptr(), &view, PyBUF_SIMPLE) < 0) {
-            throw py::python_error();
-        }
-        
-        PyObject *r = fh->write(&view);
-        PyBuffer_Release(&view);
-        
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-    py::object write_at(int64_t offset, py::object data) {
-        if (offset < 0) throw py::value_error("offset must be non-negative");
-        Py_buffer view;
-        if (PyObject_GetBuffer(data.ptr(), &view, PyBUF_SIMPLE) < 0)
-            throw py::python_error();
-        if (offset > INT64_MAX - view.len) {
-            PyBuffer_Release(&view);
-            PyErr_SetString(PyExc_OverflowError, "offset + buffer size exceeds INT64_MAX");
-            throw py::python_error();
-        }
-        PyObject *r;
-        try {
-            r = fh->write(&view, offset);
-        } catch (...) {
-            PyBuffer_Release(&view);
-            throw;
-        }
-        PyBuffer_Release(&view);
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-    py::object seek(int64_t offset, int whence = 0) {
-        PyObject *r = fh->seek(offset, whence);
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-    py::object flush() {
-        PyObject *r = fh->flush();
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-    py::object close() {
-        PyObject *r = fh->close();
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-
-    py::object tell() {
-        PyObject *r = fh->tell();
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-
-    py::object truncate(int64_t size) {
-        PyObject* r = fh->truncate(size);
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-
-    py::object readinto(py::object buf) {
-        PyObject* r = fh->readinto(buf.ptr());
-        if (!r) throw py::python_error();
-        return py::steal<py::object>(py::handle(r));
-    }
-
-    void close_impl() { fh->close_impl(); }
-    int fileno() { return fh->fileno(); }
-};
-
-// 取当前 Python 错误的异常实例（owned 引用），供 future.set_exception
-// 使用。调用前错误必须已设置（python_error.restore() / PyErr_SetString）。
-static PyObject* fetch_current_exc() {
-    PyObject *t = nullptr, *v = nullptr, *tb = nullptr;
-    PyErr_Fetch(&t, &v, &tb);
-    PyErr_NormalizeException(&t, &v, &tb);
-    if (!v && t) v = PyObject_CallNoArgs(t);
-    Py_XDECREF(t);
-    Py_XDECREF(tb);
-    if (!v) v = PyObject_CallNoArgs(g_OSError);  // 兜底（实例化也失败的极端情况）
-    return v;
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // 统一配置 API
 // ════════════════════════════════════════════════════════════════════════════
@@ -385,6 +274,15 @@ NB_MODULE(_ayafileio, m) {
 
         batcher->op_submitted();
 
+        // 平台分发：Linux 优先 io_uring OPENAT；不支持时返回 false。
+        // 回退会继续使用同一个提交计数，由线程池完成路径负责配平。
+        if (try_native_aopen(loop, future, batcher, path, mode)) {
+            Py_DECREF(create_future);
+            Py_DECREF(loop);
+            Py_DECREF(set_result);
+            return py::steal<py::object>(py::handle(future));
+        }
+
         // worker 结尾会 DECREF future——但下面 return 的那份 steal 引用属于
         // Python 调用方，不是 worker 的。原先两者共享 CallNoArgs 的那一份
         // 引用：正常情况下 batcher 里的 set_result 绑定方法临时持有的一份
@@ -458,7 +356,8 @@ NB_MODULE(_ayafileio, m) {
 
         return py::steal<py::object>(py::handle(future));
     }, py::arg("path"), py::arg("mode") = "rb",
-    "Open a file asynchronously: the OS open runs on the C++ thread pool, "
+    "Open a file asynchronously: Linux uses io_uring when available, "
+    "other platforms and fallback use the C++ thread pool, "
     "resolving to a ready-to-use AsyncFile.");
 
     // 调试/回归测试：当前 loop 的 batcher 在飞 op 记账（正常应为 0）。
@@ -474,6 +373,9 @@ NB_MODULE(_ayafileio, m) {
         Py_DECREF(loop);
         return b ? b->outstanding() : 0L;
     }, "Current loop's in-flight op accounting (test/debug aid)");
+
+    m.def("debug_native_aopen_count", &native_aopen_submission_count,
+          "Number of opens submitted through the native backend (test/debug aid)");
 
     // 向后兼容的句柄池 API
     m.def("set_handle_pool_limits", &set_handle_pool_limits,

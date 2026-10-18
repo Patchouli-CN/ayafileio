@@ -4,6 +4,7 @@
 #include "../globals.hpp"
 #include "../config.hpp"
 #include "../uring_pool.hpp"
+#include "../file_handle.hpp"
 #include "./utils/file_mode.hpp"
 #include "./utils/error_util.hpp"
 #include "utils/debug_log.hpp"
@@ -270,6 +271,10 @@ void IOUringBackend::reaper_loop_entry(UringInstance* inst) {
         if (!done.empty()) {
             PyGILState_STATE gs = PyGILState_Ensure();
             for (auto& [req, res] : done) {
+                if (req->type == ReqType::Open) {
+                    req->open_complete(req, res);
+                    continue;
+                }
                 auto* file = static_cast<IOUringBackend*>(req->file);
                 if (res >= 0)
                     file->complete_ok(req, static_cast<size_t>(res));
@@ -312,9 +317,15 @@ void IOUringBackend::try_harvest_inline() {
     io_uring_cq_advance(&inst->ring, static_cast<unsigned>(n));
     lk.unlock();
 
-    for (size_t i = 0; i < n; i++)
-        static_cast<IOUringBackend*>(done[i].first->file)
-            ->complete_inline(done[i].first, done[i].second);
+    for (size_t i = 0; i < n; i++) {
+        IORequest* req = done[i].first;
+        int res = done[i].second;
+        if (req->type == ReqType::Open) {
+            req->open_complete(req, res);
+        } else {
+            static_cast<IOUringBackend*>(req->file)->complete_inline(req, res);
+        }
+    }
 }
 
 // complete_inline 已上提至 IOBackendBase（所有后端共享内联完成），
@@ -672,6 +683,125 @@ PyObject* IOUringBackend::readinto(PyObject* buf) {
                   static_cast<const char*>(view.buf), readSize}),
               static_cast<off_t>(offset));
     return future;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 原生 OPENAT：提交与完成都留在具体后端，绑定层只接触平台分发接口。
+// ════════════════════════════════════════════════════════════════════════════
+
+static std::atomic<uint64_t> g_native_aopen_submissions{0};
+
+static void complete_native_aopen(IORequest* req, int res) {
+    PyObject* set_fn = nullptr;
+    PyObject* val = nullptr;
+
+    if (res >= 0) {
+        int fd = res;
+        std::unique_ptr<PyAsyncFile> pf;
+        auto close_unowned = [&]() {
+            if (pf) pf.reset();
+            else ::close(fd);
+        };
+        try {
+            const char* mode = PyUnicode_AsUTF8(req->userBuf);
+            if (!mode) throw py::python_error();
+            pf = std::make_unique<PyAsyncFile>(fd, mode, true);
+            py::object obj = py::cast(pf.get(), py::rv_policy::take_ownership);
+            pf.release();
+            val = obj.ptr();
+            Py_INCREF(val);
+            set_fn = req->set_result;
+            req->set_result = nullptr;
+        } catch (py::python_error& e) {
+            close_unowned();
+            e.restore();
+            val = fetch_current_exc();
+            set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+        } catch (const py::builtin_exception& e) {
+            close_unowned();
+            PyErr_SetString(g_OSError, e.what());
+            val = fetch_current_exc();
+            set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+        } catch (const std::exception& e) {
+            close_unowned();
+            PyErr_SetString(g_OSError, e.what());
+            val = fetch_current_exc();
+            set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+        }
+    } else {
+        int err = -res;
+        PyObject* exc_class = map_posix_error(err);
+        val = PyObject_CallFunction(exc_class, "is", err, "Failed to open file");
+        set_fn = PyObject_GetAttr(req->future, g_str_set_exception);
+    }
+
+    Py_XDECREF(req->set_result);
+    req->set_result = nullptr;
+    Py_XDECREF(req->set_exception);
+    req->set_exception = nullptr;
+    Py_DECREF(req->future);
+    req->future = nullptr;
+
+    bool last = req->batcher ? req->batcher->op_completed() : false;
+    if (set_fn && val && req->batcher) {
+        bool threshold = req->batcher->push(set_fn, val);
+        if (threshold || last) req->batcher->flush();
+    } else {
+        Py_XDECREF(set_fn);
+        Py_XDECREF(val);
+    }
+    REQ_FREE(req);
+}
+
+bool submit_native_aopen(PyObject* loop, PyObject* future,
+                         ResultBatcher* batcher,
+                         const char* path, const char* mode) {
+    IORequest* req = nullptr;
+    try {
+        auto& cfg = ayafileio::config();
+        auto inst = uring_manager().acquire(
+            loop, &IOUringBackend::reaper_loop_entry,
+            cfg.io_uring_queue_depth(), cfg.io_uring_flags(), cfg.io_uring_sqpoll());
+        if (!inst) return false;
+        uring_manager().start_reaper(inst);
+
+        ModeInfo mi = parse_mode(mode);
+        int flags = O_RDONLY;
+        if (mi.hasW)      flags = O_WRONLY | O_CREAT | O_TRUNC;
+        else if (mi.hasA) flags = O_WRONLY | O_CREAT | O_APPEND;
+        else if (mi.hasX) flags = O_WRONLY | O_CREAT | O_EXCL;
+        if (mi.plus)      flags = (flags & ~O_ACCMODE) | O_RDWR;
+
+        req = REQ_ALLOC();
+        req->batcher = batcher;
+        req->type = ReqType::Open;
+        req->open_complete = &complete_native_aopen;
+        req->future = future;
+        Py_INCREF(future);
+        req->set_result = PyObject_GetAttr(future, g_str_set_result);
+        req->userBuf = PyUnicode_FromString(mode);
+        req->heapBuf = strdup(path);
+        if (!req->set_result || !req->userBuf || !req->heapBuf) {
+            REQ_FREE(req);
+            req = nullptr;
+            PyErr_Clear();
+            return false;
+        }
+
+        uring_submit_or_queue(inst.get(), PendingSubmit{
+            req, IORING_OP_OPENAT, AT_FDCWD, req->heapBuf,
+            static_cast<unsigned>(flags), static_cast<uint64_t>(0644)});
+        g_native_aopen_submissions.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    } catch (...) {
+        if (req) REQ_FREE(req);
+        PyErr_Clear();
+        return false;
+    }
+}
+
+uint64_t io_uring_native_aopen_submission_count() {
+    return g_native_aopen_submissions.load(std::memory_order_relaxed);
 }
 
 } // namespace ayafileio

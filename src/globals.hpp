@@ -142,4 +142,17 @@ inline void set_os_error(const char *msg, const char *filename = nullptr) {
 
 #endif
 
+// 取当前 Python 错误的异常实例（owned 引用），供 future.set_exception
+// 使用。调用前错误必须已设置（python_error.restore() / PyErr_SetString）。
+inline PyObject* fetch_current_exc() {
+    PyObject *t = nullptr, *v = nullptr, *tb = nullptr;
+    PyErr_Fetch(&t, &v, &tb);
+    PyErr_NormalizeException(&t, &v, &tb);
+    if (!v && t) v = PyObject_CallNoArgs(t);
+    Py_XDECREF(t);
+    Py_XDECREF(tb);
+    if (!v) v = PyObject_CallNoArgs(g_OSError);
+    return v;
+}
+
 } // namespace ayafileio

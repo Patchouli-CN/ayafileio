@@ -59,6 +59,12 @@ private:
     // 见 io_backend.hpp / io_backend.cpp
 };
 
+// Linux 原生 aopen：由 file_handle 的平台分发调用，不暴露给具体绑定代码。
+bool submit_native_aopen(PyObject* loop, PyObject* future,
+                         ResultBatcher* batcher,
+                         const char* path, const char* mode);
+uint64_t io_uring_native_aopen_submission_count();
+
 } // namespace ayafileio
 
 #endif // HAVE_IO_URING

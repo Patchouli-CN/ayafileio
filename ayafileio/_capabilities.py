@@ -41,7 +41,7 @@ def get_capabilities() -> Capabilities:
         - ``batch_positional_io`` —— read_many / write_many 批量位置读写
         - ``zero_copy_readinto`` —— readinto 零拷贝读
         - ``chunked_streaming`` —— chunk() 流式分块
-        - ``async_open`` —— aopen() 异步打开（C++ 线程池）
+        - ``async_open`` —— aopen() 异步打开（Linux io_uring，其他/回退为 C++ 线程池）
         - ``adaptive_batching`` —— ResultBatcher 自适应完成批处理
         - ``fast_file_copy`` —— acopy() 的 OS 级快车道
           （Linux copy_file_range / Windows CopyFile2）

@@ -309,6 +309,10 @@ inline void uring_prep_sqe(struct io_uring_sqe* sqe, const PendingSubmit& ps) {
         io_uring_prep_write(sqe, ps.fd, ps.buf, ps.len, ps.offset);
     else if (ps.op == IORING_OP_FSYNC)
         io_uring_prep_fsync(sqe, ps.fd, 0);
+    else if (ps.op == IORING_OP_OPENAT)
+        io_uring_prep_openat(sqe, ps.fd,
+                             static_cast<const char*>(ps.buf), ps.len,
+                             static_cast<mode_t>(ps.offset));
     io_uring_sqe_set_data(sqe, ps.req);
 }
 

@@ -48,6 +48,21 @@ class TestAsyncOpen(unittest.TestCase):
                 return await f.read()
         self.assertEqual(asyncio.run(run()), self._expected(self.files[3]))
 
+    def test_linux_native_aopen_submission(self):
+        """Linux io_uring：aopen 必须真正走原生提交而非静默回退"""
+        if ayafileio.get_backend_info()["backend"] != "io_uring":
+            self.skipTest("requires the Linux io_uring backend")
+        from ayafileio import _ayafileio as native
+
+        before = native.debug_native_aopen_count()
+
+        async def run():
+            async with ayafileio.aopen(self.files[1], "rb") as f:
+                return await f.read()
+
+        self.assertEqual(asyncio.run(run()), self._expected(self.files[1]))
+        self.assertGreater(native.debug_native_aopen_count(), before)
+
     def test_aopen_lazy_context_manager(self):
         """惰性句柄：async with 免 await（aiofiles 同款用法）"""
         async def run():

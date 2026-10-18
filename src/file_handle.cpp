@@ -102,4 +102,27 @@ FileHandle::FileHandle(int fd, const std::string& mode, bool owns_fd) {
 #endif
 }
 
+bool try_native_aopen(PyObject* loop, PyObject* future,
+                      ResultBatcher* batcher,
+                      const char* path, const char* mode) {
+#ifdef HAVE_IO_URING
+    return submit_native_aopen(loop, future, batcher, path, mode);
+#else
+    (void)loop;
+    (void)future;
+    (void)batcher;
+    (void)path;
+    (void)mode;
+    return false;
+#endif
+}
+
+uint64_t native_aopen_submission_count() {
+#ifdef HAVE_IO_URING
+    return io_uring_native_aopen_submission_count();
+#else
+    return 0;
+#endif
+}
+
 } // namespace ayafileio

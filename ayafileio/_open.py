@@ -157,11 +157,11 @@ def aopen(
     errors: str | None = None,
     auto_flush: bool = False
 ) -> _AOpen[str] | _AOpen[bytes]:
-    """异步打开文件：OS open 在 C++ 线程池执行，不阻塞事件循环。
+    """异步打开文件：Linux 优先使用 io_uring，其他情况回退 C++ 线程池。
 
     与 :func:`open` 的参数、模式语义、返回的 ``AsyncFile`` 完全一致，
     唯一区别是打开动作本身也是异步的——批量打开大量文件时多个
-    open 系统调用真正并行（配合 ``read_bytes_many`` 食用最佳）。
+    open 操作并行进行（配合 ``read_bytes_many`` 食用最佳）。
 
     返回惰性句柄，两种用法等价::
 
