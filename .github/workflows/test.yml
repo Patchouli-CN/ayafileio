@@ -59,7 +59,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich
+        pip install nanobind scikit-build-core aiofiles rich pytest
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
@@ -100,9 +100,11 @@ jobs:
         EXIT_WRAP=$?
         python tests/test_capabilities.py
         EXIT_CAP=$?
-        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP + EXIT_CAP))
+        python -m pytest -q tests/test_async_open.py
+        EXIT_AOPEN=$?
+        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP + EXIT_CAP + EXIT_AOPEN))
         set -e
-        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP"
+        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP aopen=$EXIT_AOPEN"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -173,7 +175,7 @@ jobs:
       timeout-minutes: 2
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich
+        pip install nanobind scikit-build-core aiofiles rich pytest
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
@@ -218,8 +220,10 @@ jobs:
         $EXIT_WRAP = $LASTEXITCODE
         python tests/test_capabilities.py
         $EXIT_CAP = $LASTEXITCODE
-        $EXIT_CODE = $EXIT_BASE + $EXIT_WRAP + $EXIT_CAP
-        Write-Host "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP"
+        python -m pytest -q tests/test_async_open.py
+        $EXIT_AOPEN = $LASTEXITCODE
+        $EXIT_CODE = $EXIT_BASE + $EXIT_WRAP + $EXIT_CAP + $EXIT_AOPEN
+        Write-Host "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP aopen=$EXIT_AOPEN"
         echo "EXIT_CODE=$EXIT_CODE" >> $env:GITHUB_ENV
         if ($EXIT_CODE -ne 0) { exit $EXIT_CODE }
     - name: Collect and analyze crash dumps (Windows)
@@ -282,7 +286,7 @@ jobs:
       timeout-minutes: 2
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich
+        pip install nanobind scikit-build-core aiofiles rich pytest
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
@@ -317,8 +321,10 @@ jobs:
         EXIT_WRAP=$?
         python tests/test_capabilities.py
         EXIT_CAP=$?
-        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP + EXIT_CAP))
-        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP"
+        python -m pytest -q tests/test_async_open.py
+        EXIT_AOPEN=$?
+        EXIT_CODE=$((EXIT_BASE + EXIT_WRAP + EXIT_CAP + EXIT_AOPEN))
+        echo "Test exit codes: base=$EXIT_BASE wrap=$EXIT_WRAP cap=$EXIT_CAP aopen=$EXIT_AOPEN"
         echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
         if [ $EXIT_CODE -ne 0 ]; then
           echo "Test failed with exit code $EXIT_CODE"
@@ -363,7 +369,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich
+        pip install nanobind scikit-build-core aiofiles rich pytest
     - name: Build ayafileio (Release mode)
       env:
         CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_VERBOSE_LOGGING=OFF"
