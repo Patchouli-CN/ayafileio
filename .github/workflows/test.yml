@@ -31,6 +31,14 @@ on:
       - '.github/workflows/test.yml'
   workflow_dispatch:
 
+# stdout/stderr 在 CI 里是管道（不是控制台），Python 会按 locale 代码页编码：
+# windows-2022 是 cp1252、ubuntu 的 LANG 可能是 C —— 中文一 print 就
+# UnicodeEncodeError。PEP 540 的 UTF-8 模式一次性解决，不需要在测试文件里
+# 换 sys.stdout（那个老 hack 会把 pytest 的 capture 对象摘掉）。
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
 jobs:
   test-linux:
     name: "Linux (Python ${{ matrix.python-version }})"
