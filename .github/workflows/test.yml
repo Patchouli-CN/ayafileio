@@ -64,15 +64,16 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y liburing-dev gdb
-    - name: Install Python dependencies
+    - name: Upgrade pip
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich pytest pytest-asyncio pyyaml
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
         export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
-        pip install -e . -v
+        # dev 依赖只有一处真源：pyproject 的 [project.optional-dependencies].dev；
+        # 构建期依赖（scikit-build-core / nanobind）由 build-system 的隔离环境安装。
+        pip install -e ".[dev]" -v
     - name: Import smoke check
       timeout-minutes: 3
       shell: bash
@@ -168,16 +169,17 @@ jobs:
         # 3.15 正式版（2026-10-01）发布前让 setup-python 解析到 RC；
         # 对已稳定的版本无影响，正式发布后此行可删。
         allow-prereleases: true
-    - name: Install Python dependencies
+    - name: Upgrade pip
       timeout-minutes: 2
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich pytest pytest-asyncio pyyaml
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
         $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
-        pip install -e . -v
+        # dev 依赖只有一处真源：pyproject 的 [project.optional-dependencies].dev；
+        # 构建期依赖（scikit-build-core / nanobind）由 build-system 的隔离环境安装。
+        pip install -e ".[dev]" -v
     - name: Import smoke check
       timeout-minutes: 3
       shell: bash
@@ -268,16 +270,17 @@ jobs:
         # 3.15 正式版（2026-10-01）发布前让 setup-python 解析到 RC；
         # 对已稳定的版本无影响，正式发布后此行可删。
         allow-prereleases: true
-    - name: Install Python dependencies
+    - name: Upgrade pip
       timeout-minutes: 2
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich pytest pytest-asyncio pyyaml
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
         export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
-        pip install -e . -v
+        # dev 依赖只有一处真源：pyproject 的 [project.optional-dependencies].dev；
+        # 构建期依赖（scikit-build-core / nanobind）由 build-system 的隔离环境安装。
+        pip install -e ".[dev]" -v
     - name: Import smoke check
       timeout-minutes: 3
       shell: bash
@@ -341,15 +344,16 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y liburing-dev
-    - name: Install Python dependencies
+    - name: Upgrade pip
       run: |
         python -m pip install --upgrade pip
-        pip install nanobind scikit-build-core aiofiles rich pytest pytest-asyncio pyyaml
     - name: Build ayafileio (Release mode)
       env:
         CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_VERBOSE_LOGGING=OFF"
       run: |
-        pip install -e . -v
+        # dev 依赖只有一处真源：pyproject 的 [project.optional-dependencies].dev；
+        # 构建期依赖（scikit-build-core / nanobind）由 build-system 的隔离环境安装。
+        pip install -e ".[dev]" -v
     - name: Check backend info
       run: |
         python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
