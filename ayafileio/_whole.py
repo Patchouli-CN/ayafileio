@@ -7,12 +7,14 @@
 """
 
 import asyncio
+import os
+from collections.abc import Iterable
 
 from ._open import open as _open
 from ._open import aopen as _aopen
 
 
-async def read_bytes(path) -> bytes:
+async def read_bytes(path: str | os.PathLike[str]) -> bytes:
     """一次性读取整个文件，返回 ``bytes``。
 
     示例::
@@ -23,7 +25,7 @@ async def read_bytes(path) -> bytes:
         return await f.read()
 
 
-async def write_bytes(path, data: bytes) -> int:
+async def write_bytes(path: str | os.PathLike[str], data: bytes) -> int:
     """一次性写入整个文件（覆盖写），返回写入的字节数。
 
     示例::
@@ -34,7 +36,7 @@ async def write_bytes(path, data: bytes) -> int:
         return await f.write(data)
 
 
-async def read_text(path, encoding: "str | None" = None) -> str:
+async def read_text(path: str | os.PathLike[str], encoding: "str | None" = None) -> str:
     """一次性读取整个文本文件，返回 ``str``。
 
     *encoding* 为 None 时沿用平台 locale 偏好编码（同内置 ``open()``）。
@@ -47,7 +49,7 @@ async def read_text(path, encoding: "str | None" = None) -> str:
         return await f.read()
 
 
-async def write_text(path, data: str, encoding: "str | None" = None) -> int:
+async def write_text(path: str | os.PathLike[str], data: str, encoding: "str | None" = None) -> int:
     """一次性写入整个文本文件（覆盖写），返回写入的字符数。
 
     返回值的口径与 :meth:`AsyncFile.write` 及内置 ``open()`` 一致：
@@ -62,7 +64,7 @@ async def write_text(path, data: str, encoding: "str | None" = None) -> int:
         return await f.write(data)
 
 
-async def read_bytes_many(paths, *, max_concurrency: int = 64) -> "list[bytes]":
+async def read_bytes_many(paths: Iterable[str | os.PathLike[str]], *, max_concurrency: int = 64) -> "list[bytes]":
     """并发读取多个文件，返回与输入顺序一致的 ``bytes`` 列表。
 
     打开动作经 :func:`ayafileio.aopen` 优先使用 Linux io_uring（不可用时回退 C++ 线程池）（多个 OS open
@@ -84,7 +86,7 @@ async def read_bytes_many(paths, *, max_concurrency: int = 64) -> "list[bytes]":
     return list(await asyncio.gather(*(_one(p) for p in paths)))
 
 
-async def read_text_many(paths, encoding: "str | None" = None, *,
+async def read_text_many(paths: Iterable[str | os.PathLike[str]], encoding: "str | None" = None, *,
                          max_concurrency: int = 64) -> "list[str]":
     """并发读取多个文本文件，返回与输入顺序一致的 ``str`` 列表。
 
@@ -105,7 +107,7 @@ async def read_text_many(paths, encoding: "str | None" = None, *,
     return list(await asyncio.gather(*(_one(p) for p in paths)))
 
 
-async def write_bytes_many(pairs, *, max_concurrency: int = 64) -> "list[int]":
+async def write_bytes_many(pairs: Iterable[tuple[str | os.PathLike[str], bytes]], *, max_concurrency: int = 64) -> "list[int]":
     """并发写入多个文件，返回与输入顺序一致的字节数列表。
 
     *pairs* 是 ``(path, data)`` 对的可迭代对象（覆盖写）。打开动作经
@@ -130,7 +132,7 @@ async def write_bytes_many(pairs, *, max_concurrency: int = 64) -> "list[int]":
     return list(await asyncio.gather(*(_one(p, d) for p, d in items)))
 
 
-async def write_text_many(pairs, encoding: "str | None" = None, *,
+async def write_text_many(pairs: Iterable[tuple[str | os.PathLike[str], str]], encoding: "str | None" = None, *,
                           max_concurrency: int = 64) -> "list[int]":
     """并发写入多个文本文件，返回与输入顺序一致的字符数列表。
 
