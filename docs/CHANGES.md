@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Path arguments now follow PEP 519 (`os.PathLike`), not just `pathlib.Path`.** `open()`, `aopen()`, `AsyncFile()`/`AsyncFile.open()` and every helper built on them (`read_bytes`, `read_text`, `read_bytes_many`, `write_text_many`, ...) used to accept `str | Path` and normalize with `str(path)`. That worked for `pathlib.Path` (whose `__str__` happens to be the path) but silently produced a `repr`-looking "path" for custom `os.PathLike` implementations, and accepted nonsense like `open(12345)` by stringifying it. All entry points are now annotated `str | os.PathLike[str]` and normalize through `os.fspath()` — custom path-like objects work, and non-path types fail fast with a clear `TypeError` from `os.fspath` instead of a confusing file-not-found later. Dropped a now-unused `pathlib.Path` import in `_types.py`.
+
 ## [1.14.0] - 2026-10-19
 
 ### Changed

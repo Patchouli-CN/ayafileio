@@ -1,7 +1,7 @@
 """文件打开入口"""
 
+import os
 import locale
-from pathlib import Path
 from typing import overload, Literal, Any, Generic, TypeVar, cast
 from collections.abc import Generator
 from ._async_file import AsyncFile, _normalize_mode
@@ -17,7 +17,7 @@ T = TypeVar("T")
 
 @overload
 def open(
-    path: str | Path,
+    path: str | os.PathLike[str],
     mode: Literal["r", "w", "a", "x", "r+", "w+", "a+", "x+"],
     encoding: str | None = None,
     newline: str | None = None,
@@ -30,7 +30,7 @@ def open(
 
 @overload
 def open(
-    path: str | Path,
+    path: str | os.PathLike[str],
     mode: Literal["rb", "wb", "ab", "xb", "rb+", "wb+", "ab+", "xb+"] = "rb",
     encoding: None = None,
     newline: str | None = None,
@@ -42,7 +42,7 @@ def open(
 
 
 def open(
-    path: str | Path,
+    path: str | os.PathLike[str],
     mode: str = "rb",
     encoding: str | None = None,
     newline: str | None = None,
@@ -79,14 +79,14 @@ def open(
 class _AOpen(Generic[T]):
     def __init__(
         self,
-        path: str | Path,
+        path: str | os.PathLike[str],
         mode: str,
         encoding: str | None,
         newline: str | None,
         errors: str | None,
         auto_flush: bool
     ) -> None:
-        self._path = path
+        self._path = os.fspath(path)
         self._mode = mode
         self._encoding = encoding
         self._newline = newline
@@ -97,11 +97,11 @@ class _AOpen(Generic[T]):
     async def _do_open(self) -> AsyncFile[T]:
         if self._file is None:
             clean_mode, is_text = _normalize_mode(self._mode, self._encoding, self._newline)
-            impl = await _native_open_async(str(self._path), clean_mode)
+            impl = await _native_open_async(self._path, clean_mode)
             enc = (self._encoding or locale.getpreferredencoding(False)) if is_text else "utf-8"
             self._file = cast(AsyncFile[T], AsyncFile._from_impl(
                 impl, clean_mode,
-                path=str(self._path), is_text=is_text, encoding=enc,
+                path=self._path, is_text=is_text, encoding=enc,
                 newline=self._newline, errors=self._errors or "strict",
                 auto_flush=self._auto_flush
             ))
@@ -125,7 +125,7 @@ class _AOpen(Generic[T]):
 
 @overload
 def aopen(
-    path: str | Path,
+    path: str | os.PathLike[str],
     mode: Literal["r", "w", "a", "x", "r+", "w+", "a+", "x+"],
     encoding: str | None = None,
     newline: str | None = None,
@@ -138,7 +138,7 @@ def aopen(
 
 @overload
 def aopen(
-    path: str | Path,
+    path: str | os.PathLike[str],
     mode: Literal["rb", "wb", "ab", "xb", "rb+", "wb+", "ab+", "xb+"] = "rb",
     encoding: None = None,
     newline: str | None = None,
@@ -150,7 +150,7 @@ def aopen(
 
 
 def aopen(
-    path: str | Path,
+    path: str | os.PathLike[str],
     mode: str = "rb",
     encoding: str | None = None,
     newline: str | None = None,

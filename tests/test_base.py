@@ -19,6 +19,7 @@ if __name__ == "__main__":  # 脚本模式才接管控制台；pytest 下会废�
     use_utf8_console()
 
 import ayafileio
+import pytest
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -548,6 +549,43 @@ async def test_write_read_text():
             assert read_content == content
     finally:
         path.unlink(missing_ok=True)
+
+
+class _CustomPathLike:
+    """不继承 pathlib.Path 的自定义 os.PathLike（PEP 519）。
+
+    str() 出来是 repr 而不是路径，能直接暴露「拿 str() 当 fspath 用」的回归。
+    """
+
+    def __init__(self, p: Path) -> None:
+        self._p = p
+
+    def __fspath__(self) -> str:
+        return str(self._p)
+
+
+async def test_pathlike_open_and_aopen():
+    """自定义 os.PathLike：open / aopen / 批量辅助函数都应按 PEP 519 归一化"""
+    path = get_temp_path(".txt")
+    like = _CustomPathLike(path)
+    try:
+        async with ayafileio.open(like, "w", encoding="utf-8") as f:
+            await f.write("via PathLike")
+
+        async with ayafileio.aopen(like, "rb") as f:
+            assert await f.read() == b"via PathLike"
+
+        assert await ayafileio.read_bytes(like) == b"via PathLike"
+        assert (await ayafileio.read_bytes_many([like])) == [b"via PathLike"]
+        assert await ayafileio.read_text(like, encoding="utf-8") == "via PathLike"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_pathlike_invalid_type():
+    """非路径类型应由 os.fspath 抛出 TypeError，而不是被 str() 静默转成 repr"""
+    with pytest.raises(TypeError):
+        ayafileio.open(12345, "rb")  # type: ignore
 
 
 async def test_write_read_binary():

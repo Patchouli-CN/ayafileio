@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterable
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:

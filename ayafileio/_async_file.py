@@ -4,7 +4,6 @@ import asyncio
 import codecs
 import os
 import locale
-from pathlib import Path
 from collections import deque
 from collections.abc import AsyncGenerator, Iterable
 from typing import Generic, TypeVar
@@ -459,7 +458,7 @@ class AsyncFile(Generic[T]):
 
     def __init__(
         self,
-        path: str | Path,
+        path: str | os.PathLike[str],
         mode: str = "rb",
         encoding: str | None = None,
         newline: str | None = None,
@@ -467,7 +466,7 @@ class AsyncFile(Generic[T]):
         auto_flush: bool = False
     ) -> None:
 
-        self._path = str(path)
+        self._path = os.fspath(path)
         self._closed = False
 
         self._newline = newline
@@ -1033,7 +1032,7 @@ class AsyncFile(Generic[T]):
     @classmethod
     def open(
         cls,
-        path: str | Path,
+        path: str | os.PathLike[str],
         mode: str = "rb",
         encoding: str | None = None,
         newline: str | None = None,
