@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Windows IOCP: the deferred-free quarantine made sustained small-write throughput collapse.** The quarantine introduced in 1.10.0 (each completed `IORequest` is held `QUARANTINE_MS` = 1 s before being freed, so a redelivered `OVERLAPPED` can't hit a recycled address) was a `std::vector` drained by scanning the whole list and calling `erase(it)` per expired entry. Both halves were O(n): the scan walked the entire list on every call, and each `erase` memmoved the whole tail. At steady state the list is one second of traffic deep, so at 30k ops/s it holds ~30k entries and every completed operation inspected tens of thousands of them — measured `scanned/push` of 15k–75k, and the cost scaled with throughput, so the faster the loop ran the more it paid. Net effect: a 130-byte append loop ran at ~16k msg/s sustained while burning 2.3x the CPU per op (32.8 µs → 74.4 µs), against ~58k msg/s whenever the process had been idle for a second and the list had emptied. It was easy to misread as writeback pressure because idle was the only thing that cured it, but `GetProcessIoCounters` showed exactly 1.0x write amplification and the same work per round. The list is FIFO by construction (entries carry a non-decreasing `steady_clock` stamp), so expired entries are always a prefix: it is now a `std::deque` popped from the front in amortised O(1) per entry, with the same 1 s retention and the same CAS guard. Measured on the same 10k×129 B / 5-file / 50-worker loop: 16k → 84k msg/s sustained (`scanned/push` 15k–75k → 1.0, flat across a 500k-message continuous run), 4 KiB random writes 18.8k → 60.6k writes/s, and the loop now beats a liburing/IOCP-based peer library on both instead of losing ~2x.
+- **`debug_quarantine_stats()`** (test/debug aid, alongside `debug_batcher_outstanding()`) exposes quarantine depth, pushes, entries inspected by drain, drain count and the depth high-water mark, so the amortised-O(1) invariant can be regression-tested rather than rediscovered.
+
 ## [1.13.0] - 2026-10-18
 
 ### Added

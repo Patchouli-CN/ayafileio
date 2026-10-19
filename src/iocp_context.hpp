@@ -158,6 +158,23 @@ private:
     PyObject* make_failed_future_no_session();
 };
 
+// ── Quarantine instrumentation (debug / regression tests only) ──────────────
+// The quarantine holds completed IORequests for QUARANTINE_MS before freeing
+// them, so under sustained load its depth converges to (rate × window).  The
+// drain cost has to stay amortised O(1) per entry; `scanned` is the number of
+// ring entries the drain loop looked at, which is the number an O(n) drain
+// implementation would inflate without bound.  Relaxed atomics only — no
+// ordering is required for these counters.
+struct QuarantineStats {
+    std::uint64_t live     = 0;  // currently held (this process, all worker threads)
+    std::uint64_t pushes   = 0;
+    std::uint64_t scanned  = 0;  // entries inspected by drain loops
+    std::uint64_t drains   = 0;  // drain invocations
+    std::uint64_t peak     = 0;  // high-water mark of `live`
+};
+
+QuarantineStats quarantine_stats();
+
 } // namespace ayafileio
 
 #endif // _WIN32

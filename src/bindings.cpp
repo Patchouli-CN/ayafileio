@@ -374,6 +374,20 @@ NB_MODULE(_ayafileio, m) {
         return b ? b->outstanding() : 0L;
     }, "Current loop's in-flight op accounting (test/debug aid)");
 
+    // 调试/回归测试：IOCP quarantine 深度与 drain 扫描量。
+    // 持续负载下 live 应稳定在 (吞吐 × QUARANTINE_MS) 量级，
+    // scanned 应按 op 数线性增长（摊销 O(1)），而不是随队列深度平方增长。
+    m.def("debug_quarantine_stats", []() {
+        QuarantineStats s = quarantine_stats();
+        py::dict d;
+        d["live"]    = s.live;
+        d["pushes"]  = s.pushes;
+        d["scanned"] = s.scanned;
+        d["drains"]  = s.drains;
+        d["peak"]    = s.peak;
+        return d;
+    }, "Quarantine depth / drain scan accounting (test/debug aid)");
+
     m.def("debug_native_aopen_count", &native_aopen_submission_count,
           "Number of opens submitted through the native backend (test/debug aid)");
 

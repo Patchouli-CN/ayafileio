@@ -5,6 +5,7 @@
 #include "utils/yuyuko_memlife.hpp"
 #include <algorithm>
 #include <chrono>
+#include <deque>
 
 namespace ayafileio {
 
@@ -34,26 +35,67 @@ IOCPContext::~IOCPContext() {
 // address-reuse from defeating the IOCP double-delivery CAS guard when
 // Windows re-delivers a completion across multiple GQCSEx calls.
 // Each entry is held for at least QUARANTINE_MS before being freed.
+//
+// FIFO by construction: entries are appended with a non-decreasing
+// steady_clock timestamp, so the expired ones are always a *prefix*. A deque
+// therefore lets drain pop that prefix in amortised O(1) per entry. The
+// previous std::vector version did `erase(it)` for every expired entry — an
+// O(depth) memmove each — and scanned the whole list on every call, so each
+// completed op paid O(queue depth): at 30k ops/s the queue holds ~30k entries
+// (one QUARANTINE_MS of traffic) and the drain inspected tens of thousands of
+// entries per op. That is what made sustained small-write throughput collapse
+// to a third of its post-idle value while burning 2.3x CPU per op.
 static constexpr unsigned QUARANTINE_MS = 1000;
 struct QuarantineEntry { IORequest* req; std::chrono::steady_clock::time_point when; };
-static thread_local std::vector<QuarantineEntry> t_quarantine;
+static thread_local std::deque<QuarantineEntry> t_quarantine;
+
+// ── instrumentation (relaxed atomics, see iocp_context.hpp) ─────────────────
+namespace {
+std::atomic<std::uint64_t> g_q_live{0};
+std::atomic<std::uint64_t> g_q_pushes{0};
+std::atomic<std::uint64_t> g_q_scanned{0};
+std::atomic<std::uint64_t> g_q_drains{0};
+std::atomic<std::uint64_t> g_q_peak{0};
+
+inline void q_note_push() {
+    std::uint64_t live = g_q_live.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_q_pushes.fetch_add(1, std::memory_order_relaxed);
+    std::uint64_t peak = g_q_peak.load(std::memory_order_relaxed);
+    while (live > peak &&
+           !g_q_peak.compare_exchange_weak(peak, live, std::memory_order_relaxed)) {
+    }
+}
+inline void q_note_free() { g_q_live.fetch_sub(1, std::memory_order_relaxed); }
+} // namespace
 
 static void quarantine_drain() {
-    auto now = std::chrono::steady_clock::now();
-    auto it = t_quarantine.begin();
-    while (it != t_quarantine.end()) {
-        if (now - it->when >= std::chrono::milliseconds(QUARANTINE_MS)) {
-            REQ_FREE(it->req);
-            it = t_quarantine.erase(it);
-        } else {
-            ++it;
-        }
+    const auto window = std::chrono::milliseconds(QUARANTINE_MS);
+    const auto now = std::chrono::steady_clock::now();
+    std::uint64_t expired = 0;
+    while (!t_quarantine.empty() && now - t_quarantine.front().when >= window) {
+        REQ_FREE(t_quarantine.front().req);
+        t_quarantine.pop_front();
+        q_note_free();
+        ++expired;
     }
+    g_q_scanned.fetch_add(expired, std::memory_order_relaxed);
+    g_q_drains.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void quarantine_push(IORequest* req) {
     t_quarantine.push_back({req, std::chrono::steady_clock::now()});
+    q_note_push();
     if (t_quarantine.size() >= 256) quarantine_drain();
+}
+
+QuarantineStats quarantine_stats() {
+    QuarantineStats s;
+    s.live    = g_q_live.load(std::memory_order_relaxed);
+    s.pushes  = g_q_pushes.load(std::memory_order_relaxed);
+    s.scanned = g_q_scanned.load(std::memory_order_relaxed);
+    s.drains  = g_q_drains.load(std::memory_order_relaxed);
+    s.peak    = g_q_peak.load(std::memory_order_relaxed);
+    return s;
 }
 
 // 递减本 loop 的在飞 IOCP 计数；若这是最后一个在飞 op 且 batcher 里
