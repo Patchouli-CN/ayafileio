@@ -122,8 +122,8 @@ supports `newline` translation with the same semantics as the builtin.
 
 Like the builtin: in text mode `write()` returns the number of **characters**
 consumed, not the byte count after encoding and `newline` translation. The
-whole-file helpers (`write_text()` and friends) have no character stream to
-count and still report bytes.
+text helpers follow the same rule — `write_text()` and `write_text_many()`
+count characters; the `*_bytes` helpers count bytes.
 
 `ayafileio` is unbuffered: every `read()`/`write()` is one I/O request. That
 is what makes thousands of concurrent operations on one handle cheap, but it
@@ -176,7 +176,8 @@ n    = await ayafileio.write_text("out.txt", "hello", encoding="utf-8")
 
 One await does open + read/write + close. Semantics are identical to the
 hand-written `async with ayafileio.open(...)` form — it just removes the
-boilerplate. (`write_text` also returns the encoded byte count.)
+boilerplate. (`write_text` reports characters, like `write()`;
+`write_bytes` reports bytes.)
 
 ## Batch operations
 
@@ -202,8 +203,8 @@ One call reads (or writes) many files concurrently: opens go through
 `aopen()` (parallel OS opens), I/O goes through the platform async backend,
 and results come back **in input order**. The write variants take an
 iterable of `(path, data)` pairs (overwrite writes) and return per-file
-byte counts — encoded bytes for `write_text_many`. `max_concurrency`
-(keyword-only, default 64) caps in-flight files, so a
+counts: characters for `write_text_many`, bytes for `write_bytes_many`.
+`max_concurrency` (keyword-only, default 64) caps in-flight files, so a
 hundred-thousand-item input can't exhaust file descriptors. Any failure
 raises the whole call, same as `asyncio.gather` — and batches are **not
 atomic**: when a write batch raises, some files may already be on disk.

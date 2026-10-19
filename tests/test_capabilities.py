@@ -7,11 +7,10 @@ from pathlib import Path
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-if sys.platform == "win32":
-    import io
+if __name__ == "__main__":  # 脚本模式才接管控制台；pytest 下会废掉 capture
+    from _console import use_utf8_console
 
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    use_utf8_console()
 
 import ayafileio
 

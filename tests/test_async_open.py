@@ -218,7 +218,7 @@ class TestAsyncOpen(unittest.TestCase):
         self.assertEqual(asyncio.run(ayafileio.write_bytes_many([])), [])
 
     def test_write_text_many(self):
-        """批量文本写：返回编码后字节数，round-trip 正确"""
+        """批量文本写：返回字符数（与 AsyncFile.write 同口径），round-trip 正确"""
         pairs = [(os.path.join(self.dir, f"wt{i}.txt"), f"文本-{i}")
                  for i in range(4)]
         async def run():
@@ -227,7 +227,7 @@ class TestAsyncOpen(unittest.TestCase):
                 [p for p, _ in pairs], encoding="utf-8")
         try:
             counts, contents = asyncio.run(run())
-            self.assertEqual(counts, [len(d.encode("utf-8")) for _, d in pairs])
+            self.assertEqual(counts, [len(d) for _, d in pairs])
             self.assertEqual(contents, [d for _, d in pairs])
         finally:
             for p, _ in pairs:

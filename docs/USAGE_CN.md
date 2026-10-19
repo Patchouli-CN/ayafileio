@@ -116,7 +116,8 @@ async with ayafileio.open("log.txt", "a", encoding="utf-8") as f:
 换行翻译语义与内置一致。
 
 与内置一致：文本模式的 `write()` 返回**字符数**，不是编码并换行翻译之后
-的字节数。整文件辅助函数（`write_text()` 等）没有字符流可数，仍返回字节数。
+的字节数。文本类整文件辅助函数同口径——`write_text()` 与
+`write_text_many()` 数字符数，`*_bytes` 系列数字节数。
 
 ayafileio 是无缓冲的：每次 `read()`/`write()` 都是一次真实 I/O 请求。
 这正是单句柄上千并发操作便宜的原因，但也意味着逐字节循环读写很糟糕
@@ -163,7 +164,7 @@ n    = await ayafileio.write_text("out.txt", "hello", encoding="utf-8")
 
 一次 await 完成 open + 读写 + close。语义与手写
 `async with ayafileio.open(...)` 完全一致，只是省掉样板。
-（`write_text` 同样返回编码后的字节数。）
+（`write_text` 与 `write()` 同口径返回字符数；`write_bytes` 返回字节数。）
 
 ## 批量操作
 
@@ -187,8 +188,8 @@ counts  = await ayafileio.write_text_many(items, encoding="utf-8")
 
 一次调用并发读取（或写入）多个文件：打开走 `aopen()`（OS open 并行），
 I/O 走平台异步后端，返回顺序**与输入一致**。写系列接收 `(path, data)`
-对的可迭代对象（覆盖写），返回逐文件字节数——`write_text_many` 返回
-编码后的字节数。`max_concurrency`（仅关键字，默认 64）限制在飞文件数，
+对的可迭代对象（覆盖写），返回逐文件写入量：`write_text_many` 是字符数，
+`write_bytes_many` 是字节数。`max_concurrency`（仅关键字，默认 64）限制在飞文件数，
 十万级输入也不会打爆 fd。任一失败整体抛出，与 `asyncio.gather` 默认
 语义相同——批量**不是事务**：写批量抛出时，部分文件可能已经落盘。
 

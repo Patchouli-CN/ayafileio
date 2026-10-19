@@ -48,11 +48,11 @@ async def read_text(path, encoding: "str | None" = None) -> str:
 
 
 async def write_text(path, data: str, encoding: "str | None" = None) -> int:
-    """一次性写入整个文本文件（覆盖写），返回编码后写入的字节数。
+    """一次性写入整个文本文件（覆盖写），返回写入的字符数。
 
-    注意与内置 ``open()`` 的语义差异：内置文本模式 ``write()`` 返回
-    字符数，这里返回 encode 之后实际落盘的字节数（与 ``AsyncFile.write``
-    一致）。
+    返回值的口径与 :meth:`AsyncFile.write` 及内置 ``open()`` 一致：
+    文本模式数**字符**，不是编码（或换行翻译）之后的字节数。需要字节数
+    用 ``len(data.encode(encoding))``，或改用 :func:`write_bytes`。
 
     示例::
 
@@ -132,11 +132,12 @@ async def write_bytes_many(pairs, *, max_concurrency: int = 64) -> "list[int]":
 
 async def write_text_many(pairs, encoding: "str | None" = None, *,
                           max_concurrency: int = 64) -> "list[int]":
-    """并发写入多个文本文件，返回与输入顺序一致的字节数列表（编码后）。
+    """并发写入多个文本文件，返回与输入顺序一致的字符数列表。
 
     *pairs* 是 ``(path, str)`` 对的可迭代对象（覆盖写）；``encoding``
-    为 None 时沿用平台 locale 偏好编码（同内置 ``open()``）。其余语义
-    与 :func:`write_bytes_many` 一致，包括非事务性。
+    为 None 时沿用平台 locale 偏好编码（同内置 ``open()``）。计数口径与
+    :func:`write_text` 一致（字符数）。其余语义与 :func:`write_bytes_many`
+    一致，包括非事务性。
 
     示例::
 

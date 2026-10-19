@@ -8,10 +8,10 @@ import tempfile
 import ayafileio
 from ayafileio import AyaFileIO
 
-# 设置 Windows 控制台编码
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+if __name__ == "__main__":  # 脚本模式才接管控制台；pytest 下会废掉 capture
+    from _console import use_utf8_console
+
+    use_utf8_console()
 
 
 async def test_wrap_file_fd():

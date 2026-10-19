@@ -385,6 +385,9 @@ NB_MODULE(_ayafileio, m) {
     // 调试/回归测试：IOCP quarantine 深度与 drain 扫描量。
     // 持续负载下 live 应稳定在 (吞吐 × QUARANTINE_MS) 量级，
     // scanned 应按 op 数线性增长（摊销 O(1)），而不是随队列深度平方增长。
+    // quarantine 本身是 IOCP 专属（io_uring / GCD 后端没有这层延迟释放），
+    // 所以只在 Windows 上导出；tests/test_quarantine.py 在其它平台跳过。
+#ifdef _WIN32
     m.def("debug_quarantine_stats", []() {
         QuarantineStats s = quarantine_stats();
         py::dict d;
@@ -395,6 +398,7 @@ NB_MODULE(_ayafileio, m) {
         d["peak"]    = s.peak;
         return d;
     }, "Quarantine depth / drain scan accounting (test/debug aid)");
+#endif
 
     // 调试/回归测试：当前 loop 的 batcher 实际生效的批处理参数。
     // configure() 热更新的回归测试就是读这里：改完配置后再读，值必须跟着变。

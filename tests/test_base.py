@@ -13,11 +13,10 @@ from typing import Callable, Awaitable
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-if sys.platform == "win32":
-    import io
+if __name__ == "__main__":  # 脚本模式才接管控制台；pytest 下会废掉 capture
+    from _console import use_utf8_console
 
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    use_utf8_console()
 
 import ayafileio
 
@@ -356,6 +355,7 @@ def cleanup_shared_loop():
 
 
 class TestRunner:
+    __test__ = False  # 不是测试类，是脚本模式的 runner
     def __init__(self):
         self.passed = 0
         self.failed = 0
@@ -988,7 +988,10 @@ async def test_text_read_after_readline_interleave():
             assert await f.read(4) == "最速测试"
             assert await f.readline() == "\n"
             assert await f.read() == "结束"
-            assert await f.tell() == len(content.encode("utf-8"))
+            # tell() 报的是字节位置；newline=None 在 Windows 上把 \n 翻成 \r\n，
+            # 所以要和「翻译后落盘的字节数」比，不是裸 encode。
+            on_disk = content.replace("\n", os.linesep).encode("utf-8")
+            assert await f.tell() == len(on_disk), f"{await f.tell()} != {len(on_disk)}"
     finally:
         path.unlink(missing_ok=True)
 
