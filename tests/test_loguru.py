@@ -9,10 +9,10 @@ import os
 import sys
 import tempfile
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import ayafileio
-from ayafileio import open as aya_open
 
 if __name__ == "__main__":  # 脚本模式才接管控制台；pytest 下会废掉 capture
     from _console import use_utf8_console
@@ -33,42 +33,54 @@ def _cleanup(prefix: str) -> None:
 
 
 async def _aya_round(log_count: int = LOG_COUNT, num_files: int = NUM_FILES) -> float:
-    """ayafileio：N 个协程并发 append 到 num_files 个文件。"""
-    files: dict[int, object] = {}
+    """ayafileio：N 个协程并发 append 到 num_files 个文件（打开不计入计时）。"""
     _cleanup("aya")
-    try:
+    paths = [
+        Path(tempfile.gettempdir()) / f"aya_concurrent_{i}.log"
+        for i in range(num_files)
+    ]
+    async with AsyncExitStack() as stack:
+        handles = [
+            await stack.enter_async_context(
+                ayafileio.open(str(path), "a", encoding="utf-8")
+            )
+            for path in paths
+        ]
+
         async def write_one(index: int) -> None:
-            file_index = index % num_files
-            path = Path(tempfile.gettempdir()) / f"aya_concurrent_{file_index}.log"
-            if file_index not in files:
-                files[file_index] = aya_open(path, "a")
-            await files[file_index].write(MESSAGE)
+            await handles[index % num_files].write(MESSAGE)
 
         started = time.perf_counter()
         await asyncio.gather(*(write_one(i) for i in range(log_count)))
         return time.perf_counter() - started
-    finally:
-        for handle in files.values():
-            await handle.close()
 
 
 async def _sync_round(log_count: int = LOG_COUNT, num_files: int = NUM_FILES) -> float:
-    """对照：同步写 + asyncio.to_thread 模拟 50 个线程池工作者。"""
-    files: dict[int, object] = {}
+    """对照：同步写 + asyncio.to_thread 模拟 50 个线程池工作者。
+
+    句柄必须在启动线程**之前**打开：旧写法在 worker 里懒创建
+    ``files[file_index] = open(...)``，多线程同时命中同一个 index 时会各开一个
+    句柄、字典互相覆盖，未关闭的 BufferedWriter 里那部分数据也就永远没落盘
+    （实测 10000 条只写出 1,167,966 / 1,290,000 字节）。以前只打印耗时不校验，
+    这个竞态没人发现。
+    """
     _cleanup("sync")
+    paths = [
+        Path(tempfile.gettempdir()) / f"sync_concurrent_{i}.log"
+        for i in range(num_files)
+    ]
+    handles: list = []
     try:
+        handles.extend(open(path, "a", encoding="utf-8") for path in paths)  # noqa: SIM115
+
         def write_one(index: int) -> None:
-            file_index = index % num_files
-            path = Path(tempfile.gettempdir()) / f"sync_concurrent_{file_index}.log"
-            if file_index not in files:
-                files[file_index] = open(path, "a")  # noqa: SIM115 — 批次结束统一关
-            files[file_index].write(MESSAGE)
+            handles[index % num_files].write(MESSAGE)
 
         started = time.perf_counter()
         await asyncio.gather(*(asyncio.to_thread(write_one, i) for i in range(log_count)))
         return time.perf_counter() - started
     finally:
-        for handle in files.values():
+        for handle in handles:
             handle.close()
 
 
