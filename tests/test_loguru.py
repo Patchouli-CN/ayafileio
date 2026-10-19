@@ -23,6 +23,7 @@ LOG_COUNT = 10_000
 NUM_FILES = 5
 CONCURRENT = 50
 MESSAGE = "x" * 128 + "\n"
+RAW_MESSAGE = MESSAGE.encode("utf-8")
 # 文本模式 + newline=None：磁盘上 "\n" 会被翻译成 os.linesep
 MESSAGE_BYTES = len(MESSAGE.replace("\n", os.linesep).encode("utf-8"))
 
@@ -71,10 +72,14 @@ async def _sync_round(log_count: int = LOG_COUNT, num_files: int = NUM_FILES) ->
     ]
     handles: list = []
     try:
-        handles.extend(open(path, "a", encoding="utf-8") for path in paths)  # noqa: SIM115
+        # 二进制模式：BufferedWriter 有内部锁，多线程写是安全的。
+        # 文本模式（open(..., encoding="utf-8")）的 TextIOWrapper 在 3.10 上
+        # 没有自己的锁，多线程并发 write 会丢数据（CI 的 3.10 上实测
+        # 1,290,000 → 1,162,161 字节，正好少 991 条），所以对照臂用二进制。
+        handles.extend(open(path, "ab") for path in paths)  # noqa: SIM115
 
         def write_one(index: int) -> None:
-            handles[index % num_files].write(MESSAGE)
+            handles[index % num_files].write(RAW_MESSAGE)
 
         started = time.perf_counter()
         await asyncio.gather(*(asyncio.to_thread(write_one, i) for i in range(log_count)))
@@ -110,10 +115,9 @@ async def test_sync_thread_pool_baseline() -> None:
     elapsed = await _sync_round()
     try:
         assert elapsed > 0
+        expected = LOG_COUNT * len(RAW_MESSAGE)  # 二进制，无换行翻译
         written = _total_bytes("sync")
-        assert written == LOG_COUNT * MESSAGE_BYTES, (
-            f"落盘字节数不对: {written} != {LOG_COUNT * MESSAGE_BYTES}"
-        )
+        assert written == expected, f"落盘字节数不对: {written} != {expected}"
         print(f"📄 同步+线程池: {elapsed:.3f}s ({LOG_COUNT / elapsed:,.0f} 条/秒)")
     finally:
         _cleanup("sync")
