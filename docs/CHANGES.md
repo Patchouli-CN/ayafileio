@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.14.0] - 2026-10-19
 
 ### Changed
 - **Text mode `write()` now returns characters, not bytes.** It used to return the transcoded byte count — the number the backend actually knows — which was a documented deviation from the builtin and from `aiofiles`. It now follows `io.TextIOWrapper`: text mode counts **characters consumed**, binary mode keeps returning bytes, and the text whole-file helpers agree (`write_text()`, `write_text_many()` count characters; `write_bytes*()` count bytes). The on-disk result is unchanged; only the number in the return value differs, and only in text mode. Migration: code that relied on the old byte count in text mode should use `len(text.encode(encoding))` or open the file in binary. The short-write path maps a partial byte write back onto whole characters (honouring both `newline` translation and the codec), so a short write now reports the characters that actually reached the OS. `tests/test_base.py::test_write_read_text` and `tests/test_async_open.py::TestAsyncOpen::test_write_text_many` assert the new contract (the former also checks the byte size on disk), and `tests/stress_single_file.py`'s append-write phase stops reporting every completed write as a partial write (`成功: 0 / 部分写入: 50,000` → `成功: 50,000 / 部分写入: 0`).

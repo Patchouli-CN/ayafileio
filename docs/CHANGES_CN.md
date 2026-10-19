@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [1.14.0] - 2026-10-19
 
 ### 变更
 - **文本模式 `write()` 改为返回字符数，不再返回字节数。** 以前返回的是编码（并换行翻译）之后的字节数——那是后端唯一知道的量——并且被文档写成与内置、与 `aiofiles` 的一处「有意差异」。现在对齐 `io.TextIOWrapper`：文本模式计**消耗的字符数**，二进制模式仍返回字节数，文本类整文件辅助函数同口径（`write_text()`、`write_text_many()` 数字符数，`*_bytes` 系列数字节数）。落盘结果不变，只是文本模式返回值的含义变了。迁移：依赖旧字节数的代码改用 `len(text.encode(encoding))`，或以二进制模式打开。短写路径会把真实写入的字节数映射回**完整的字符**（同时考虑 `newline` 翻译与编解码器），因此短写回报的是真正落到 OS 的字符数。`tests/test_base.py::test_write_read_text` 与 `tests/test_async_open.py::TestAsyncOpen::test_write_text_many` 已改为断言新契约（前者额外校验落盘字节数）；`tests/stress_single_file.py` 的追加写阶段也不再把所有已完成的写都记成部分写（`成功: 0 / 部分写入: 50,000` → `成功: 50,000 / 部分写入: 0`），也就是说它那个阶段原先恒为 0 的「成功」计数其实一直失效。
