@@ -109,6 +109,29 @@ def _translate_for_write(text: str, newline: str | None) -> str:
     return text
 
 
+def _chars_covering_bytes(
+    data: str,
+    written_bytes: int,
+    newline: str | None,
+    encoding: str | None,
+    errors: str | None,
+) -> int:
+    """Count whole characters of *data* whose transcoded form fits in a short write.
+
+    Text-mode ``write()`` reports characters, but the backend only knows bytes:
+    on the (rare) short-write path the byte count has to be mapped back onto
+    characters one at a time, honouring both newline translation and the codec.
+    """
+    consumed = 0
+    for index, char in enumerate(data):
+        consumed += len(
+            _translate_for_write(char, newline).encode(encoding, errors=errors)
+        )
+        if consumed > written_bytes:
+            return index
+    return len(data)
+
+
 def _split_complete_tail(raw: bytes, encoding: str) -> tuple[bytes, bytes]:
     """把 *raw* 切成「字符完整部分」与「结尾残缺字符部分」。
 
@@ -802,6 +825,20 @@ class AsyncFile(Generic[T]):
     # ── write ─────────────────────────────────────────────────────────────────
 
     async def write(self, data: str | bytes | bytearray | memoryview) -> int:
+        """Write to the file, returning how much was consumed.
+
+        Binary mode returns the number of **bytes** written; text mode returns
+        the number of **characters**, matching ``io.TextIOWrapper.write`` and
+        ``aiofiles`` (the transcoded byte count differs from the character count
+        whenever the encoding is multi-byte or ``newline`` translation is on).
+
+        Like the builtin, a short write is possible — callers who need the whole
+        payload must loop on the return value.
+
+        Raises:
+            ValueError: file already closed.
+            TypeError: ``str`` in binary mode or bytes-like in text mode.
+        """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
 
@@ -811,13 +848,20 @@ class AsyncFile(Generic[T]):
             raw: bytes = _translate_for_write(data, self._newline).encode(
                 self._encoding, errors=self._errors
             )  # type: ignore
-        else:
-            if isinstance(data, str):
-                raise TypeError("Binary mode requires bytes-like input, not str.")
-            # Pass memoryview/bytearray directly – C++ accepts any buffer protocol
-            raw = data  # type: ignore[assignment]
+            await self._rewind_readahead()
+            written = await self._impl.write(raw)
+            if written == len(raw):
+                return len(data)
+            # Short write: report whole characters that made it to the OS.
+            return _chars_covering_bytes(
+                data, written, self._newline, self._encoding, self._errors
+            )
+
+        if isinstance(data, str):
+            raise TypeError("Binary mode requires bytes-like input, not str.")
+        # Pass memoryview/bytearray directly – C++ accepts any buffer protocol
         await self._rewind_readahead()
-        return await self._impl.write(raw)
+        return await self._impl.write(data)
 
     async def write_at(self, offset: int, data: bytes | bytearray | memoryview) -> int:
         """Write bytes at an absolute offset without changing tell().

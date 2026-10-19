@@ -535,9 +535,13 @@ async def test_write_read_text():
 
         async with ayafileio.open(path, "w", encoding="utf-8") as f:
             written = await f.write(content)
-            # newline=None 在 Windows 上会把 \n 翻译为 \r\n，因此写入字节数会变长。
-            expected_bytes = content.replace("\n", os.linesep).encode("utf-8")
-            assert written == len(expected_bytes)
+            # 文本模式与 io.TextIOWrapper / aiofiles 一致：返回字符数，
+            # 而不是编码（且经 newline 翻译）后的字节数。
+            assert written == len(content)
+
+        # newline=None 在 Windows 上会把 \n 翻译为 \r\n，落盘字节数因此更长。
+        expected_bytes = content.replace("\n", os.linesep).encode("utf-8")
+        assert path.stat().st_size == len(expected_bytes)
 
         async with ayafileio.open(path, "r", encoding="utf-8") as f:
             read_content = await f.read()

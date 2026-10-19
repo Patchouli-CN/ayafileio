@@ -2,6 +2,7 @@
  * bindings.cpp - nanobind module entry point
  */
 #include "globals.hpp"
+#include "result_batcher.hpp"   // refresh_batchers_config() / debug_batcher_state()
 #ifdef _WIN32
 #include "iocp.hpp"
 #include "iocp_context.hpp"
@@ -102,6 +103,10 @@ static void py_configure(py::dict options) {
     set_handle_pool_limits(cfg.handle_pool_max_per_key, cfg.handle_pool_max_total);
     // 同步 BufferPool 缓存配置
     BufferPool::instance().refresh_config();
+    // 同步已存在 batcher 的批处理配置：batcher 创建时缓存了
+    // iocp_batch_size / adaptive_batch / adaptive_target_latency_us，少了这一步，
+    // 进程跑过第一个异步操作之后 configure() 对这几个键就是静默无效的。
+    refresh_batchers_config();
     // 同步旧的全局变量（向后兼容）
     g_worker_count.store(cfg.io_worker_count);
 }
@@ -129,6 +134,9 @@ static void py_reset_config() {
     auto defaults = ayafileio::Config::defaults();
     set_handle_pool_limits(defaults.handle_pool_max_per_key, defaults.handle_pool_max_total);
     BufferPool::instance().refresh_config();
+    // 与 py_configure 对称：重置也必须把已存在的 batcher 拉回默认值，
+    // 否则 reset_config() 之后它们还停在上一次 configure() 的参数上。
+    refresh_batchers_config();
     g_worker_count.store(0);
 }
 
@@ -387,6 +395,30 @@ NB_MODULE(_ayafileio, m) {
         d["peak"]    = s.peak;
         return d;
     }, "Quarantine depth / drain scan accounting (test/debug aid)");
+
+    // 调试/回归测试：当前 loop 的 batcher 实际生效的批处理参数。
+    // configure() 热更新的回归测试就是读这里：改完配置后再读，值必须跟着变。
+    m.def("debug_batcher_state", []() {
+        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
+        if (!loop) throw py::python_error();
+#ifdef _WIN32
+        ResultBatcher* b = IOCPContext::instance().get_batcher(loop);
+#else
+        ResultBatcher* b = get_or_create_batcher(loop);
+#endif
+        Py_DECREF(loop);
+        py::dict d;
+        if (!b) return d;
+        d["outstanding"]       = b->outstanding();
+        d["threshold"]         = b->current_threshold();
+        d["threshold_max"]     = b->threshold_max();
+        d["idle_ms"]           = b->current_idle_ms();
+        d["idle_max_ms"]       = b->idle_timeout_max_ms();
+        d["adaptive"]          = b->adaptive();
+        d["target_latency_us"] = b->target_latency_us();
+        d["median_interval_us"] = b->median_interval_us();
+        return d;
+    }, "Effective batching parameters of the current loop (test/debug aid)");
 
     m.def("debug_native_aopen_count", &native_aopen_submission_count,
           "Number of opens submitted through the native backend (test/debug aid)");

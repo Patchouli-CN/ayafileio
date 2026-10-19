@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+### 变更
+- **文本模式 `write()` 改为返回字符数，不再返回字节数。** 以前返回的是编码（并换行翻译）之后的字节数——那是后端唯一知道的量——并且被文档写成与内置、与 `aiofiles` 的一处「有意差异」。现在对齐 `io.TextIOWrapper`：文本模式计**消耗的字符数**，二进制模式仍返回字节数，整文件辅助函数（`write_text()` 等）因为没有字符流可数，仍返回字节数。落盘结果不变，只是文本模式返回值的含义变了。迁移：依赖旧字节数的代码改用 `len(text.encode(encoding))`，或以二进制模式打开。短写路径会把真实写入的字节数映射回**完整的字符**（同时考虑 `newline` 翻译与编解码器），因此短写回报的是真正落到 OS 的字符数。`tests/test_base.py::test_write_read_text` 已改为断言新契约并额外校验落盘字节数；`tests/stress_single_file.py` 的追加写阶段也不再把所有已完成的写都记成部分写（`成功: 0 / 部分写入: 50,000` → `成功: 50,000 / 部分写入: 0`），也就是说它那个阶段原先恒为 0 的「成功」计数其实一直失效。
+
+### 修复
+- **Windows IOCP：延迟释放队列让持续小写吞吐塌陷。** 1.10.0 引入的 quarantine（每个完成的 `IORequest` 扣留 `QUARANTINE_MS` = 1 秒再释放，防止被重投递的 `OVERLAPPED` 命中复用地址）用 `std::vector` 实现，drain 时扫全表并对每个过期项 `erase(it)`。两半都是 O(n)：扫描每次都走完整个列表，`erase` 每次还要 memmove 整个尾部。稳态下列表深度 = 1 秒的流量，30k ops/s 就是约 3 万项，于是**每个完成的 op 都要检查几万个条目**（实测 `scanned/push` = 15,000–75,000），而且成本随吞吐上升——跑得越快付得越多。净效果：130 字节追加循环持续只跑 ~16k msg/s，每 op 多烧 2.3 倍 CPU（32.8 µs → 74.4 µs），而只要进程空闲一秒、列表排空就能跑回 ~58k msg/s。「空闲即复活」很容易被误读成写回压力，但 `GetProcessIoCounters` 显示写放大精确 1.0x、每轮工作量相同。列表按构造是 FIFO（`steady_clock` 时间戳单调不减），过期项必为前缀：改为 `std::deque` 从头弹出，摊销 O(1) 每项，保留 1 秒保留期与原有 CAS 双发保护不变。同一负载（10k×129 B / 5 文件 / 50 worker）实测：持续 16k → 84k msg/s（`scanned/push` 15k–75k → 1.0，500k 消息连续跑全程平坦），4 KiB 随机写 18.8k → 60.6k writes/s，写类负载从输给同门库约 2 倍变成反超。
+- **`configure()` 在 loop 跑过 I/O 之后对批处理键静默无效。** `ResultBatcher` 在构造时缓存 `iocp_batch_size`、`adaptive_batch`、`adaptive_target_latency_us`，而提交/AOpen 路径每个 loop 只查一次 batcher，所以第一个异步操作之后再 `configure({...})` 只对之后新建的 event loop 生效——偏偏「基准测试起手配置」和「发现自适应批处理不对劲后关掉它」都发生在那一刻。现在 `configure()` 与 `reset_config()` 都会通过 `refresh_batchers_config()` 把当前值推进每一个存活的 batcher（上界夹紧，`current_threshold` / `current_idle_ms` 立即夹到新上界，调小立刻可见）。setter 只写 relaxed 原子量、不碰任何 Python 对象，因此「持 `m_batchersMtx` 调 `call_soon_threadsafe` 与 GIL 互等」那条既有死锁路径完全没被引入：指针在锁内拷贝、在锁外更新。
+
+### 新增
+- **`debug_quarantine_stats()`**（测试/调试辅助）暴露 quarantine 深度、push 次数、drain 检查过的条目数、drain 次数与深度峰值，让「摊销 O(1)」这条不变量可以被回归测试守住，而不是再被发现一次。
+- **`debug_batcher_state()`**（测试/调试辅助）报告某个 loop 实际生效的批处理参数（`threshold`、`threshold_max`、`idle_ms`、`idle_max_ms`、`adaptive`、`target_latency_us`、`median_interval_us`、`outstanding`）。有了它，`configure()` 热更新才可验证——在此之前「这个开关到底生效没有」在 Python 侧无从回答。
+
 ## [1.13.0] - 2026-10-18
 
 ### 新增

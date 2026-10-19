@@ -115,8 +115,8 @@ async with ayafileio.open("log.txt", "a", encoding="utf-8") as f:
 沿用平台 locale 偏好编码，同内置 `open()`）。文本模式的 `newline`
 换行翻译语义与内置一致。
 
-一处与内置有意为之的差异：文本模式 `write()` 返回编码后写入的
-**字节数**，不是字符数。
+与内置一致：文本模式的 `write()` 返回**字符数**，不是编码并换行翻译之后
+的字节数。整文件辅助函数（`write_text()` 等）没有字符流可数，仍返回字节数。
 
 ayafileio 是无缓冲的：每次 `read()`/`write()` 都是一次真实 I/O 请求。
 这正是单句柄上千并发操作便宜的原因，但也意味着逐字节循环读写很糟糕
@@ -330,7 +330,7 @@ ayafileio.drain_buffer_pool()   # 释放所有缓存 I/O 缓冲区
   `asyncio.to_thread` 式执行器）。
 - **无缓冲。** aiofiles 默认带缓冲；ayafileio 不缓冲，这也是两者小
   顺序读曲线不同的原因。按块读取。
-- **文本模式 `write()` 返回编码后字节数**，不是字符数。
+- **文本模式 `write()` 返回字符数**，与内置 `open()` / aiofiles 一致。
 - **aiofiles 没有的 API：** `read_at`/`write_at`/`read_many`/
   `write_many`、`aopen()`、`read_bytes_many()`/`read_text_many()`/
   `write_bytes_many()`/`write_text_many()`、`acopy()`、`readinto()`、

@@ -1,7 +1,11 @@
 #include "result_batcher.hpp"
 #include "config.hpp"
+#ifdef _WIN32
+#include "iocp_context.hpp"   // snapshot_batchers(): the IOCP per-loop registry
+#endif
 #include <nanobind/nanobind.h>
 #include <cmath>
+#include <vector>
 
 namespace ayafileio {
 
@@ -75,6 +79,23 @@ ResultBatcher::~ResultBatcher() {
 //   idle_ms:   [1, m_idle_timeout_max_ms]
 // ════════════════════════════════════════════════════════════════════════════
 
+void ResultBatcher::set_threshold_max(size_t value) {
+    if (value < 1) value = 1;
+    if (value > 256) value = 256;
+    m_threshold_max.store(value, std::memory_order_relaxed);
+    // 调小上界时旧的更大 current_threshold 会继续生效到下一次自适应重算，
+    // 这里立刻夹紧，configure() 的效果对调用方是立即可见的。
+    size_t current = m_current_threshold.load(std::memory_order_relaxed);
+    if (current > value) m_current_threshold.store(value, std::memory_order_relaxed);
+}
+
+void ResultBatcher::set_idle_timeout_max_ms(unsigned value) {
+    if (value < 1) value = 1;
+    m_idle_timeout_max_ms.store(value, std::memory_order_relaxed);
+    unsigned current = m_current_idle_ms.load(std::memory_order_relaxed);
+    if (current > value) m_current_idle_ms.store(value, std::memory_order_relaxed);
+}
+
 void ResultBatcher::update_adaptive_locked() {
     if (!m_adaptive.load(std::memory_order_relaxed)) return;
     if (m_ring_count < 4) return;  // need at least a few samples
@@ -100,14 +121,16 @@ void ResultBatcher::update_adaptive_locked() {
     size_t dyn_threshold = static_cast<size_t>(
         std::llround(static_cast<double>(target_us) / static_cast<double>(median_us)));
     if (dyn_threshold < 1)  dyn_threshold = 1;
-    if (dyn_threshold > m_threshold_max) dyn_threshold = m_threshold_max;
+    const size_t threshold_cap = m_threshold_max.load(std::memory_order_relaxed);
+    if (dyn_threshold > threshold_cap) dyn_threshold = threshold_cap;
     m_current_threshold.store(dyn_threshold, std::memory_order_relaxed);
 
     // ── Dynamic idle timeout ──────────────────────────────────────────────
     // Scale with the median interval: ~4× the median, clamped.
     unsigned dyn_idle = static_cast<unsigned>(median_us * 4 / 1000);
     if (dyn_idle < 1) dyn_idle = 1;
-    if (dyn_idle > m_idle_timeout_max_ms) dyn_idle = m_idle_timeout_max_ms;
+    const unsigned idle_cap = m_idle_timeout_max_ms.load(std::memory_order_relaxed);
+    if (dyn_idle > idle_cap) dyn_idle = idle_cap;
     m_current_idle_ms.store(dyn_idle, std::memory_order_relaxed);
 }
 
@@ -162,7 +185,7 @@ bool ResultBatcher::push(PyObject *set_fn, PyObject *val) {
 
         size_t effective_threshold = m_adaptive.load(std::memory_order_relaxed)
             ? m_current_threshold.load(std::memory_order_relaxed)
-            : m_threshold_max;
+            : m_threshold_max.load(std::memory_order_relaxed);
         threshold_reached = (m_batch.size() >= effective_threshold);
     }
     return threshold_reached;
@@ -196,7 +219,7 @@ void ResultBatcher::flush_if_idle() {
 
         unsigned effective_idle_ms = m_adaptive.load(std::memory_order_relaxed)
             ? m_current_idle_ms.load(std::memory_order_relaxed)
-            : m_idle_timeout_max_ms;
+            : m_idle_timeout_max_ms.load(std::memory_order_relaxed);
 
         auto elapsed = std::chrono::steady_clock::now() - m_first_push;
         if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
@@ -238,7 +261,7 @@ bool ResultBatcher::idle_expired() const {
 
     unsigned effective_idle_ms = m_adaptive.load(std::memory_order_relaxed)
         ? m_current_idle_ms.load(std::memory_order_relaxed)
-        : m_idle_timeout_max_ms;
+        : m_idle_timeout_max_ms.load(std::memory_order_relaxed);
 
     auto elapsed = std::chrono::steady_clock::now() - m_first_push;
     return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
@@ -251,7 +274,7 @@ DWORD ResultBatcher::get_timeout_ms() const {
 
     unsigned effective_idle_ms = m_adaptive.load(std::memory_order_relaxed)
         ? m_current_idle_ms.load(std::memory_order_relaxed)
-        : m_idle_timeout_max_ms;
+        : m_idle_timeout_max_ms.load(std::memory_order_relaxed);
 
     auto elapsed = std::chrono::steady_clock::now() - m_first_push;
     long long elapsed_ms =
@@ -319,6 +342,33 @@ void clear_batchers() {
     std::lock_guard<std::mutex> lk(g_batchersMtx);
     for (auto &kv : g_batchers) delete kv.second;
     g_batchers.clear();
+}
+
+void refresh_batchers_config() {
+    auto &cfg = ayafileio::config();
+    const size_t   threshold = cfg.iocp_batch_size();
+    const bool     adaptive  = cfg.adaptive_batch();
+    const unsigned target_us = cfg.adaptive_target_latency_us();
+
+    // 只写原子量，不触发任何 Python 调用，因此不涉及那条
+    // 「持 m_batchersMtx 调 call_soon_threadsafe → 与 GIL 互等」的死锁路径。
+    const auto apply = [&](ResultBatcher *b) {
+        if (!b) return;
+        b->set_threshold_max(threshold);
+        b->set_adaptive(adaptive);
+        b->set_target_latency_us(target_us);
+    };
+
+#ifdef _WIN32
+    for (auto *b : IOCPContext::instance().snapshot_batchers()) apply(b);
+#endif
+    std::vector<ResultBatcher *> local;
+    {
+        std::lock_guard<std::mutex> lk(g_batchersMtx);
+        local.reserve(g_batchers.size());
+        for (auto &kv : g_batchers) local.push_back(kv.second);
+    }
+    for (auto *b : local) apply(b);
 }
 
 } // namespace ayafileio

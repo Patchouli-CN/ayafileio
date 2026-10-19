@@ -107,6 +107,9 @@ public:
 
     // ── batcher management ────────────────────────────────────────────────
     ResultBatcher* get_batcher(PyObject *loop);
+    // 当前所有 per-loop batcher 的快照（configure() 热更新用）。
+    // 锁内只拷贝裸指针，锁外再调用 —— 与 flush_batchers() 同一套理由。
+    std::vector<ResultBatcher*> snapshot_batchers();
 
     // ── Ctrl+C / emergency close ──────────────────────────────────────────
     void trigger_ctrlc() { m_ctrlcTriggered.store(true, std::memory_order_relaxed); }

@@ -120,8 +120,10 @@ Binary reads return `bytes`, text reads return `str` decoded with the given
 `encoding` (or the platform locale default, like builtin `open()`). Text mode
 supports `newline` translation with the same semantics as the builtin.
 
-One deliberate difference from the builtin: in text mode, `write()` returns
-the number of **bytes** written after encoding, not the number of characters.
+Like the builtin: in text mode `write()` returns the number of **characters**
+consumed, not the byte count after encoding and `newline` translation. The
+whole-file helpers (`write_text()` and friends) have no character stream to
+count and still report bytes.
 
 `ayafileio` is unbuffered: every `read()`/`write()` is one I/O request. That
 is what makes thousands of concurrent operations on one handle cheap, but it
@@ -350,7 +352,7 @@ Differences worth knowing:
 - **Unbuffered.** aiofiles opens buffered by default; ayafileio does not
   buffer, which is why tiny sequential reads look different between the two.
   Read in chunks.
-- **Text-mode `write()` returns encoded bytes**, not characters.
+- **Text-mode `write()` returns characters**, matching the builtin and aiofiles.
 - **Extra APIs aiofiles doesn't have:** `read_at`/`write_at`/`read_many`/
   `write_many`, `aopen()`, `read_bytes_many()`/`read_text_many()`/
   `write_bytes_many()`/`write_text_many()`, `acopy()`,

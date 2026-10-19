@@ -52,6 +52,14 @@ public:
     bool adaptive() const                    { return m_adaptive.load(std::memory_order_relaxed); }
     void set_target_latency_us(unsigned us)  { m_target_latency_us.store(us, std::memory_order_relaxed); }
     unsigned target_latency_us() const       { return m_target_latency_us.load(std::memory_order_relaxed); }
+    // 运行期更新上界（configure() 热更新用）。写者取 m_mtx，因为
+    // m_threshold_max / m_idle_timeout_max_ms 也在 m_mtx 下被 push() 与
+    // update_adaptive_locked() 读取；current_* 立即夹到新上界，避免
+    // 「调小之后旧的更大值还生效」。
+    void set_threshold_max(size_t value);
+    size_t threshold_max() const { return m_threshold_max.load(std::memory_order_relaxed); }
+    void set_idle_timeout_max_ms(unsigned value);
+    unsigned idle_timeout_max_ms() const { return m_idle_timeout_max_ms.load(std::memory_order_relaxed); }
 
     // ── data path (GIL required) ──────────────────────────────────────────
     bool push(PyObject *set_fn, PyObject *val);
@@ -96,8 +104,10 @@ private:
     bool m_has_pending{false};                            // guarded by m_mtx
 
     // ── fixed config ──────────────────────────────────────────────────────
-    size_t   m_threshold_max;         // upper bound from config (e.g., 256)
-    unsigned m_idle_timeout_max_ms;   // upper bound from config (e.g., 5ms)
+    // 原子是因为 configure() 可以在任意线程改它们，而 push() /
+    // update_adaptive_locked() 只持 m_mtx 读取，不加锁读会构成数据竞争。
+    std::atomic<size_t>   m_threshold_max;        // upper bound from config (e.g., 256)
+    std::atomic<unsigned> m_idle_timeout_max_ms;  // upper bound from config (e.g., 5ms)
 
     // ── adaptive state ────────────────────────────────────────────────────
     std::atomic<bool>     m_adaptive{true};
@@ -121,5 +131,12 @@ private:
 // ── Global batcher registry (one per event loop, for non-IOCP backends) ─────
 ResultBatcher *get_or_create_batcher(PyObject *loop);
 void clear_batchers();
+
+// 把当前 config() 重新应用到所有已存在的 batcher。
+// batcher 在创建时缓存 iocp_batch_size / adaptive_batch /
+// adaptive_target_latency_us，没有这一步的话，进程里跑过第一个异步操作之后
+// configure() 对这些键就是静默无效的（只有新建的 event loop 才会拿到新值）。
+// 只改原子量，不做任何 Python 调用，因此调用方持有 GIL 也无死锁风险。
+void refresh_batchers_config();
 
 } // namespace ayafileio

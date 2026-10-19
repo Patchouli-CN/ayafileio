@@ -313,6 +313,14 @@ DWORD IOCPContext::get_min_batcher_timeout_ms() {
     return min_timeout;
 }
 
+std::vector<ResultBatcher*> IOCPContext::snapshot_batchers() {
+    std::vector<ResultBatcher*> out;
+    std::lock_guard<std::mutex> lk(m_batchersMtx);
+    out.reserve(m_batchers.size());
+    for (auto &kv : m_batchers) out.push_back(kv.second.get());
+    return out;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Worker thread
 // ════════════════════════════════════════════════════════════════════════════
