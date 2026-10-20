@@ -42,7 +42,7 @@ py::dict gcd_detail();
 
 // ── 当前后端的能力明细（跨平台汇总入口）─────────────────────────────────────
 // 返回 dict 的键随后端不同而不同：
-//   iocp:        completion_model / batch_harvest / handle_pool
+//   iocp:        completion_model / batch_harvest
 //   io_uring:    available / completion_model / features / opcodes / sqpoll
 //   dispatch_io: dispatch_io / completion_model / kernel_managed_workqueue / ...
 //   thread_pool: completion_model=false + note

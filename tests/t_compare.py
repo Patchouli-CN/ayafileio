@@ -350,13 +350,9 @@ async def measure_once(kind: str, backend: str, path: str, chunk: int,
         ops = sum(counts)
 
     elif kind in ("batch_open", "batch_open_only"):
-        # Many tiny files per batch, all opened concurrently. The Windows
-        # handle pool is drained first so every round starts cold; batches
-        # repeated inside the round then reuse cached handles, which is the
-        # out-of-the-box behavior of each library. The opens-only variants
-        # measure exactly one batch per round (a time-boxed loop would be
-        # dominated by pool hits, not by open cost).
-        ayafileio.drain_handle_pool()
+        # Many tiny files per batch, all opened concurrently. The opens-only
+        # variants measure exactly one batch per round (a time-boxed loop
+        # would be dominated by repeat-open cost, not by open cost).
         if kind == "batch_open":
             runner = {"aya_many": aya_batch_many,
                       "aya_sync": aya_batch_gather_rb,

@@ -149,8 +149,6 @@ ayafileio.reset_config()  # 恢复默认
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `handle_pool_max_per_key` | 64 | 每个文件最大缓存句柄数 (Windows) |
-| `handle_pool_max_total` | 2048 | 全局最大缓存句柄数 (Windows) |
 | `io_worker_count` | 0 | I/O 工作线程数，0 = 自动 |
 | `buffer_pool_max` | 512 | 最大缓存缓冲区数 |
 | `buffer_size` | 65536 | 单个缓冲区大小（字节） |
@@ -326,7 +324,6 @@ def wrap_file(fd: int, mode: str = "rb", *, owns_fd: bool = False) -> AsyncFile[
 ### 池管理
 
 ```python
-def drain_handle_pool() -> None: ...            # 清空句柄池中的所有缓存句柄
 def drain_buffer_pool() -> None: ...            # 清空缓冲区池中的所有缓存缓冲区
 ```
 

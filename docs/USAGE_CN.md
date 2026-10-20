@@ -260,8 +260,6 @@ ayafileio.reset_config()
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `handle_pool_max_per_key` | 64 | 每文件缓存句柄上限（Windows） |
-| `handle_pool_max_total` | 2048 | 缓存句柄总数上限（Windows） |
 | `io_worker_count` | 0 | I/O worker 线程数，0 = 自动 |
 | `buffer_pool_max` | 512 | 缓存 I/O 缓冲区上限 |
 | `buffer_size` | 65536 | 缓冲区大小（字节） |
@@ -287,7 +285,6 @@ Dispatch I/O。原生后端不可用时（旧内核、受限容器），自动�
 ## 池管理
 
 ```python
-ayafileio.drain_handle_pool()   # 释放所有缓存句柄
 ayafileio.drain_buffer_pool()   # 释放所有缓存 I/O 缓冲区
 ```
 
@@ -295,8 +292,7 @@ ayafileio.drain_buffer_pool()   # 释放所有缓存 I/O 缓冲区
 
 ## 性能最佳实践
 
-1. **一次打开，多次操作。** 即使句柄有池化，循环里反复开关依然每次
-   多付一个协程往返：
+1. **一次打开，多次操作。** 循环里反复开关每次都要多付一个协程往返：
 
    ```python
    async with ayafileio.open("data.bin", "rb") as f:

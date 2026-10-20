@@ -33,6 +33,7 @@ class AyafileioConfig(TypedDict, total=False):
     close_timeout_ms: int
 
     # ── Windows / IOCP ─────────────────────────────────────────────────────
+    # deprecated：句柄池已移除，这两个键被接受但静默忽略
     handle_pool_max_per_key: int
     handle_pool_max_total: int
     iocp_batch_size: int
@@ -68,9 +69,9 @@ def configure(options: AyafileioConfig) -> None:
 
     **Windows / IOCP**
     ``handle_pool_max_per_key``
-        每个文件最大缓存句柄数（默认 64）。
+        已废弃：句柄池已移除，此键被接受但静默忽略。
     ``handle_pool_max_total``
-        全局最大缓存句柄数（默认 2048）。
+        已废弃：同上。
     ``iocp_batch_size``
         IOCP 批量收割大小（默认 64，范围 1-256）。
 

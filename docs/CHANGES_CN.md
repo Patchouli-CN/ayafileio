@@ -10,6 +10,9 @@
 ### 变更
 - **路径参数改为遵循 PEP 519（`os.PathLike`），不再只认 `pathlib.Path`。** `open()`、`aopen()`、`AsyncFile()` / `AsyncFile.open()` 以及建立在它们之上的全部辅助函数（`read_bytes`、`read_text`、`read_bytes_many`、`write_text_many` 等）此前标注为 `str | Path`，并用 `str(path)` 归一化。这对 `pathlib.Path` 恰好可行（它的 `__str__` 就是路径），但对自定义 `os.PathLike` 实现会静默得到一串 repr 模样的"路径"，甚至 `open(12345)` 这种调用也会被字符串化后悄悄接受。现在所有入口统一标注 `str | os.PathLike[str]`，并通过 `os.fspath()` 归一化——自定义 path-like 对象正常工作，非路径类型则立即收到 `os.fspath` 抛出的清晰 `TypeError`，而不是之后一个莫名其妙的文件找不到错误。顺带清掉了 `_types.py` 里不再使用的 `pathlib.Path` 导入。
 
+### 移除
+- **Windows 句柄池整体拆除。** 它在原理上不可行：HANDLE 一旦关联 IOCP 就无法解除关联，回收的句柄再次 `CreateIoCompletionPort` 会失败（err=87），旧错误路径还级联成堆损坏（见下方 1.3.0 的修复记录）。实际上池早已是死代码——没有任何地方调用 `handle_pool_release`，每次 acquire 必然 miss。`src/handle_pool.{cpp,hpp}`、`poolKey` 相关管线、`drain_handle_pool()` 与 `set/get_handle_pool_limits` API 一并删除。兼容保留：`configure({"handle_pool_max_per_key"/"handle_pool_max_total": ...})` 被接受但静默忽略；`get_capabilities()['backend_detail']` 在 Windows 上不再上报 `handle_pool`。
+
 ## [1.14.0] - 2026-10-19
 
 ### 变更

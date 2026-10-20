@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Path arguments now follow PEP 519 (`os.PathLike`), not just `pathlib.Path`.** `open()`, `aopen()`, `AsyncFile()`/`AsyncFile.open()` and every helper built on them (`read_bytes`, `read_text`, `read_bytes_many`, `write_text_many`, ...) used to accept `str | Path` and normalize with `str(path)`. That worked for `pathlib.Path` (whose `__str__` happens to be the path) but silently produced a `repr`-looking "path" for custom `os.PathLike` implementations, and accepted nonsense like `open(12345)` by stringifying it. All entry points are now annotated `str | os.PathLike[str]` and normalize through `os.fspath()` — custom path-like objects work, and non-path types fail fast with a clear `TypeError` from `os.fspath` instead of a confusing file-not-found later. Dropped a now-unused `pathlib.Path` import in `_types.py`.
 
+### Removed
+- **The Windows handle pool is gone entirely.** It was unworkable in principle: once a HANDLE is associated with an IOCP, the association cannot be revoked, so a recycled handle fails `CreateIoCompletionPort` (err=87) and the old error path cascaded into heap corruption (see the 1.3.0 fix below). In practice the pool was already dead code — nothing called `handle_pool_release`, so every acquire missed. `src/handle_pool.{cpp,hpp}`, the `poolKey` plumbing, and the `drain_handle_pool()` / `set/get_handle_pool_limits` APIs are deleted. Compatibility shims: `configure({"handle_pool_max_per_key"/"handle_pool_max_total": ...})` is accepted but silently ignored, and `get_capabilities()['backend_detail']` no longer reports `handle_pool` on Windows.
+
 ## [1.14.0] - 2026-10-19
 
 ### Changed

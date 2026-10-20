@@ -43,11 +43,8 @@ from ._types import AyaFileIO, BackendInfo, Capabilities
 from ._capabilities import get_capabilities
 from ._config import AyafileioConfig, configure, get_config, reset_config, get_backend_info
 from ._compat import (
-    set_handle_pool_limits,
-    get_handle_pool_limits,
     set_io_worker_count,
     set_iocp_worker_count,
-    drain_handle_pool,
     drain_buffer_pool,
 )
 
@@ -77,10 +74,7 @@ __all__ = [
     "get_config",
     "reset_config",
     "get_backend_info",
-    "set_handle_pool_limits",
-    "get_handle_pool_limits",
     "set_io_worker_count",
     "set_iocp_worker_count",
-    "drain_handle_pool",
     "drain_buffer_pool",
 ]

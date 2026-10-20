@@ -153,8 +153,6 @@ ayafileio.reset_config()  # back to defaults
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `handle_pool_max_per_key` | 64 | Max cached handles per file (Windows) |
-| `handle_pool_max_total` | 2048 | Max total cached handles (Windows) |
 | `io_worker_count` | 0 | IO worker threads, 0 = auto |
 | `buffer_pool_max` | 512 | Max cached buffers |
 | `buffer_size` | 65536 | Buffer size in bytes |
@@ -345,7 +343,6 @@ an `AsyncFile`. Binary mode only.
 ### Pool management
 
 ```python
-def drain_handle_pool() -> None: ...           # release all cached file handles
 def drain_buffer_pool() -> None: ...           # release all cached I/O buffers
 ```
 

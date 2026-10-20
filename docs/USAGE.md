@@ -278,8 +278,6 @@ ayafileio.reset_config()
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `handle_pool_max_per_key` | 64 | Max cached handles per file (Windows) |
-| `handle_pool_max_total` | 2048 | Max total cached handles (Windows) |
 | `io_worker_count` | 0 | I/O worker threads, 0 = auto |
 | `buffer_pool_max` | 512 | Max cached I/O buffers |
 | `buffer_size` | 65536 | Buffer size in bytes |
@@ -307,7 +305,6 @@ restricted container), ayafileio falls back to a thread-pool backend and
 ## Pool management
 
 ```python
-ayafileio.drain_handle_pool()   # release all cached file handles
 ayafileio.drain_buffer_pool()   # release all cached I/O buffers
 ```
 
@@ -316,7 +313,7 @@ Useful after bulk tempfile operations or between benchmark rounds.
 ## Performance best practices
 
 1. **Open once, operate many times.** Reopening in a loop costs a coroutine
-   round-trip per iteration even when the handle itself is pooled:
+   round-trip per iteration:
 
    ```python
    async with ayafileio.open("data.bin", "rb") as f:

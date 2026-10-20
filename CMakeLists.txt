@@ -100,7 +100,6 @@ if(WIN32)
     message(STATUS "Building for Windows (IOCP Backend)")
     list(APPEND SOURCES
         src/backends/windows_io_backend.cpp
-        src/handle_pool.cpp
         src/iocp.cpp
         src/iocp_context.cpp
     )

@@ -211,7 +211,7 @@ void IOCPContext::shutdown() {
 uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
                                      PyObject *create_future,
                                      bool appendMode,
-                                     const PoolKey &poolKey, bool owns_fd) {
+                                     DWORD access, bool owns_fd) {
     auto &cfg = ayafileio::config();
     auto s = std::make_shared<Session>();
     s->id                     = m_nextSessionId.fetch_add(1, std::memory_order_relaxed);
@@ -221,19 +221,18 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
     s->create_future          = create_future;
     Py_INCREF(create_future);
     s->appendMode             = appendMode;
-    s->poolKey                = poolKey;
+    s->access                 = access;
     s->owns_fd                = owns_fd;
     s->cached_buffer_size     = cfg.buffer_size();
     s->cached_buffer_pool_max = cfg.buffer_pool_max();
     s->cached_close_timeout_ms = cfg.close_timeout_ms();
 
     // Associate handle with the appropriate IOCP using sessionId as key
-    HANDLE iocp = (poolKey.access & GENERIC_WRITE) && !(poolKey.access & GENERIC_READ)
+    HANDLE iocp = (access & GENERIC_WRITE) && !(access & GENERIC_READ)
                       ? m_writeIocp : m_readIocp;  // write-only → write IOCP; all others → read IOCP
     if (!CreateIoCompletionPort(h, iocp, (ULONG_PTR)s->id, 0)) {
         DWORD err = GetLastError();
         UR_DEBUG_LOG("create_session: CreateIoCompletionPort FAILED id=%llu h=%p err=%lu", s->id, h, err);
-        if (!poolKey.path.empty()) handle_pool_evict(poolKey);
         CloseHandle(h);
         Py_DECREF(create_future);
         win_throw_os_error(err, "Failed to associate handle with IOCP");
@@ -645,8 +644,8 @@ PyObject *IOCPContext::check_session_closed(const std::shared_ptr<Session> &s) {
 
 HANDLE IOCPContext::iocp_for_session(const std::shared_ptr<Session> &s) {
     // Only write-only sessions use write IOCP; everything else uses read IOCP
-    return (s->poolKey.access & GENERIC_WRITE) &&
-                   !(s->poolKey.access & GENERIC_READ)
+    return (s->access & GENERIC_WRITE) &&
+                   !(s->access & GENERIC_READ)
                ? m_writeIocp
                : m_readIocp;
 }
@@ -1327,9 +1326,8 @@ PyObject *IOCPContext::submit_close(uint64_t session_id) {
     }
 
     long close_pending = s->pending.load(std::memory_order_acquire);
-    UR_DEBUG_LOG("submit_close sid=%llu h=%p pending=%ld owns_fd=%d poolPath=%s",
-                 session_id, s->handle, close_pending, s->owns_fd,
-                 s->poolKey.path.empty() ? "<none>" : s->poolKey.path.c_str());
+    UR_DEBUG_LOG("submit_close sid=%llu h=%p pending=%ld owns_fd=%d",
+                 session_id, s->handle, close_pending, s->owns_fd);
 
     if (s->handle != INVALID_HANDLE_VALUE) {
         if (close_pending > 0) {
@@ -1359,13 +1357,9 @@ PyObject *IOCPContext::submit_close(uint64_t session_id) {
         }
 
         if (s->owns_fd) {
-            // IOCP handles must NOT be pooled — the kernel IOCP association
-            // outlives the handle's pool lifetime and causes
-            // ERROR_INVALID_PARAMETER (err=87) when CreateIoCompletionPort
-            // is called again on the recycled handle.
-            if (!s->poolKey.path.empty()) {
-                handle_pool_evict(s->poolKey);
-            }
+            // IOCP-associated handles are closed directly: the kernel IOCP
+            // association cannot be revoked, so a recycled HANDLE would fail
+            // CreateIoCompletionPort with err=87 (see docs/CHANGES.md 1.3.0).
             UR_DEBUG_LOG("submit_close sid=%llu — CloseHandle h=%p", session_id, s->handle);
             CloseHandle(s->handle);
         }
@@ -1429,9 +1423,6 @@ void IOCPContext::close_all_sessions() {
                              s->id, elapsed, s->pending.load(std::memory_order_acquire));
             }
             if (s->owns_fd) {
-                if (!s->poolKey.path.empty()) {
-                    handle_pool_evict(s->poolKey);
-                }
                 CloseHandle(s->handle);
             }
             s->handle = INVALID_HANDLE_VALUE;

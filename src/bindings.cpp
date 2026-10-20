@@ -17,7 +17,6 @@
 #include <fcntl.h>
 #endif
 #include "file_handle.hpp"
-#include "handle_pool.hpp"
 #include "config.hpp"
 #include "pool.hpp"
 #include "discover.h"
@@ -35,12 +34,8 @@ using namespace ayafileio;
 static void py_configure(py::dict options) {
     auto cfg = ayafileio::config().get();
 
-    if (options.contains("handle_pool_max_per_key")) {
-        cfg.handle_pool_max_per_key = py::cast<size_t>(options["handle_pool_max_per_key"]);
-    }
-    if (options.contains("handle_pool_max_total")) {
-        cfg.handle_pool_max_total = py::cast<size_t>(options["handle_pool_max_total"]);
-    }
+    // handle_pool_max_per_key / handle_pool_max_total 已废弃（句柄池移除），
+    // 静默忽略以免已发布的用户代码报错
     if (options.contains("io_worker_count")) {
         unsigned val = py::cast<unsigned>(options["io_worker_count"]);
         if (val > 128) throw py::value_error("io_worker_count must be 0-128");
@@ -99,8 +94,6 @@ static void py_configure(py::dict options) {
 
     ayafileio::config().update(cfg);
 
-    // 同步 handle pool 原子变量，保证 handle_pool_release 读到最新值
-    set_handle_pool_limits(cfg.handle_pool_max_per_key, cfg.handle_pool_max_total);
     // 同步 BufferPool 缓存配置
     BufferPool::instance().refresh_config();
     // 同步已存在 batcher 的批处理配置：batcher 创建时缓存了
@@ -114,8 +107,6 @@ static void py_configure(py::dict options) {
 static py::dict py_get_config() {
     auto cfg = ayafileio::config().get();
     py::dict result;
-    result["handle_pool_max_per_key"] = cfg.handle_pool_max_per_key;
-    result["handle_pool_max_total"] = cfg.handle_pool_max_total;
     result["io_worker_count"] = cfg.io_worker_count;
     result["buffer_pool_max"] = cfg.buffer_pool_max;
     result["buffer_size"] = cfg.buffer_size;
@@ -131,8 +122,6 @@ static py::dict py_get_config() {
 static void py_reset_config() {
     ayafileio::config().update(ayafileio::Config::defaults());
 
-    auto defaults = ayafileio::Config::defaults();
-    set_handle_pool_limits(defaults.handle_pool_max_per_key, defaults.handle_pool_max_total);
     BufferPool::instance().refresh_config();
     // 与 py_configure 对称：重置也必须把已存在的 batcher 拉回默认值，
     // 否则 reset_config() 之后它们还停在上一次 configure() 的参数上。
@@ -221,8 +210,6 @@ NB_MODULE(_ayafileio, m) {
 
     // 清理由 Python 层负责注册；在 C++ 层暴露一个可调用的 cleanup()
     m.def("cleanup", []() {
-    // 总是先尝试 drain handle pool（跨平台）
-    handle_pool_drain();
 #ifdef HAVE_IO_URING
     // Linux 特有：清理所有 io_uring 实例
     uring_cleanup_all();
@@ -427,21 +414,8 @@ NB_MODULE(_ayafileio, m) {
     m.def("debug_native_aopen_count", &native_aopen_submission_count,
           "Number of opens submitted through the native backend (test/debug aid)");
 
-    // 向后兼容的句柄池 API
-    m.def("set_handle_pool_limits", &set_handle_pool_limits,
-        "Set handle pool max_per_key and max_total",
-        py::arg("max_per_key"), py::arg("max_total"));
-
-    m.def("drain_handle_pool", &handle_pool_drain,
-        "Drain all cached handles from the pool (useful between benchmark rounds)");
-
     m.def("drain_buffer_pool", &pool_clear,
         "Drain all cached I/O buffers from the buffer pool");
-
-    m.def("get_handle_pool_limits", []() {
-        auto p = get_handle_pool_limits();
-        return py::make_tuple(p.first, p.second);
-    }, "Get current handle pool limits as (max_per_key, max_total)");
 
     // 向后兼容的 worker count API
 #ifdef _WIN32
@@ -459,8 +433,6 @@ NB_MODULE(_ayafileio, m) {
           R"doc(Configure ayafileio with a dictionary of options.
 
 Options:
-    handle_pool_max_per_key (int): Max cached handles per file (Windows, default 64)
-    handle_pool_max_total (int): Max total cached handles (Windows, default 2048)
     io_worker_count (int): IO worker threads, 0=auto (default 0, max 128)
     buffer_pool_max (int): Max cached buffers (default 512)
     buffer_size (int): Buffer size in bytes (default 65536)
@@ -468,6 +440,10 @@ Options:
     io_uring_queue_depth (int): io_uring queue depth (Linux, default 256)
     io_uring_sqpoll (bool): Enable SQPOLL mode (Linux, default False)
     enable_debug_log (bool): Enable debug logging (default False)
+
+Deprecated:
+    handle_pool_max_per_key / handle_pool_max_total: accepted but ignored
+    (the handle pool was removed; IOCP-associated handles cannot be reused)
 
 Example:
     >>> ayafileio.configure({
@@ -508,7 +484,7 @@ Everything in get_backend_info(), plus a backend_detail dict whose keys
 depend on the active backend:
 
     iocp (Windows):
-        completion_model, batch_harvest, handle_pool
+        completion_model, batch_harvest
     io_uring (Linux):
         available, completion_model, sqpoll,
         features (ring.features bit matrix, e.g. single_mmap, fast_poll),

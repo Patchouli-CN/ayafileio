@@ -4,7 +4,6 @@
 #include "globals.hpp"
 #include "io_request.hpp"
 #include "result_batcher.hpp"
-#include "handle_pool.hpp"
 #include <windows.h>
 #include <atomic>
 #include <memory>
@@ -38,7 +37,8 @@ struct Session {
     std::atomic<long> pending{0};
     std::counting_semaphore<INT32_MAX> close_wake{0};
     bool            owns_fd = true;
-    PoolKey         poolKey;
+    // GENERIC_READ/GENERIC_WRITE 组合：决定 session 挂到 read 还是 write IOCP
+    DWORD           access = 0;
 
     // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 是否成功启用。
     // 启用时同步完成的 op 不再投递 IOCP 完成包：提交线程必须自己递减
@@ -90,7 +90,7 @@ public:
 
     // ── session management ────────────────────────────────────────────────
     uint64_t create_session(HANDLE h, PyObject *loop, PyObject *create_future,
-                            bool appendMode, const PoolKey &poolKey, bool owns_fd);
+                            bool appendMode, DWORD access, bool owns_fd);
     std::shared_ptr<Session> get_session(uint64_t id) const;
     void remove_session(uint64_t id);
 

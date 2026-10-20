@@ -22,8 +22,6 @@ struct Config {
     unsigned close_timeout_ms  = 4000;         // Close timeout for pending I/O (ms)
 
     // ── Windows / IOCP ────────────────────────────────────────────────────
-    size_t   handle_pool_max_per_key = 64;     // Max cached handles per file
-    size_t   handle_pool_max_total   = 2048;   // Max total cached handles
     unsigned iocp_batch_size         = 64;     // GQCSEx batch size (1-256)
 
     // ── Linux / io_uring ──────────────────────────────────────────────────
@@ -43,8 +41,6 @@ struct Config {
         if (buffer_pool_max == 0 || buffer_size == 0) return false;
         if (close_timeout_ms == 0 || close_timeout_ms > 30000) return false;
         // Windows
-        if (handle_pool_max_per_key == 0 || handle_pool_max_total == 0) return false;
-        if (handle_pool_max_per_key > handle_pool_max_total) return false;
         if (iocp_batch_size < 1 || iocp_batch_size > 256) return false;
         // Linux
         if (io_uring_queue_depth == 0 || io_uring_queue_depth > 4096) return false;
@@ -87,8 +83,6 @@ public:
             else if (key == "buffer_pool_max")              m_config.buffer_pool_max = value;
             else if (key == "buffer_size")                  m_config.buffer_size = value;
             else if (key == "close_timeout_ms")             m_config.close_timeout_ms = (unsigned)value;
-            else if (key == "handle_pool_max_per_key")      m_config.handle_pool_max_per_key = value;
-            else if (key == "handle_pool_max_total")        m_config.handle_pool_max_total = value;
             else if (key == "iocp_batch_size")              m_config.iocp_batch_size = (unsigned)value;
             else if (key == "io_uring_queue_depth")         m_config.io_uring_queue_depth = (unsigned)value;
         }
@@ -102,8 +96,6 @@ public:
     size_t   buffer_pool_max()    const { std::shared_lock lk(m_mutex); return m_config.buffer_pool_max; }
     size_t   buffer_size()        const { std::shared_lock lk(m_mutex); return m_config.buffer_size; }
     unsigned close_timeout_ms()   const { std::shared_lock lk(m_mutex); return m_config.close_timeout_ms; }
-    size_t   handle_pool_max_per_key() const { std::shared_lock lk(m_mutex); return m_config.handle_pool_max_per_key; }
-    size_t   handle_pool_max_total()   const { std::shared_lock lk(m_mutex); return m_config.handle_pool_max_total; }
     unsigned iocp_batch_size()         const { std::shared_lock lk(m_mutex); return m_config.iocp_batch_size; }
     unsigned io_uring_queue_depth()    const { std::shared_lock lk(m_mutex); return m_config.io_uring_queue_depth; }
     unsigned io_uring_flags()          const { std::shared_lock lk(m_mutex); return m_config.io_uring_flags; }

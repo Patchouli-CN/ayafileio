@@ -70,7 +70,6 @@ class IocpDetail(TypedDict):
     """``backend_detail`` — Windows IOCP"""
     completion_model: bool  # 恒 True：IRP + 中断的提交-完成模型
     batch_harvest: bool
-    handle_pool: bool
 
 
 class IoUringDetail(TypedDict, total=False):

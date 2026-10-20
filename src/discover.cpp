@@ -282,7 +282,6 @@ py::dict backend_detail() {
     py::dict d;
     d["completion_model"] = true;  // IRP + IOCP：提交后无线程等待，中断报完成
     d["batch_harvest"] = true;     // GetQueuedCompletionStatusEx 批量收割
-    d["handle_pool"] = true;       // 句柄池复用
     return d;
 #elif defined(HAVE_IO_URING)
     if (!io_uring_available()) {

@@ -59,38 +59,28 @@ void WindowsIOBackend::init_from_path(const std::string &path, const std::string
     if (canRead)  access |= GENERIC_READ;
     if (canWrite) access |= GENERIC_WRITE;
 
-    // ── open / acquire HANDLE ─────────────────────────────────────────────
-    HANDLE h = INVALID_HANDLE_VALUE;
-    PoolKey poolKey;
-    bool canReuse = (disp == OPEN_EXISTING || disp == OPEN_ALWAYS);
-    if (canReuse) {
-        poolKey = make_pool_key(path, access, disp);
-        h = handle_pool_acquire(poolKey);
-    }
-
+    // ── open HANDLE ───────────────────────────────────────────────────────
     std::wstring wpath = std::filesystem::u8path(path).wstring();
 
+    HANDLE h;
+    {
+        // 阻塞型系统调用：释放 GIL——open_async 的工作线程借此真正
+        // 并行打开；同步 open 路径也不再冻结整个解释器
+        GilRelease gr;
+        h = CreateFileW(wpath.c_str(), access,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
+    }
     if (h == INVALID_HANDLE_VALUE) {
-        {
-            // 阻塞型系统调用：释放 GIL——open_async 的工作线程借此真正
-            // 并行打开；同步 open 路径也不再冻结整个解释器
-            GilRelease gr;
-            h = CreateFileW(wpath.c_str(), access,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            NULL, disp, FILE_FLAG_OVERLAPPED, NULL);
-        }
-        if (h == INVALID_HANDLE_VALUE) {
-            DWORD err = GetLastError();
-            win_throw_os_error(err, "Failed to open file", path.c_str());
-        }
+        DWORD err = GetLastError();
+        win_throw_os_error(err, "Failed to open file", path.c_str());
     }
 
     // ── register with IOCPContext ─────────────────────────────────────────
     try {
         m_sessionId = IOCPContext::instance().create_session(
-            h, loop, create_future, appendMode, poolKey, /*owns_fd=*/true);
+            h, loop, create_future, appendMode, access, /*owns_fd=*/true);
     } catch (...) {
-        if (!poolKey.path.empty()) handle_pool_evict(poolKey);
         CloseHandle(h);
         throw;
     }
@@ -148,7 +138,6 @@ WindowsIOBackend::WindowsIOBackend(int fd, const std::string &mode, bool owns_fd
 
     HANDLE h = INVALID_HANDLE_VALUE;
     bool ownsFd = true;
-    PoolKey poolKey;  // empty path → non-poolable
 
     if (path_len > 0 && path_len <= MAX_PATH) {
         // ──方案 A: have path, reopen with OVERLAPPED ───────────────────────
@@ -187,8 +176,9 @@ WindowsIOBackend::WindowsIOBackend(int fd, const std::string &mode, bool owns_fd
 
     // ── register with IOCPContext ─────────────────────────────────────────
     try {
+        // fd 路径 access 未知，传 0 → 挂 read IOCP（与历史行为一致）
         m_sessionId = IOCPContext::instance().create_session(
-            h, loop, create_future, appendMode, poolKey, ownsFd);
+            h, loop, create_future, appendMode, /*access=*/0, ownsFd);
     } catch (...) {
         if (ownsFd) CloseHandle(h);
         Py_DECREF(create_future);

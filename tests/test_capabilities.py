@@ -77,7 +77,7 @@ def test_backend_detail():
     if sys.platform == "win32":
         check("iocp completion_model", detail["completion_model"] is True)
         check("iocp batch_harvest", detail["batch_harvest"] is True)
-        check("iocp handle_pool", detail["handle_pool"] is True)
+        check("iocp 无 handle_pool 键（池已移除）", "handle_pool" not in detail)
     elif sys.platform == "linux":
         if caps["backend"] == "io_uring":
             check("io_uring available", detail["available"] is True)
