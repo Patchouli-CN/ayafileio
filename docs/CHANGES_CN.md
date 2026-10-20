@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-20
+
 ### 变更
 - **路径参数改为遵循 PEP 519（`os.PathLike`），不再只认 `pathlib.Path`。** `open()`、`aopen()`、`AsyncFile()` / `AsyncFile.open()` 以及建立在它们之上的全部辅助函数（`read_bytes`、`read_text`、`read_bytes_many`、`write_text_many` 等）此前标注为 `str | Path`，并用 `str(path)` 归一化。这对 `pathlib.Path` 恰好可行（它的 `__str__` 就是路径），但对自定义 `os.PathLike` 实现会静默得到一串 repr 模样的"路径"，甚至 `open(12345)` 这种调用也会被字符串化后悄悄接受。现在所有入口统一标注 `str | os.PathLike[str]`，并通过 `os.fspath()` 归一化——自定义 path-like 对象正常工作，非路径类型则立即收到 `os.fspath` 抛出的清晰 `TypeError`，而不是之后一个莫名其妙的文件找不到错误。顺带清掉了 `_types.py` 里不再使用的 `pathlib.Path` 导入。
 
