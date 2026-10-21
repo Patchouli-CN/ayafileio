@@ -1,6 +1,7 @@
 #include "iocp_context.hpp"
 #include "pool.hpp"
 #include "config.hpp"
+#include "global_thread_pool.hpp"
 #include "utils/debug_log.hpp"
 #include "utils/yuyuko_memlife.hpp"
 #include <algorithm>
@@ -1077,17 +1078,62 @@ PyObject *IOCPContext::submit_flush(uint64_t session_id) {
     future = PyObject_CallNoArgs(s->create_future);
     if (!future) return nullptr;
 
-    if (!FlushFileBuffers(s->handle)) {
-        DWORD err = GetLastError();
-        PyObject *exc = PyObject_CallFunction(g_OSError, "is", (int)err, "FlushFileBuffers failed");
-        PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
-        PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
-        Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
-        return future;
+    PyObject *set_result = PyObject_GetAttr(future, g_str_set_result);
+    if (!set_result) {
+        Py_DECREF(future);
+        return nullptr;
     }
-    PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
-    PyObject *r  = PyObject_CallFunctionObjArgs(fn, Py_None, nullptr);
-    Py_XDECREF(r); Py_DECREF(fn);
+
+    ResultBatcher *batcher = s->batcher;
+    HANDLE handle = s->handle;
+
+    // 与 submit_write 同一套记账：pending 让 close() 等在本 op 之后，
+    // op_submitted 让 batcher 知道本 loop 还有一个在飞 op
+    s->pending.fetch_add(1, std::memory_order_relaxed);
+    batcher->op_submitted();
+
+    GlobalThreadPool &pool = GlobalThreadPool::instance();
+    unsigned workers = config().io_worker_count();
+    if (workers == 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0) hc = 1;
+        workers = std::max(1u, std::min(hc * 2u, 16u));
+    }
+    pool.ensure_started(workers);
+
+    // FlushFileBuffers 是同步调用（慢盘实测 40–50 ms），不能留在事件循环
+    // 线程上。丢给全局线程池，结果经 ResultBatcher 回投 —— 与 open_async
+    // 同一条链路。此前已提交给驱动的写入由 FlushFileBuffers 一并落盘，
+    // 因此这里不需要再等 pending 归零。
+    std::shared_ptr<Session> kept = s;
+    pool.enqueue([kept, handle, batcher, set_result]() mutable {
+        BOOL ok = FlushFileBuffers(handle);
+        DWORD err = ok ? 0 : GetLastError();
+
+        PyGILState_STATE gs = PyGILState_Ensure();
+        PyObject *val = nullptr;
+        if (ok) {
+            val = Py_None;
+            Py_INCREF(val);
+        } else {
+            val = PyObject_CallFunction(g_OSError, "is", static_cast<int>(err),
+                                        "FlushFileBuffers failed");
+        }
+        kept->complete_request();
+        bool last = batcher->op_completed();
+        if (val) {
+            bool threshold = batcher->push(set_result, val);
+            // push 接管 set_result 与 val 的所有权
+            if (threshold || last) batcher->flush();
+        } else {
+            Py_DECREF(set_result);
+            PyErr_Clear();
+        }
+        // Session 若在此刻是最后一个引用，其析构里的 DECREF 必须在持 GIL 下发生
+        kept.reset();
+        PyGILState_Release(gs);
+    });
+
     return future;
 }
 

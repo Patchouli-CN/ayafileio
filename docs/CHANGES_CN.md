@@ -7,6 +7,9 @@
 
 ## [Unreleased]
 
+### 修复
+- **Windows IOCP 的 `flush()` 阻塞事件循环。** `submit_flush()` 在调用方线程（即事件循环）上直接执行 `FlushFileBuffers`：慢盘实测单次 40–50 ms，期间整个 loop 停摆，用 `asyncio.sleep(0)` 心跳测得最长 79.6 ms（空转基线 0.9 ms）。同一个调用在 io_uring 后端走 `IORING_OP_FSYNC`，本来就是真异步的，三个后端在这里行为不一致。现在 `FlushFileBuffers` 交给 `GlobalThreadPool`，结果经 `ResultBatcher` 回投——与 `aopen` 走同一条链路。记账沿用 `submit_write` 的规矩：提交时 `Session::pending` +1、`batcher->op_submitted()`，完成后 `complete_request()` 与 `op_completed()` 配平，所以 `close()` 仍会等这次 fsync 走完再关句柄（否则句柄被复用后 fsync 会刷到别的文件上）；任务捕获 `shared_ptr<Session>` 保证 session 存活，并在持 GIL 的状态下释放，避免「最后一个引用恰好在此析构」时 `~Session` 里的 `Py_XDECREF` 在裸线程上执行。顺序语义不变：`FlushFileBuffers` 覆盖此前已经交给驱动的写入，因此不额外等 `pending` 归零。同一块盘实测：flush 期间循环最长停摆 **79.6 ms → 0.8 ms**，单次 flush 耗时不变（23.9 → 25.0 ms，fsync 照做，只是不再占用循环）；`tests/` 153 passed / 1 skipped（Linux io_uring 用例），另做了并发与竞态验证（同句柄 40 并发、30 个文件并发、`flush` 与 `close` 竞态），每项之后 `debug_batcher_outstanding()` 均回到 0。本次只改 Windows IOCP：`thread_io_backend`（`src/backends/thread_io_backend.cpp`）与 `macos_gcd_backend`（`src/backends/macos_gcd_backend.cpp`）的 `flush()` 仍是内联 `fsync`，同样会阻塞调用方。
+
 ## [1.15.0] - 2026-10-20
 
 ### 变更
