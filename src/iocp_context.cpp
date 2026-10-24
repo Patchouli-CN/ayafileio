@@ -1135,14 +1135,15 @@ PyObject *IOCPContext::submit_seek(uint64_t session_id, int64_t offset, int when
 
     {
         std::lock_guard<std::mutex> lk(s->posMtx);
+        int64_t new_pos;
         if (whence == 0)
-            s->filePos = (uint64_t)offset;
+            new_pos = offset;
         else if (whence == 1)
-            s->filePos = (uint64_t)((int64_t)s->filePos + offset);
+            new_pos = static_cast<int64_t>(s->filePos) + offset;
         else if (whence == 2) {
             // SEEK_END 问的就是「现在多长」：缓存值可能过期（外部追加）
             refresh_cached_size_locked(*s);
-            s->filePos = static_cast<uint64_t>(static_cast<int64_t>(s->cachedFileSize) + offset);
+            new_pos = static_cast<int64_t>(s->cachedFileSize) + offset;
         } else {
             PyObject *exc = PyObject_CallFunction(g_ValueError, "s", "Invalid whence value");
             PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
@@ -1150,6 +1151,20 @@ PyObject *IOCPContext::submit_seek(uint64_t session_id, int64_t offset, int when
             Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
             return future;
         }
+
+        // 负位置必须当场拒绝。原来的 `(uint64_t)offset` 会把 -1 变成 2^64-1：
+        // 位置被静默污染（tell() 返回 18446744073709551615），之后每次 read()
+        // 只报 `ReadFile failed, errno 87`——错误信息和真正的原因毫无关系。
+        // 语义与 macos_gcd_backend 的 seek 保持一致（那边早就有这个校验）。
+        if (new_pos < 0) {
+            PyObject *exc = PyObject_CallFunction(g_ValueError, "s", "negative seek position");
+            PyObject *fn  = PyObject_GetAttr(future, g_str_set_exception);
+            PyObject *r   = PyObject_CallFunctionObjArgs(fn, exc, nullptr);
+            Py_XDECREF(r); Py_DECREF(fn); Py_DECREF(exc);
+            return future;
+        }
+
+        s->filePos = static_cast<uint64_t>(new_pos);
     }
     PyObject *pos = PyLong_FromUnsignedLongLong(s->filePos);
     PyObject *fn  = PyObject_GetAttr(future, g_str_set_result);

@@ -20,6 +20,24 @@ def _normalize_mode(mode: str, encoding: "str | None", newline: "str | None") ->
     ``AsyncFile.__init__`` 与 ``aopen`` 共用——两条打开路径对模式的
     校验/清洗必须完全一致。
     """
+    if any(c not in _VALID_MODE_CHARS for c in mode):
+        raise ValueError(f"Invalid mode: '{mode}'")
+
+    # 结构性校验，与内置 open() 对齐。缺了这一层，"rbb" / "rw" / "rtb" /
+    # "r++" 都会被静默接受——其中 "rw" 最危险：下面挑 base_char 时取第一个
+    # 命中字符，于是一个写着读写的模式实际按**只读**打开，而调用方毫无察觉。
+    if sum(mode.count(c) for c in "rwax") != 1:
+        raise ValueError(
+            f"invalid mode: {mode!r}: must have exactly one of "
+            "create/read/write/append mode"
+        )
+    if mode.count("+") > 1 or mode.count("b") > 1 or mode.count("t") > 1:
+        raise ValueError(f"invalid mode: {mode!r}")
+    if "b" in mode and "t" in mode:
+        raise ValueError(
+            f"invalid mode: {mode!r}: can't have text and binary mode at once"
+        )
+
     is_text = "b" not in mode
     if not is_text:
         if encoding is not None:
@@ -27,16 +45,11 @@ def _normalize_mode(mode: str, encoding: "str | None", newline: "str | None") ->
         if newline is not None:
             raise ValueError("Binary mode does not accept a newline argument.")
 
-    if any(c not in _VALID_MODE_CHARS for c in mode):
-        raise ValueError(f"Invalid mode: '{mode}'")
-
     clean_mode = mode.replace("t", "")
     if "b" not in clean_mode:
-        has_plus = "+" in clean_mode
-        base_char = next((c for c in clean_mode if c in "rwax"), None)
-        if not base_char:
-            raise ValueError(f"Invalid mode: '{mode}'")
-        clean_mode = base_char + ("+" if has_plus else "") + "b"
+        # 上面已校验「恰好一个 rwax」，这里不会取不到
+        base_char = next(c for c in clean_mode if c in "rwax")
+        clean_mode = base_char + ("+" if "+" in clean_mode else "") + "b"
     return clean_mode, is_text
 
 T = TypeVar("T", str, bytes)

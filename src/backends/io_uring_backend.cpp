@@ -499,11 +499,21 @@ PyObject* IOUringBackend::seek(int64_t offset, int whence) {
     
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
-        if (whence == 0) m_filePos = static_cast<uint64_t>(offset);
-        else if (whence == 1) m_filePos = static_cast<uint64_t>(static_cast<int64_t>(m_filePos) + offset);
-        else if (whence == 2) {
-            m_filePos = static_cast<uint64_t>(static_cast<int64_t>(m_cachedFileSize) + offset);
-        } else { resolve_exc(future, g_ValueError, 0, "Invalid whence value"); return future; }
+        int64_t new_pos;
+        if (whence == 0) new_pos = offset;
+        else if (whence == 1) new_pos = static_cast<int64_t>(m_filePos) + offset;
+        else if (whence == 2) new_pos = static_cast<int64_t>(m_cachedFileSize) + offset;
+        else { resolve_exc(future, g_ValueError, 0, "Invalid whence value"); return future; }
+
+        // 负位置必须当场拒绝：static_cast<uint64_t> 会把 -1 变成 2^64-1，
+        // 位置被静默污染，之后每次读都报一个与原因无关的错误。与
+        // macos_gcd_backend 的 seek 语义一致。
+        if (new_pos < 0) {
+            resolve_exc(future, g_ValueError, 0, "negative seek position");
+            return future;
+        }
+
+        m_filePos = static_cast<uint64_t>(new_pos);
     }
     
     PyObject* pos = PyLong_FromUnsignedLongLong(m_filePos);
