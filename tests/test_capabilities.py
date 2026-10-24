@@ -74,32 +74,34 @@ def test_backend_detail():
     caps = ayafileio.get_capabilities()
     detail = caps["backend_detail"]
 
-    if sys.platform == "win32":
+    # 按**有效后端**分支，而不是 sys.platform：configure({"backend": ...}) 之后
+    # 平台和实际后端可以不一致（CI 会用 thread_pool 跑整套用例）。
+    backend = caps["backend"]
+    if backend == "iocp":
         check("iocp completion_model", detail["completion_model"] is True)
         check("iocp batch_harvest", detail["batch_harvest"] is True)
         check("iocp 无 handle_pool 键（池已移除）", "handle_pool" not in detail)
-    elif sys.platform == "linux":
-        if caps["backend"] == "io_uring":
-            check("io_uring available", detail["available"] is True)
-            check("io_uring completion_model", detail["completion_model"] is True)
-            check("features 位矩阵非空", isinstance(detail["features"], dict) and len(detail["features"]) > 0)
-            check("sqpoll 是 bool", isinstance(detail["sqpoll"], bool))
-            ops = detail["opcodes"]
-            if ops is None:
-                check("老内核无 PROBE：opcodes 为 None", True)
-            else:
-                check("PROBE: read 支持", ops.get("read") is True)
-                check("PROBE: write 支持", ops.get("write") is True)
+    elif backend == "io_uring":
+        check("io_uring available", detail["available"] is True)
+        check("io_uring completion_model", detail["completion_model"] is True)
+        check("features 位矩阵非空", isinstance(detail["features"], dict) and len(detail["features"]) > 0)
+        check("sqpoll 是 bool", isinstance(detail["sqpoll"], bool))
+        ops = detail["opcodes"]
+        if ops is None:
+            check("老内核无 PROBE：opcodes 为 None", True)
         else:
-            check("线程池降级 completion_model=False", detail["completion_model"] is False)
-    elif sys.platform == "darwin":
+            check("PROBE: read 支持", ops.get("read") is True)
+            check("PROBE: write 支持", ops.get("write") is True)
+    elif backend == "dispatch_io":
         check("dispatch_io 是 bool", isinstance(detail["dispatch_io"], bool))
         if detail["dispatch_io"]:
             # GCD 文件通道是内核托管 workqueue 跑阻塞 pread，非完成模型
             check("dispatch_io completion_model=False", detail["completion_model"] is False)
             check("kernel_managed_workqueue", detail["kernel_managed_workqueue"] is True)
     else:
-        check("posix 降级 completion_model=False", detail["completion_model"] is False)
+        check("线程池降级 completion_model=False", detail["completion_model"] is False)
+        check("线程池降级无 completion_model=True 的假象",
+              caps["is_truly_async"] is False)
 
 
 def test_cached_consistency():

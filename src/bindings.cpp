@@ -83,6 +83,18 @@ static void py_configure(py::dict options) {
         if (val) {
             // 能力校验：请求内核不支持的能力时显式报错，不静默接受。
             // 关（false）永远允许——跨平台代码可以无条件写 False
+            //
+            // 先看**目标后端**：backend 一栏在上面已经写进 cfg 了，所以这里不能
+            // 用 effective_backend()（它还读着旧配置）。强制 thread_pool 时
+            // 再开 SQPOLL 毫无意义——即使本机内核支持，那个后端也不会用到它。
+            const BackendKind want =
+                cfg.backend == BackendKind::Auto ? effective_backend() : cfg.backend;
+            if (want != BackendKind::IoUring) {
+                throw py::value_error(
+                    "io_uring_sqpoll=True requires the io_uring backend; the effective "
+                    "backend is not io_uring, so this option would have no effect. "
+                    "Check ayafileio.get_backend_info()['backend'] first.");
+            }
 #ifdef HAVE_IO_URING
             if (!io_uring_available()) {
                 throw py::value_error(
