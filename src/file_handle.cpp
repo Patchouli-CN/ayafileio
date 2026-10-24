@@ -2,6 +2,7 @@
 #include "discover.h"          // effective_backend()
 #ifdef _WIN32
 #include "backends/windows_io_backend.hpp"
+#include "backends/thread_io_backend.hpp"
 #elif defined(__APPLE__)
 #include "backends/macos_gcd_backend.hpp"
 #include "backends/thread_io_backend.hpp"
@@ -29,7 +30,10 @@ FileHandle::FileHandle(const std::string &path, const std::string &mode,
     const BackendKind kind = effective_backend();
 
 #ifdef _WIN32
-    (void)kind;   // Windows 只有 IOCP 后端（thread_io_backend 是 POSIX 实现）
+    // Windows 目前只有 IOCP 后端：线程池后端的 Windows 移植还在收尾（原语层已
+    // 就位，但全套用例下仍有崩溃/内存暴涨），configure({"backend": "thread_pool"})
+    // 在 Windows 上会被 backend_available() 拒绝，走不到这里。
+    (void)kind;
     if (loop) {
         // open_async 注入路径：工作线程无 running loop，用预取的 loop
         m_backend = new WindowsIOBackend(path, mode, loop, create_future);

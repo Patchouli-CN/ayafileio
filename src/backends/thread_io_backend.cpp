@@ -1,9 +1,4 @@
 #include "thread_io_backend.hpp"
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <errno.h>
 #include <algorithm>
 #include <cstring>
 #include <chrono>
@@ -12,8 +7,23 @@
 #include "./utils/error_util.hpp"
 #include "utils/debug_log.hpp"
 #include <thread>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace ayafileio {
+
+#ifdef _WIN32
+namespace {
+// CRT 的 invalid-parameter 默认 handler 是 _invoke_watson → __fastfail（进程直接
+// 0xC0000409）。_get_osfhandle()/_close() 对**已被关掉**的 fd 正好会走这条校验，
+// 而 fileno() 暴露的描述符允许调用方自己关掉。换成只返回的 handler 后这些调用
+// 退化成返回 -1 / errno=EBADF。thread_local 版本，不影响其它线程。
+void __cdecl ignore_invalid_parameter(const wchar_t *, const wchar_t *,
+                                      const wchar_t *, unsigned int, uintptr_t) {}
+} // namespace
+#endif
 
 // ════════════════════════════════════════════════════════════════════════════
 // 全局缓存（线程安全）
@@ -66,7 +76,7 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
         UR_DEBUG_LOG("ThreadIOBackend: configured worker count = %u", m_num_workers);
     }
 
-    int flags = O_RDONLY;
+    int flags = kOpenRead;
     ModeInfo mi;
     try {
         mi = parse_mode(mode);
@@ -76,31 +86,38 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     }
     bool appendMode = mi.appendMode;
 
-    if (mi.hasW)      flags = O_WRONLY | O_CREAT | O_TRUNC;
-    else if (mi.hasA) flags = O_WRONLY | O_CREAT | O_APPEND;
-    else if (mi.hasX) flags = O_WRONLY | O_CREAT | O_EXCL;
-    if (mi.plus)      flags = (flags & ~O_ACCMODE) | O_RDWR;
+    if (mi.hasW)      flags = kOpenWrite | kOpenCreate | kOpenTruncate;
+    else if (mi.hasA) flags = kOpenWrite | kOpenCreate | kOpenAppend;
+    else if (mi.hasX) flags = kOpenWrite | kOpenCreate | kOpenExclusive;
+    if (mi.plus)      flags = kOpenRead | kOpenWrite
+                            | (flags & ~(kOpenRead | kOpenWrite));
 
     m_appendMode = appendMode;
 
     UR_DEBUG_LOG("ThreadIOBackend: opening file with flags=%d", flags);
     {
         GilRelease gr;  // 阻塞系统调用：释放 GIL（见 globals.hpp GilRelease）
-        m_fd = open(path.c_str(), flags, 0644);
+        m_fd = file_open(path.c_str(), flags);
     }
-    if (m_fd == -1) {
-        UR_DEBUG_LOG("ThreadIOBackend: open failed, errno=%d", errno);
-        throw_os_error("Failed to open file", path.c_str());
+    if (m_fd == kFileInvalid) {
+        const int err = native_file_last_error();
+        UR_DEBUG_LOG("ThreadIOBackend: open failed, native error=%d", err);
+        PyObject *exc = make_native_os_error(err, "Failed to open file", path.c_str());
+        if (!exc) throw py::python_error();
+        PyErr_SetObject(reinterpret_cast<PyObject *>(Py_TYPE(exc)), exc);
+        Py_DECREF(exc);
+        throw py::python_error();
     }
-    UR_DEBUG_LOG("ThreadIOBackend: file opened, fd=%d", m_fd);
+    UR_DEBUG_LOG("ThreadIOBackend: file opened, handle=%lld",
+                 (long long)m_fd);
 
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
     {
-        struct stat st;
-        if (fstat(m_fd, &st) == 0) {
-            m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+        unsigned long long size = 0;
+        if (file_size(m_fd, &size)) {
+            m_cachedFileSize = static_cast<uint64_t>(size);
             if (m_appendMode) {
                 m_filePos = m_cachedFileSize;
                 UR_DEBUG_LOG("ThreadIOBackend: append mode, filePos=%llu", (unsigned long long)m_filePos);
@@ -112,6 +129,15 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
 }
 
 ThreadIOBackend::ThreadIOBackend(int fd, const std::string& mode, bool owns_fd) {
+#ifdef _WIN32
+    // Windows：fd 里的句柄不一定是 FILE_FLAG_OVERLAPPED 打开的，用它做定位 I/O
+    // 会**静默忽略偏移**（多 worker 并发读互相踩）。所以这条路径在 Windows 上
+    // 不实现——file_handle.cpp 会把 wrap_file 固定交给 IOCP 后端。
+    (void)fd; (void)mode; (void)owns_fd;
+    throw py::value_error(
+        "ThreadIOBackend does not support wrapping an existing fd on Windows; "
+        "use backend=auto (IOCP) for wrap_file()");
+#else
     m_fd = fd;
     m_owns_fd = owns_fd;
     
@@ -135,14 +161,15 @@ ThreadIOBackend::ThreadIOBackend(int fd, const std::string& mode, bool owns_fd) 
     m_filePos = 0;
     
     {
-        struct stat st;
-        if (fstat(m_fd, &st) == 0) {
-            m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+        unsigned long long size = 0;
+        if (file_size(m_fd, &size)) {
+            m_cachedFileSize = static_cast<uint64_t>(size);
             if (m_appendMode) {
                 m_filePos = m_cachedFileSize;
             }
         }
     }
+#endif
 }
 
 ThreadIOBackend::~ThreadIOBackend() {
@@ -160,9 +187,9 @@ ThreadIOBackend::~ThreadIOBackend() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void ThreadIOBackend::refresh_cached_size_locked() {
-    struct stat st;
-    if (fstat(m_fd, &st) == 0 && st.st_size >= 0) {
-        m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+    unsigned long long size = 0;
+    if (file_size(m_fd, &size)) {
+        m_cachedFileSize = static_cast<uint64_t>(size);
     }
 }
 
@@ -247,7 +274,8 @@ PyObject *ThreadIOBackend::read(int64_t size) {
     UR_DEBUG_LOG0("ThreadIOBackend::read future created");
 
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire),
+        (m_fd == kFileInvalid) ? -1 : 0, m_create_future, m_loop);
     if (closed_future) {
         UR_DEBUG_LOG0("ThreadIOBackend::read file is closed");
         Py_DECREF(future);
@@ -292,18 +320,21 @@ PyObject *ThreadIOBackend::read(int64_t size) {
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, readSize]() {
-        UR_DEBUG_LOG("ThreadIOBackend::read task executing, fd=%d, offset=%llu, size=%zu",
-                     m_fd, (unsigned long long)offset, readSize);
-        ssize_t got = pread(m_fd, req->buf(), readSize, offset);
-        UR_DEBUG_LOG("ThreadIOBackend::read task done, got=%zd", got);
+        UR_DEBUG_LOG("ThreadIOBackend::read task executing, handle=%lld, offset=%llu, size=%zu",
+                     (long long)m_fd, (unsigned long long)offset, readSize);
+        long long got = file_pread(m_fd, req->buf(), readSize,
+                                   static_cast<long long>(offset));
+        UR_DEBUG_LOG("ThreadIOBackend::read task done, got=%lld", got);
         if (got >= 0) {
             // 短读 = 真碰到 EOF（文件被外部截短 / 读穿了缓存长度）：校正缓存
             if (static_cast<size_t>(got) < readSize) refresh_cached_size();
             complete_ok(req, static_cast<size_t>(got));
         } else {
-            UR_DEBUG_LOG("ThreadIOBackend::read task failed, errno=%d", errno);
-            complete_error(req, errno);
+            UR_DEBUG_LOG("ThreadIOBackend::read task failed, native error=%d",
+                         native_file_last_error());
+            complete_error(req, native_file_last_error());
         }
+        complete_pending();
     });
 
     UR_DEBUG_LOG0("ThreadIOBackend::read returning future");
@@ -328,7 +359,8 @@ PyObject *ThreadIOBackend::read_at(int64_t offset, int64_t size) {
     }
 
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire),
+        (m_fd == kFileInvalid) ? -1 : 0, m_create_future, m_loop);
     if (closed_future) {
         UR_DEBUG_LOG0("ThreadIOBackend::read_at file is closed");
         Py_DECREF(future);
@@ -379,17 +411,20 @@ PyObject *ThreadIOBackend::read_at(int64_t offset, int64_t size) {
     // pread 显式偏移，不动文件指针 —— 与并发 read()/seek() 无竞争
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, readSize]() {
-        UR_DEBUG_LOG("ThreadIOBackend::read_at task executing, fd=%d, offset=%lld, size=%zu",
-                     m_fd, (long long)offset, readSize);
-        ssize_t got = pread(m_fd, req->buf(), readSize, static_cast<off_t>(offset));
-        UR_DEBUG_LOG("ThreadIOBackend::read_at task done, got=%zd", got);
+        UR_DEBUG_LOG("ThreadIOBackend::read_at task executing, handle=%lld, offset=%lld, size=%zu",
+                     (long long)m_fd, (long long)offset, readSize);
+        long long got = file_pread(m_fd, req->buf(), readSize,
+                                   static_cast<long long>(offset));
+        UR_DEBUG_LOG("ThreadIOBackend::read_at task done, got=%lld", got);
         if (got >= 0) {
             if (static_cast<size_t>(got) < readSize) refresh_cached_size();  // 短读 → 校正缓存
             complete_ok(req, static_cast<size_t>(got));
         } else {
-            UR_DEBUG_LOG("ThreadIOBackend::read_at task failed, errno=%d", errno);
-            complete_error(req, errno);
+            UR_DEBUG_LOG("ThreadIOBackend::read_at task failed, native error=%d",
+                         native_file_last_error());
+            complete_error(req, native_file_last_error());
         }
+        complete_pending();
     });
 
     UR_DEBUG_LOG0("ThreadIOBackend::read_at returning future");
@@ -406,7 +441,7 @@ PyObject *ThreadIOBackend::write(Py_buffer *view, int64_t position) {
         return create_rejected_future(nullptr, g_ValueError, "No running event loop", 0);
     }
     
-    if (position >= 0 && (m_appendMode || (fcntl(m_fd, F_GETFL) & O_APPEND))) {
+    if (position >= 0 && (m_appendMode || file_is_append(m_fd))) {
         PyErr_SetString(PyExc_ValueError, "write_at() does not support append mode");
         return nullptr;
     }
@@ -421,7 +456,8 @@ PyObject *ThreadIOBackend::write(Py_buffer *view, int64_t position) {
     if (!future) return nullptr;
 
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire),
+        (m_fd == kFileInvalid) ? -1 : 0, m_create_future, m_loop);
     if (closed_future) {
         Py_DECREF(future);
         return closed_future;
@@ -451,16 +487,19 @@ PyObject *ThreadIOBackend::write(Py_buffer *view, int64_t position) {
 
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, size]() {
-        UR_DEBUG_LOG("ThreadIOBackend::write task executing, fd=%d, offset=%llu, size=%zu",
-                     m_fd, (unsigned long long)offset, size);
-        ssize_t wrote = pwrite(m_fd, req->buf(), size, static_cast<off_t>(offset));
-        UR_DEBUG_LOG("ThreadIOBackend::write task done, wrote=%zd", wrote);
+        UR_DEBUG_LOG("ThreadIOBackend::write task executing, handle=%lld, offset=%llu, size=%zu",
+                     (long long)m_fd, (unsigned long long)offset, size);
+        long long wrote = file_pwrite(m_fd, req->buf(), size,
+                                      static_cast<long long>(offset));
+        UR_DEBUG_LOG("ThreadIOBackend::write task done, wrote=%lld", wrote);
         if (wrote >= 0) {
             complete_ok(req, static_cast<size_t>(wrote));
         } else {
-            UR_DEBUG_LOG("ThreadIOBackend::write task failed, errno=%d", errno);
-            complete_error(req, errno);
+            UR_DEBUG_LOG("ThreadIOBackend::write task failed, native error=%d",
+                         native_file_last_error());
+            complete_error(req, native_file_last_error());
         }
+        complete_pending();
     });
 
     return future;
@@ -523,15 +562,17 @@ PyObject *ThreadIOBackend::flush() {
     PyObject* future = PyObject_CallNoArgs(m_create_future);
     if (!future) return nullptr;
     
-    if (!m_running.load(std::memory_order_acquire) || m_fd == -1) {
+    if (!m_running.load(std::memory_order_acquire) || m_fd == kFileInvalid) {
         resolve_exc(future, g_OSError, 0, "flush on closed file");
         return future;
     }
     
-    if (fsync(m_fd) != 0) {
-        UR_DEBUG_LOG("ThreadIOBackend::flush fsync failed, errno=%d", errno);
-        set_os_error("fsync failed");
-        resolve_exc(future, g_OSError, errno, "fsync failed");
+    if (file_fsync(m_fd) != 0) {
+        const int err = native_file_last_error();
+        UR_DEBUG_LOG("ThreadIOBackend::flush fsync failed, native error=%d", err);
+        // 不调用 set_os_error()：它会把异常挂在 PyErr 上，而下面 resolve_exc
+        // 还要做 Python 调用——留着 pending 异常只会污染后续操作。
+        resolve_exc(future, g_OSError, err, "fsync failed");
         return future;
     }
     UR_DEBUG_LOG0("ThreadIOBackend::flush done");
@@ -571,8 +612,57 @@ PyObject *ThreadIOBackend::close() {
     return future;
 }
 
+// POSIX 直接返回真实 fd（与内置 io 一致）。Windows 上返回一份**复制句柄**包装
+// 出来的 CRT 描述符：同一个对象总是同一个 fd，由本对象在 close 时释放，且调用
+// 方关掉它不会牵连文件本身（与 IOCP 后端的 fileno() 语义一致）。
+int ThreadIOBackend::fileno() const {
+#ifdef _WIN32
+    std::lock_guard<std::mutex> lk(m_filenoMtx);
+    if (m_cachedFileno >= 0) return m_cachedFileno;
+    if (m_fd == kFileInvalid) return -1;
+
+    HANDLE dup = INVALID_HANDLE_VALUE;
+    if (!DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(m_fd),
+                         GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        return -1;
+    }
+
+    // 访问权限在句柄上，CRT 侧用宽松的读写标志即可（越权访问到 OS 层才会失败）
+    const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(dup), _O_RDWR | _O_BINARY);
+    if (fd == -1) {
+        CloseHandle(dup);
+        return -1;
+    }
+    m_cachedFileno = fd;
+    m_cachedDupHandle = dup;
+    return fd;
+#else
+    return (m_fd == kFileInvalid) ? -1 : static_cast<int>(m_fd);
+#endif
+}
+
 void ThreadIOBackend::close_impl() {
-    UR_DEBUG_LOG("ThreadIOBackend::close_impl start, this=%p, fd=%d", (void*)this, m_fd);
+    UR_DEBUG_LOG("ThreadIOBackend::close_impl start, this=%p, handle=%lld",
+                 (void*)this, (long long)m_fd);
+
+#ifdef _WIN32
+    // 放掉 fileno() 暴露的复制句柄。只在「槽位里仍是我们的句柄」时才关：
+    // 调用方可能自己 close 过，fd 号会被别人复用，凭「有效」判断会误伤。
+    {
+        std::lock_guard<std::mutex> lk(m_filenoMtx);
+        if (m_cachedFileno >= 0) {
+            auto old = _set_thread_local_invalid_parameter_handler(ignore_invalid_parameter);
+            const intptr_t slot = _get_osfhandle(m_cachedFileno);
+            if (slot != -1 &&
+                reinterpret_cast<HANDLE>(slot) == m_cachedDupHandle) {
+                _close(m_cachedFileno);
+            }
+            _set_thread_local_invalid_parameter_handler(old);
+            m_cachedFileno = -1;
+            m_cachedDupHandle = INVALID_HANDLE_VALUE;
+        }
+    }
+#endif
 
     bool expected = true;
     if (!m_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
@@ -601,10 +691,10 @@ void ThreadIOBackend::close_impl() {
                      m_pending.load());
     }
 
-    if (m_owns_fd && m_fd != -1) {
-        UR_DEBUG_LOG("ThreadIOBackend::close_impl closing fd=%d", m_fd);
-        ::close(m_fd);
-        m_fd = -1;
+    if (m_owns_fd && m_fd != kFileInvalid) {
+        UR_DEBUG_LOG("ThreadIOBackend::close_impl closing handle=%lld", (long long)m_fd);
+        file_close(m_fd);
+        m_fd = kFileInvalid;
     }
     UR_DEBUG_LOG0("ThreadIOBackend::close_impl done");
 }
@@ -644,8 +734,8 @@ PyObject* ThreadIOBackend::truncate(int64_t size) {
         return future;
     }
     
-    if (ftruncate(m_fd, static_cast<off_t>(size)) != 0) {
-        resolve_exc(future, g_OSError, errno, "truncate failed");
+    if (file_truncate(m_fd, static_cast<unsigned long long>(size)) != 0) {
+        resolve_exc(future, g_OSError, native_file_last_error(), "truncate failed");
         return future;
     }
     
@@ -673,7 +763,8 @@ PyObject* ThreadIOBackend::readinto(PyObject* buf) {
     if (!future) return nullptr;
     
     PyObject* closed_future = check_closed_and_return_future(
-        m_running.load(std::memory_order_acquire), m_fd, m_create_future, m_loop);
+        m_running.load(std::memory_order_acquire),
+        (m_fd == kFileInvalid) ? -1 : 0, m_create_future, m_loop);
     if (closed_future) { Py_DECREF(future); return closed_future; }
     
     Py_buffer view;
@@ -714,12 +805,14 @@ PyObject* ThreadIOBackend::readinto(PyObject* buf) {
     
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, readSize]() {
-        ssize_t got = pread(m_fd, req->buf(), readSize, static_cast<off_t>(offset));
+        long long got = file_pread(m_fd, req->buf(), readSize,
+                                   static_cast<long long>(offset));
         if (got >= 0) {
             if (static_cast<size_t>(got) < readSize) refresh_cached_size();  // 短读 → 校正缓存
             complete_ok(req, static_cast<size_t>(got));
         }
-        else complete_error(req, static_cast<DWORD>(errno));
+        else complete_error(req, static_cast<DWORD>(native_file_last_error()));
+        complete_pending();
     });
     
     return future;

@@ -97,6 +97,8 @@ set(SOURCES
 
 # 根据平台添加后端源文件
 if(WIN32)
+    # 线程池后端的 Windows 移植仍在收尾（见 docs/CHANGES 的「未启用」条目）：
+    # 定了可本地编译的原语层，但全套用例下仍有崩溃/内存暴涨，先不编进来。
     message(STATUS "Building for Windows (IOCP Backend)")
     list(APPEND SOURCES
         src/backends/windows_io_backend.cpp

@@ -302,7 +302,7 @@ bool backend_available(BackendKind kind) {
         return false;
 #endif
     case BackendKind::ThreadPool:
-        // thread_io_backend.cpp 只编进 POSIX 构建；Windows 只有 IOCP 后端
+        // Windows 移植尚未启用（原语层已就位，但全套用例下仍有崩溃/内存暴涨）
 #ifdef _WIN32
         return false;
 #else
