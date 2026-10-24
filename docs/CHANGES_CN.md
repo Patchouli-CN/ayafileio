@@ -5,7 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [1.16.0] - 2026-10-24
+
+> **版本策略**：`2.0.0` 保留给即将进行的**架构分层**，不用于发布功能。从 `2.0.0` 起严格执行
+> semver（major = 不向后兼容的变更）。`1.x` 期间 minor 版本可能包含**已记录的行为变更**，
+> 一律列在下面「升级须知」里。
+
+### 升级须知（1.16.0）
+- `wrap_file(fd, mode)` / `wrap_fd(fd, mode)` 现在严格按**声明的** mode 判定读写权限，与
+  `io.FileIO(fd, "wb").read()` 的行为一致。用 `"wb"` 包装一个可读 fd 再 `read()` 会抛
+  `io.UnsupportedOperation`——需要读就声明 `"w+b"`。（`io.UnsupportedOperation` 同时是
+  `OSError` 与 `ValueError` 的子类，既有 `except OSError:` 写法继续有效。）
+- 非法模式串现在抛 `ValueError`（`"rw"` / `"rbb"` / `"rr"` / `"rtb"` / `"r++"` 等）。注意 `"rw"`
+  以前是被**静默按只读打开**的，完全看不出来。
+- `seek()` 不再接受负位置，抛 `ValueError`（以前返回 `2^64-1` 并把它写进文件位置，之后每次读都
+  报与原因无关的错）。这里刻意沿用 macOS 后端一贯的 `ValueError`，而不是内置的 `OSError(EINVAL)`。
+- Windows 的 `fileno()` 现在返回**复制句柄**包装的 fd：关掉它不再影响文件对象，也不会再崩进程。
+  若你以前靠 `os.close(f.fileno())` 关文件，请改用 `await f.close()`。
+
 
 ### 新增
 - **`configure({"backend": ...})`：显式选择后端。** 取值 `auto`（默认，平台探测）/ `iocp` / `io_uring` / `dispatch_io` / `thread_pool`。只影响**之后**打开的句柄，已经打开的文件保持各自的后端；强制一个本构建/本机床上没有的后端会在 `configure()` 时抛 `ValueError`，而不是留到第一次 `open()` 才炸。`get_backend_info()` 与 `get_capabilities()` 现在都按**有效后端**回答，不再永远报平台默认值——「我现在到底在用哪个后端、是不是真异步」终于可回答了。顺带修正两处：Linux 上没有 liburing 的构建以前把 `platform` 报成 `"posix"`，现在是 `"linux"`（`platform` 管「在哪跑」，`backend` 管「用哪个」，两者不该混在一起）；`configure({"io_uring_sqpoll": True})` 的校验也从「内核支持吗」改成「**有效后端是 io_uring 吗**」——强制 thread_pool 之后这个选项不会生效，即使本机内核支持 SQPOLL，现在会直接 `ValueError` 而不是静默接受。

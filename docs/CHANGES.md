@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.16.0] - 2026-10-24
+
+> **Versioning policy**: `2.0.0` is reserved for the upcoming **architecture layering** and will not be
+> spent on features. Strict semver starts at `2.0.0` (major = backward-incompatible change). During
+> `1.x`, minor releases may still contain **documented behaviour changes**, always listed under
+> "Upgrade notes" below.
+
+### Upgrade notes (1.16.0)
+- `wrap_file(fd, mode)` / `wrap_fd(fd, mode)` now enforces the **declared** mode, matching
+  `io.FileIO(fd, "wb").read()`. Wrapping a readable fd as `"wb"` and then calling `read()` raises
+  `io.UnsupportedOperation` — declare `"w+b"` if you need to read. (`io.UnsupportedOperation`
+  subclasses both `OSError` and `ValueError`, so existing `except OSError:` handlers keep working.)
+- Invalid mode strings now raise `ValueError` (`"rw"`, `"rbb"`, `"rr"`, `"rtb"`, `"r++"`, ...).
+  Note that `"rw"` used to be **silently opened read-only**, which was invisible to the caller.
+- `seek()` no longer accepts a negative position and raises `ValueError` (it used to return `2^64-1`
+  and store that as the file position, after which every read failed with an unrelated error). This
+  keeps the macOS backend's long-standing `ValueError` instead of the builtin `OSError(EINVAL)`.
+- `fileno()` on Windows now returns a descriptor wrapping a **duplicated** handle: closing it no longer
+  affects the file object and no longer crashes the process. If you used `os.close(f.fileno())` to
+  close the file, call `await f.close()` instead.
+
 
 ### Added
 - **`configure({"backend": ...})` selectsthe backend explicitly.** Values: `auto` (default, platform probing) / `iocp` / `io_uring` / `dispatch_io` / `thread_pool`. It only affects handles opened **afterwards**; already-open files keep their own backend. Forcing a backend that this build or machine does not have raises `ValueError` from `configure()` instead of surfacing at the first `open()`. `get_backend_info()` and `get_capabilities()` now answer in terms of the **effective** backend rather than always reporting the platform default, so "which backend am I actually on, and is it truly async" is finally answerable. Two drive-by corrections: a Linux build without liburing used to report `platform: "posix"`; it now reports `"linux"` (`platform` is where you run, `backend` is what you use — the two should not be conflated). And `configure({"io_uring_sqpoll": True})` is now validated against "**is the effective backend io_uring**" rather than "does the kernel support SQPOLL": after forcing `thread_pool` the option cannot take effect, so it raises `ValueError` instead of being silently accepted on a machine whose kernel happens to support SQPOLL.
