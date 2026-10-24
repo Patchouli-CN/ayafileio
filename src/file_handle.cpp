@@ -33,8 +33,9 @@ FileHandle::FileHandle(const std::string &path, const std::string &mode,
     // Windows 目前只有 IOCP 后端：线程池后端的 Windows 移植还在收尾（原语层已
     // 就位，但全套用例下仍有崩溃/内存暴涨），configure({"backend": "thread_pool"})
     // 在 Windows 上会被 backend_available() 拒绝，走不到这里。
-    (void)kind;
-    if (loop) {
+    if (kind == BackendKind::ThreadPool) {
+        m_backend = new ThreadIOBackend(path, mode);
+    } else if (loop) {
         // open_async 注入路径：工作线程无 running loop，用预取的 loop
         m_backend = new WindowsIOBackend(path, mode, loop, create_future);
     } else {

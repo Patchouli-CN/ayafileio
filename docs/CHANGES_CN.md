@@ -30,10 +30,10 @@
   POSIX 侧直调系统调用（行为不变，错误码仍是 errno），Windows 侧用 `CreateFileW(FILE_FLAG_OVERLAPPED)`
   + 带 OVERLAPPED 偏移的 `ReadFile/WriteFile` + `GetOverlappedResult` 实现**定位** I/O（非 overlapped
   句柄会静默忽略偏移，多 worker 并发会互相踩）。
-  **Windows 上仍未启用该后端**：上面那条 `hEvent` 修好之后，隔离用例已 0/8，但把 `backend` 指向
-  `thread_pool` 跑库内并发写（20 协程 × 20 次 append、16 worker）仍有约 **1/8** 的 access violation，
-  说明剩余问题在库内并发完成路径而不是 I/O 原语本身，尚未定位。因此 Windows 保持只有 IOCP：
-  `configure({"backend": "thread_pool"})` 在 Windows 上仍报「该后端不可用」。POSIX 侧由 CI 30 个 job 验证。
+  **Windows 上也可以选它了**：`hEvent` 修好之后，库内并发写从约 1/8 崩溃降到 **0/30**
+  （20 协程 × 20 次 append、16 worker），Windows + `thread_pool` 跑全套用例连续 3 次
+  **226 passed / 4 skipped**。CI 的 `test-fallback-backend` 现在把 `windows-2022` 也纳入矩阵
+  （共 31 个 job），三个平台的两个后端都被覆盖。
 - **用错模式读写不再是一句与原因无关的 `OSError`，而是标准的 `io.UnsupportedOperation`。** 此前对只写文件（`"wb"`/`"ab"`）调 `read()`，或对只读文件（`"rb"`）调 `write()`，请求会真的发到 OS，然后拿回 `OSError: Errno 5`（Windows）或 `EBADF`（POSIX）——错误类型和消息都和真正的原因对不上。内置 `io` 在这种情况抛 `io.UnsupportedOperation("read"/"write"/"truncate")`，现在这里也一样。11 个入口加了守卫：`read`/`readline`/`readlines`/`read_at`/`read_many`/`readinto`/`chunk`（读）与 `write`/`write_at`/`write_many`/`truncate`（写）。`io.UnsupportedOperation` 的 MRO 同时含 `OSError` 和 `ValueError`，所以既有 `except OSError:` / `except ValueError:` 的写法全部继续有效。守卫直接判 `self._mode` 首字符（模式串不可变），热路径上没有引入方法调用，也没有新增实例属性。
   **注意一处行为变化**：`wrap_file(fd, mode)` 现在严格按**声明的** mode 判定，与 `io.FileIO(fd, "wb").read()` 抛 `UnsupportedOperation` 一致。用 `"wb"` 包装一个 O_RDWR 的 fd 再读，以前能过、现在会抛——`tests/test_wrap_file.py` 里就有两个这样的用例（包装后要读回来），已改成 `"w+b"`。
 - **macOS 与 POSIX 线程池后端：`read()`/`read_at()` 看不到别的句柄追加的数据。** 这套 `m_cachedFileSize`（open 时快照，之后只由本会话的 write/truncate 更新）此前只有 Windows IOCP 后端做了「到 EOF 判决点就问内核」的刷新，另两个后端仍把旧长度当真相：外部追加后 `read()` 读到旧 EOF 就停、`read_at` 越界的一侧永远返回 `b""`、`seek(0, 2)` 报旧长度。现在两边都补齐（端点与 Windows 完全对应）：`read`/`read_at`/`readinto` 在 **EOF 判决点**和**发生短读**时 `fstat` 刷新，`seek(SEEK_END)` 前也刷一次；正常满载读一次 syscall 都不多加。macOS 的 mincore 内联快车道不受影响——刷新只让「超出原 EOF」的范围落到 dispatch_io/线程快速路，映射窗口本身不动。

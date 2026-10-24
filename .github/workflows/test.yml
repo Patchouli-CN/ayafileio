@@ -338,7 +338,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # Windows 也在内：线程池后端现在是三个平台都能显式选用的
+        os: [ubuntu-24.04, macos-15, windows-2022]
     env:
       CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
@@ -356,10 +357,17 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y liburing-dev
-    - name: Build
+    - name: Build (POSIX)
+      if: runner.os != 'Windows'
       timeout-minutes: 5
       run: |
         export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
+        pip install -e ".[dev]" -v
+    - name: Build (Windows)
+      if: runner.os == 'Windows'
+      timeout-minutes: 10
+      run: |
+        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
         pip install -e ".[dev]" -v
     - name: Confirm the forced backend is active
       # 这一步必须走 pytest：切后端在 conftest 里做，下面这条用例会断言

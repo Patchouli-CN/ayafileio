@@ -302,12 +302,7 @@ bool backend_available(BackendKind kind) {
         return false;
 #endif
     case BackendKind::ThreadPool:
-        // Windows 移植尚未启用（原语层已就位，但全套用例下仍有崩溃/内存暴涨）
-#ifdef _WIN32
-        return false;
-#else
         return true;
-#endif
     case BackendKind::Auto:
     default:
         return true;   // Auto 永远合法：它就是「按平台探测」
