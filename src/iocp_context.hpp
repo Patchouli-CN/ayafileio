@@ -30,7 +30,7 @@ struct Session {
     uint64_t        filePos = 0;
     std::mutex      posMtx;
     bool            appendMode = false;
-    PyObject       *loop = nullptr;          // borrowed reference
+    PyObject       *loop = nullptr;          // owned（create_session INCREF，~Session DECREF）
     ResultBatcher  *batcher = nullptr;       // owned by IOCPContext::m_batchers；
                                              // 打开时解析缓存，完成热路径免锁免查表
     PyObject       *create_future = nullptr; // owned
@@ -62,7 +62,13 @@ struct Session {
 
     ~Session() {
         Py_XDECREF(create_future);
-        // loop is borrowed — no DECREF
+        // 与 create_session 里的 Py_INCREF 配平。此前 loop 记成 borrowed 却
+        // 由构造函数白送一个引用（注释说是 Session 的「续命来源」），
+        // 结果每开一个文件就永久钉住一个事件循环对象——loop.close() 之后
+        // 它依然回收不了。所有权必须单向：Session 持有，Session 释放。
+        // 与 create_future 一样，析构必须在持 GIL 时发生（remove_session
+        // 把 shared_ptr 挪到锁外再析构，正是为了这一点）。
+        Py_XDECREF(loop);
     }
 };
 
@@ -142,6 +148,11 @@ private:
     // ── batchers (one per event loop) ─────────────────────────────────────
     std::mutex m_batchersMtx;
     std::unordered_map<PyObject*, std::unique_ptr<ResultBatcher>> m_batchers;
+    // 退役的 batcher：缓存键（loop 的地址）被新 loop 复用后不再使用，但
+    // Session::batcher 与 snapshot_batchers() 都可能还握着它的裸指针，
+    // 所以只退役不销毁，统一在 shutdown() 释放（与「batcher 只在 shutdown
+    // 时销毁」这条既有不变量一致）。见 get_batcher()。
+    std::vector<std::unique_ptr<ResultBatcher>> m_retiredBatchers;
 
     // ── Ctrl+C ────────────────────────────────────────────────────────────
     std::atomic<bool> m_ctrlcTriggered{false};

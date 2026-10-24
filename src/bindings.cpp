@@ -342,8 +342,12 @@ NB_MODULE(_ayafileio, m) {
                 }
 
                 Py_DECREF(create_future);
-                // loop 引用不归还：Windows Session 借用 loop（borrowed
-                // ref），这个 +1 是它的续命来源，与同步 open 的 ctor 一致
+                // Session 在 create_session 里对 loop 自行 Py_INCREF、在
+                // ~Session 里 Py_DECREF；这里这一份是 open_async 自己拿的
+                // （工作线程回调捕获），必须还回去。以前把它当成 Session 的
+                // 「续命来源」留着不放，于是每次 aopen() 泄漏一个事件循环引用
+                // ——loop.close() 之后那个对象依然回收不了。
+                Py_DECREF(loop);
                 Py_DECREF(future);
                 Py_DECREF(set_result);
                 PyGILState_Release(gs);

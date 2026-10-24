@@ -89,6 +89,24 @@ static void quarantine_push(IORequest* req) {
     if (t_quarantine.size() >= 256) quarantine_drain();
 }
 
+// 本线程 quarantine 队首的剩余保留时间（毫秒）；队列空返回 INFINITE。
+// 供 worker 的等待超时使用：没有新 I/O 时 GetQueuedCompletionStatusEx 会
+// 一直阻塞（没有 batcher 待投递时超时是 INFINITE），于是最后一批完成的请求
+// 永远等不到下一次 drain —— 每个 IORequest 还牵着它的 future（以及未来
+// 事件循环对象的引用），那批内存就留在进程里直到下次有流量。
+// 把队首到期时间并进等待超时，空闲时也能把它放掉。
+static DWORD quarantine_timeout_ms() {
+    if (t_quarantine.empty()) return INFINITE;
+    const auto deadline = t_quarantine.front().when
+        + std::chrono::milliseconds(QUARANTINE_MS);
+    const auto now = std::chrono::steady_clock::now();
+    if (deadline <= now) return 0;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    if (ms < 1) ms = 1;
+    // 留 1ms 余量，避免刚好卡在边界上反复空转
+    return static_cast<DWORD>(ms + 1);
+}
+
 QuarantineStats quarantine_stats() {
     QuarantineStats s;
     s.live    = g_q_live.load(std::memory_order_relaxed);
@@ -126,6 +144,32 @@ void mark_sync_done(IORequest *req) {
     }
     Py_XDECREF(req->userBuf);
     req->userBuf = nullptr;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 缓存的文件大小
+//
+// Session::cachedFileSize 是 open 时的快照，之后只由本会话的 write/truncate
+// 更新——别的进程（或同一进程的另一个句柄）追加/截断的数据，这里看不到。
+// 把旧长度当成真相会让 read()/read_at() 静默少读（典型场景：tail 一个正在被
+// 写的日志、等生产者落盘后再读）。
+//
+// 策略：只在**已经到 EOF 判决点**或**发生了短读**时问一次内核。这两处本来
+// 就不是热路径（正常读满载而归，不碰缓存值），所以热路径的 syscall 数不变，
+// 而「文件长大了」这件事在下一次操作就可见，不用调用方介入。
+// ════════════════════════════════════════════════════════════════════════════
+
+// 调用方须持有 s.posMtx
+static inline void refresh_cached_size_locked(Session &s) {
+    LARGE_INTEGER fs{};
+    if (GetFileSizeEx(s.handle, &fs) && fs.QuadPart >= 0)
+        s.cachedFileSize = static_cast<uint64_t>(fs.QuadPart);
+}
+
+// 自行加锁的版本，供不持 posMtx 的短读/失败路径使用
+static inline void refresh_cached_size(Session &s) {
+    std::lock_guard<std::mutex> lk(s.posMtx);
+    refresh_cached_size_locked(s);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -190,11 +234,19 @@ void IOCPContext::shutdown() {
 
     UR_DEBUG_LOG("shutdown: IOCP handles closed, clearing batchers");
 
-    // 6. Clean up batchers
+    // 6. Clean up batchers（连同退役的那些）
+    //    析构里会 Py_DECREF（弱引用 / 回调），所以挪到锁外删——锁内析构可能
+    //    级联执行任意 Python 代码并重取 GIL。
     {
-        std::lock_guard<std::mutex> lk(m_batchersMtx);
-        m_batchers.clear();
-    }
+        std::vector<std::unique_ptr<ResultBatcher>> doomed;
+        {
+            std::lock_guard<std::mutex> lk(m_batchersMtx);
+            for (auto &kv : m_batchers) doomed.push_back(std::move(kv.second));
+            m_batchers.clear();
+            for (auto &b : m_retiredBatchers) doomed.push_back(std::move(b));
+            m_retiredBatchers.clear();
+        }
+    }   // doomed 在锁外析构
 
     // 7. Clean up any remaining sessions (should already be empty)
     {
@@ -218,6 +270,7 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
     s->id                     = m_nextSessionId.fetch_add(1, std::memory_order_relaxed);
     s->handle                 = h;
     s->loop                   = loop;
+    Py_XINCREF(s->loop);   // ~Session 负责释放；构造函数那边不再替它保管
     s->batcher                = get_batcher(loop);
     s->create_future          = create_future;
     Py_INCREF(create_future);
@@ -290,17 +343,28 @@ ResultBatcher *IOCPContext::get_batcher(PyObject *loop) {
     {
         std::lock_guard<std::mutex> lk(m_batchersMtx);
         auto it = m_batchers.find(loop);
-        if (it != m_batchers.end()) return it->second.get();
+        if (it != m_batchers.end()) {
+            if (it->second->loop_is(loop)) return it->second.get();
+            // 缓存键是裸 PyObject*：旧 loop 已死、新 loop 复用了同一个地址。
+            // 旧 batcher 必须先退役——它的弱引用已经失效，继续用会把新 loop
+            // 的完成结果全部静默丢掉。只退役不销毁：Session::batcher 与
+            // snapshot_batchers() 可能仍持有这个裸指针。
+            m_retiredBatchers.push_back(std::move(it->second));
+            m_batchers.erase(it);
+        }
     }
     // Create new batcher outside lock to avoid nested issues
     auto &cfg = ayafileio::config();
-    auto batcher = std::make_unique<ResultBatcher>(
-        loop, cfg.iocp_batch_size(), 5);  // max_threshold, max_idle_timeout_ms
-    batcher->set_adaptive(cfg.adaptive_batch());
-    batcher->set_target_latency_us(cfg.adaptive_target_latency_us());
+    std::unique_ptr<ResultBatcher> mine(
+        new ResultBatcher(loop, cfg.iocp_batch_size(), 5));  // max_threshold, max_idle_timeout_ms
+    mine->set_adaptive(cfg.adaptive_batch());
+    mine->set_target_latency_us(cfg.adaptive_target_latency_us());
+
     std::lock_guard<std::mutex> lk(m_batchersMtx);
-    auto [it, inserted] = m_batchers.emplace(loop, std::move(batcher));
-    return it->second.get();
+    auto it = m_batchers.find(loop);
+    if (it != m_batchers.end()) return it->second.get();   // 竞态：别的线程先建好了
+    m_batchers.emplace(loop, std::move(mine));
+    return m_batchers.find(loop)->second.get();
 }
 
 DWORD IOCPContext::get_min_batcher_timeout_ms() {
@@ -336,6 +400,11 @@ void IOCPContext::worker_proc(HANDLE iocp) {
 
     while (m_running.load(std::memory_order_acquire)) {
         DWORD timeout = get_min_batcher_timeout_ms();
+        // quarantine 队首的到期时间也要算进等待超时，否则空闲时这个线程会
+        // INFINITE 阻塞，最后一批完成的请求就一直挂在队里
+        //（见 quarantine_timeout_ms 的说明）。
+        const DWORD q_timeout = quarantine_timeout_ms();
+        if (q_timeout < timeout) timeout = q_timeout;
         ULONG count = 0;
 
         BOOL ok = GetQueuedCompletionStatusEx(
@@ -345,6 +414,10 @@ void IOCPContext::worker_proc(HANDLE iocp) {
             // Timeout or error — flush idle batchers, then check for shutdown
             {
                 PyGILState_STATE gs = PyGILState_Ensure();
+                // 空闲同样是 drain 的时机：放掉保留期已满的请求（连带它们的
+                // future 以及 future 里对事件循环的引用）。只做 flush 会让
+                // 内存停在上一次峰值，直到下一次有流量才回落。
+                quarantine_drain();
                 flush_batchers();
                 PyGILState_Release(gs);
             }
@@ -695,6 +768,11 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
         std::lock_guard<std::mutex> lk(s->posMtx);
         int64_t rem = static_cast<int64_t>(s->cachedFileSize) - static_cast<int64_t>(s->filePos);
         if (rem <= 0) {
+            // 可能只是缓存长度过期（外部追加），先问一次内核再判 EOF
+            refresh_cached_size_locked(*s);
+            rem = static_cast<int64_t>(s->cachedFileSize) - static_cast<int64_t>(s->filePos);
+        }
+        if (rem <= 0) {
             PyObject *b = PyBytes_FromStringAndSize(nullptr, 0);
             PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
             PyObject *r  = PyObject_CallFunctionObjArgs(fn, b, nullptr);
@@ -736,6 +814,9 @@ PyObject *IOCPContext::submit_read(uint64_t session_id, int64_t size) {
             val = req->preResult;
             req->preResult = nullptr;
         } else {
+            // 短读 = 真碰到 EOF（文件被外部截短/读穿了缓存长度）：
+            // 把缓存长度拉回内核真值，下一次操作立刻正确
+            refresh_cached_size(*s);
             // 短读：拷贝实际字节数，preResult 随 req 由 worker 释放
             val = PyBytes_FromStringAndSize(req->buf(), got);
         }
@@ -819,6 +900,11 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
         std::lock_guard<std::mutex> lk(s->posMtx);
         int64_t rem = static_cast<int64_t>(s->cachedFileSize) - offset;
         if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：offset 看上去越界时先问内核
+            refresh_cached_size_locked(*s);
+            rem = static_cast<int64_t>(s->cachedFileSize) - offset;
+        }
+        if (rem <= 0) {
             // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
             PyObject *b = PyBytes_FromStringAndSize(nullptr, 0);
             PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
@@ -859,6 +945,8 @@ PyObject *IOCPContext::submit_read_at(uint64_t session_id, int64_t offset, int64
             val = req->preResult;
             req->preResult = nullptr;
         } else {
+            // 短读 = 真碰到 EOF：校正缓存长度（见 refresh_cached_size）
+            refresh_cached_size(*s);
             // 短读：拷贝实际字节数，preResult 随 req 由 worker 释放
             val = PyBytes_FromStringAndSize(req->buf(), got);
         }
@@ -988,6 +1076,8 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
         // skipCPOnSuccess 启用时内核不投完成包，由提交线程全权收尾；
         // 否则完成包到达后由 worker 递减 pending 并回收 req。
         UR_DEBUG_LOG("submit_write SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
+        // 短写：上面的乐观 cachedFileSize 更新会高估真实长度，拉回内核真值
+        if (static_cast<size_t>(wrote) != wsize) refresh_cached_size(*s);
         PyObject *val = PyLong_FromSsize_t((Py_ssize_t)wrote);
         PyObject *fn  = req->set_result;  // 提交时已预取，复用
         req->set_result = nullptr;
@@ -1011,6 +1101,8 @@ PyObject *IOCPContext::submit_write(uint64_t session_id, Py_buffer *view, int64_
     } else {
         DWORD err = GetLastError();
         if (err != ERROR_IO_PENDING) {
+            // 写失败：提交前的乐观长度更新必须撤回，否则后续 read 会读到假 EOF 之后
+            refresh_cached_size(*s);
             s->complete_request();
             req->batcher->op_completed();
             UR_DEBUG_LOG("submit_write FAIL sid=%llu req=%p err=%lu — deleting", session_id, (void*)req, err);
@@ -1048,6 +1140,8 @@ PyObject *IOCPContext::submit_seek(uint64_t session_id, int64_t offset, int when
         else if (whence == 1)
             s->filePos = (uint64_t)((int64_t)s->filePos + offset);
         else if (whence == 2) {
+            // SEEK_END 问的就是「现在多长」：缓存值可能过期（外部追加）
+            refresh_cached_size_locked(*s);
             s->filePos = static_cast<uint64_t>(static_cast<int64_t>(s->cachedFileSize) + offset);
         } else {
             PyObject *exc = PyObject_CallFunction(g_ValueError, "s", "Invalid whence value");
@@ -1269,6 +1363,11 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
         std::lock_guard<std::mutex> lk(s->posMtx);
         int64_t rem = static_cast<int64_t>(s->cachedFileSize) - static_cast<int64_t>(s->filePos);
         if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：判 EOF 前先问内核
+            refresh_cached_size_locked(*s);
+            rem = static_cast<int64_t>(s->cachedFileSize) - static_cast<int64_t>(s->filePos);
+        }
+        if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject *z = PyLong_FromLong(0);
             PyObject *fn = PyObject_GetAttr(future, g_str_set_result);
@@ -1295,6 +1394,7 @@ PyObject *IOCPContext::submit_readinto(uint64_t session_id, PyObject *buf) {
         // skipCPOnSuccess 启用时内核不投完成包，由提交线程全权收尾；
         // 否则完成包到达后由 worker 递减 pending 并回收 req。
         UR_DEBUG_LOG("submit_readinto SYNC sid=%llu req=%p pending %ld→%ld", session_id, (void*)req, prev, prev+1);
+        if ((size_t)got != readSize) refresh_cached_size(*s);  // 短读 → 校正缓存长度
         PyObject *val = PyLong_FromSsize_t((Py_ssize_t)got);
         PyObject *fn  = req->set_result;  // 提交时已预取，复用
         req->set_result = nullptr;

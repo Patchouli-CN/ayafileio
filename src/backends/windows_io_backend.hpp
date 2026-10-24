@@ -51,6 +51,18 @@ private:
                         PyObject* loop, PyObject* create_future);
 
     uint64_t m_sessionId = 0;
+
+    // fileno() 暴露给 Python 的 CRT 描述符：**复制**出来的句柄 + 只创建一次。
+    // m_cached_fileno < 0 表示尚未创建。由 close_impl()/析构负责关闭。
+    //
+    // 为什么要连 m_cached_dup_handle 一起记：调用方可能自己 os.close() 掉这个
+    // 描述符（标准库里这是明确不支持的用法，但不能让它把进程搞崩）。关掉之后
+    // fd 号会被后开的描述符复用，光凭 _get_osfhandle(fd) != -1 判断「还在」
+    // 会把别人的描述符当成自己的——实测那样会关掉 asyncio 的 self-pipe
+    // socketpair，进程在事件循环收尾时 fastfail（0xC0000409）。所以必须比
+    // 对**句柄身份**：只有槽位里仍然是我们那一份复制句柄时才由我们关。
+    mutable int m_cached_fileno = -1;
+    mutable HANDLE m_cached_dup_handle = INVALID_HANDLE_VALUE;
 };
 
 } // namespace ayafileio

@@ -5,9 +5,33 @@
 #endif
 #include <nanobind/nanobind.h>
 #include <cmath>
+#include <memory>
 #include <vector>
 
 namespace ayafileio {
+
+namespace {
+
+// 取回弱引用指向的对象（**新**引用）；referent 已死或出错返回 nullptr。
+// 3.13+ 用 PyWeakref_GetRef（PyWeakref_GetObject 自 3.13 起废弃），
+// 旧版本走 GetObject + 手工 INCREF。
+PyObject *weakref_target(PyObject *ref) {
+#if PY_VERSION_HEX >= 0x030D0000
+    PyObject *obj = nullptr;
+    if (PyWeakref_GetRef(ref, &obj) != 1) {   // 0 = referent 已死，-1 = error
+        PyErr_Clear();
+        return nullptr;
+    }
+    return obj;
+#else
+    PyObject *obj = PyWeakref_GetObject(ref);  // borrowed；死后返回 Py_None
+    if (!obj || obj == Py_None) return nullptr;
+    Py_INCREF(obj);
+    return obj;
+#endif
+}
+
+} // namespace
 
 ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
                              unsigned idle_timeout_ms)
@@ -16,9 +40,10 @@ ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
     m_current_threshold.store(threshold, std::memory_order_relaxed);
     m_current_idle_ms.store(idle_timeout_ms, std::memory_order_relaxed);
 
-    m_call_soon_ts = PyObject_GetAttr(loop, g_str_call_soon_ts);
-    if (!m_call_soon_ts) {
-        throw std::runtime_error("Failed to get call_soon_threadsafe from loop");
+    // 弱引用：batcher 不能把事件循环对象钉住（见头文件里的说明）
+    m_loop_ref = PyWeakref_NewRef(loop, nullptr);
+    if (!m_loop_ref) {
+        throw std::runtime_error("Failed to create weakref to the event loop");
     }
 
     py::object fn = py::cpp_function([this]() {
@@ -52,7 +77,7 @@ ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
 }
 
 ResultBatcher::~ResultBatcher() {
-    Py_XDECREF(m_call_soon_ts);
+    Py_XDECREF(m_loop_ref);
     Py_XDECREF(m_drain_cb);
     for (auto &e : m_batch) {
         Py_XDECREF(e.set_fn);
@@ -236,7 +261,29 @@ void ResultBatcher::flush_if_idle() {
 }
 
 void ResultBatcher::schedule_drain() {
-    PyObject *r = PyObject_CallFunctionObjArgs(m_call_soon_ts, m_drain_cb, nullptr);
+    PyObject *loop = weakref_target(m_loop_ref);
+    if (!loop) {
+        // 事件循环对象已经没了。这些结果再没有谁能消费（future 绑定在那个
+        // loop 上），留着只会把 future——以及 future 里对 loop 的强引用——
+        // 一直压在 m_batch 里。直接丢弃并复位派发位。
+        std::vector<BatchEntry> dead;
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            dead.swap(m_batch);
+            m_has_pending = false;
+            m_dispatch_pending.store(false, std::memory_order_relaxed);
+        }
+        for (auto &e : dead) {
+            Py_XDECREF(e.set_fn);
+            Py_XDECREF(e.val);
+        }
+        return;
+    }
+
+    // 不缓存 loop.call_soon_threadsafe：那是个持有 loop 的绑定方法（见头文件）。
+    // 每次 flush 一次属性查找，与一次 call_soon_threadsafe 相比可忽略。
+    PyObject *r = PyObject_CallMethod(loop, "call_soon_threadsafe", "O", m_drain_cb);
+    Py_DECREF(loop);
     if (!r) {
         PyErr_Print();
         std::lock_guard<std::mutex> lk(m_mtx);
@@ -244,6 +291,13 @@ void ResultBatcher::schedule_drain() {
     } else {
         Py_DECREF(r);
     }
+}
+
+bool ResultBatcher::loop_is(PyObject *loop) const {
+    PyObject *live = weakref_target(m_loop_ref);
+    const bool same = (live == loop);
+    Py_XDECREF(live);
+    return same;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -311,37 +365,69 @@ double ResultBatcher::median_interval_us() const {
 
 static std::mutex                                           g_batchersMtx;
 static std::vector<std::pair<PyObject*, ResultBatcher*>>    g_batchers;
+// 退役的 batcher：地址失效（旧 loop 已死、新 loop 复用了同一个 PyObject*），
+// 但 flush_batchers()/refresh_batchers_config() 可能正拿着 snapshot 出来的裸
+// 指针在用，所以**只退役不销毁**，统一在 clear_batchers()（shutdown 路径）
+// 释放——与「batcher 只在 shutdown 时销毁」这条既有不变量保持一致。
+static std::vector<ResultBatcher*>                          g_retired;
+
+// 锁内调用：返回指向 loop 且仍然有效的 batcher；过期的挪进 g_retired。
+static ResultBatcher *find_live_batcher_locked(PyObject *loop) {
+    for (auto &kv : g_batchers) {
+        if (kv.first != loop || !kv.second) continue;
+        if (kv.second->loop_is(loop)) return kv.second;
+        g_retired.push_back(kv.second);
+        kv.first  = nullptr;
+        kv.second = nullptr;
+    }
+    return nullptr;
+}
 
 ResultBatcher *get_or_create_batcher(PyObject *loop) {
     {
         std::lock_guard<std::mutex> lk(g_batchersMtx);
-        for (auto &kv : g_batchers) {
-            if (kv.first == loop) return kv.second;
-        }
+        if (ResultBatcher *hit = find_live_batcher_locked(loop)) return hit;
     }
-    // 在锁外构造：ResultBatcher 构造函数会执行 Python 调用（GetAttr、
+    // 在锁外构造：ResultBatcher 构造函数会执行 Python 调用（创建弱引用、
     // 创建 cpp_function），可能触发 GC 进而释放/重取 GIL —— 不能发生在
     // 持 g_batchersMtx 时，否则会与其他 GIL 持有者互等死锁。
     auto &cfg = ayafileio::config();
-    auto *b = new ResultBatcher(loop, cfg.iocp_batch_size(), 5);
-    b->set_adaptive(cfg.adaptive_batch());
-    b->set_target_latency_us(cfg.adaptive_target_latency_us());
+    std::unique_ptr<ResultBatcher> mine(
+        new ResultBatcher(loop, cfg.iocp_batch_size(), 5));
+    mine->set_adaptive(cfg.adaptive_batch());
+    mine->set_target_latency_us(cfg.adaptive_target_latency_us());
 
-    std::lock_guard<std::mutex> lk(g_batchersMtx);
-    for (auto &kv : g_batchers) {
-        if (kv.first == loop) {  // 竞态：别的线程已注册
-            delete b;
-            return kv.second;
+    ResultBatcher *result = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_batchersMtx);
+        if (ResultBatcher *hit = find_live_batcher_locked(loop)) {
+            result = hit;                     // 竞态：别的线程已注册（有效）
+        } else {
+            g_batchers.emplace_back(loop, mine.get());
+            result = mine.release();
         }
+        // 清掉退役后留下的空槽，避免 g_batchers 随 loop 生灭无限增长
+        g_batchers.erase(
+            std::remove_if(g_batchers.begin(), g_batchers.end(),
+                           [](const auto &kv) { return kv.second == nullptr; }),
+            g_batchers.end());
     }
-    g_batchers.emplace_back(loop, b);
-    return b;
+    return result;   // mine 若未 release，在这里（锁外）析构
 }
 
 void clear_batchers() {
-    std::lock_guard<std::mutex> lk(g_batchersMtx);
-    for (auto &kv : g_batchers) delete kv.second;
-    g_batchers.clear();
+    std::vector<ResultBatcher *> victims;
+    {
+        std::lock_guard<std::mutex> lk(g_batchersMtx);
+        for (auto &kv : g_batchers) {
+            if (kv.second) victims.push_back(kv.second);
+        }
+        victims.insert(victims.end(), g_retired.begin(), g_retired.end());
+        g_batchers.clear();
+        g_retired.clear();
+    }
+    // 锁外析构：~ResultBatcher 里有 Py_DECREF，可能级联执行任意 Python 代码
+    for (auto *b : victims) delete b;
 }
 
 void refresh_batchers_config() {

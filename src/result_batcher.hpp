@@ -92,9 +92,19 @@ public:
     long outstanding() const { return m_outstanding.load(std::memory_order_relaxed); }
     double median_interval_us() const;
 
+    // 弱引用是否仍指向 *loop（新事件循环对象复用了旧 loop 的地址时为假）。
+    // batcher 按 loop 缓存，缓存键是裸 PyObject*，所以这个判断是必需的：
+    // 不比较就会把旧 loop 的 batcher 交给新 loop，而它的弱引用已经失效，
+    // 于是新 loop 的所有完成结果都会被静默丢掉。
+    bool loop_is(PyObject *loop) const;
+
 private:
-    PyObject *m_call_soon_ts = nullptr;
-    PyObject *m_drain_cb     = nullptr;
+    // 事件循环的**弱**引用。刻意不缓存 `loop.call_soon_threadsafe` 这个绑定
+    // 方法：那是强引用，会让 IOCPContext::m_batchers 把任何做过一次 I/O 的
+    // loop 钉到进程退出（每 asyncio.run() 一次就永久留下一个 loop 对象）。
+    // 代价是每次 flush 一次属性查找 —— flush 是批量投递，不在每个 op 上。
+    PyObject *m_loop_ref    = nullptr;
+    PyObject *m_drain_cb    = nullptr;
 
     mutable std::mutex m_mtx;
     std::vector<BatchEntry> m_batch;
