@@ -114,14 +114,15 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     m_running.store(true, std::memory_order_release);
     m_pending.store(0, std::memory_order_relaxed);
     m_filePos = 0;
-    {
+    // 文件大小惰性获取：非 append 模式不再在 open 时跑一次 fstat——读取路径的
+    // EOF 判决点/短读与 seek(SEEK_END) 都会 refresh_cached_size_locked() 补上。
+    // append 模式必须立刻知道起始位置，所以那种情况仍然当场取。
+    if (m_appendMode) {
         unsigned long long size = 0;
         if (file_size(m_fd, &size)) {
             m_cachedFileSize = static_cast<uint64_t>(size);
-            if (m_appendMode) {
-                m_filePos = m_cachedFileSize;
-                UR_DEBUG_LOG("ThreadIOBackend: append mode, filePos=%llu", (unsigned long long)m_filePos);
-            }
+            m_filePos = m_cachedFileSize;
+            UR_DEBUG_LOG("ThreadIOBackend: append mode, filePos=%llu", (unsigned long long)m_filePos);
         }
     }
     

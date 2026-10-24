@@ -294,11 +294,18 @@ uint64_t IOCPContext::create_session(HANDLE h, PyObject *loop,
     s->skipCPOnSuccess = SetFileCompletionNotificationModes(h,
         FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) != 0;
 
-    // Cache initial file size — avoids GetFileSizeEx syscall on every read
-    {
+    // 文件大小**惰性**获取：这里不再无条件 GetFileSizeEx（每次 open 一次内核调用）。
+    // 读取路径的 EOF 判决点与 seek(SEEK_END) 都会先 refresh_cached_size_locked()
+    // （见 refresh_cached_size_locked / submit_read / submit_seek），第一次真正
+    // 需要长度时会自动补上；而 append 模式必须立刻知道起始位置，所以那种情况
+    // 仍然当场取。
+    s->cachedFileSize = 0;
+    if (s->appendMode) {
         LARGE_INTEGER fs{};
-        if (GetFileSizeEx(h, &fs))
+        if (GetFileSizeEx(h, &fs) && fs.QuadPart >= 0) {
             s->cachedFileSize = static_cast<uint64_t>(fs.QuadPart);
+            s->filePos = s->cachedFileSize;
+        }
     }
 
     s->running.store(true, std::memory_order_release);

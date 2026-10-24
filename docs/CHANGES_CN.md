@@ -11,6 +11,15 @@
 - **`configure({"backend": ...})`：显式选择后端。** 取值 `auto`（默认，平台探测）/ `iocp` / `io_uring` / `dispatch_io` / `thread_pool`。只影响**之后**打开的句柄，已经打开的文件保持各自的后端；强制一个本构建/本机床上没有的后端会在 `configure()` 时抛 `ValueError`，而不是留到第一次 `open()` 才炸。`get_backend_info()` 与 `get_capabilities()` 现在都按**有效后端**回答，不再永远报平台默认值——「我现在到底在用哪个后端、是不是真异步」终于可回答了。顺带修正两处：Linux 上没有 liburing 的构建以前把 `platform` 报成 `"posix"`，现在是 `"linux"`（`platform` 管「在哪跑」，`backend` 管「用哪个」，两者不该混在一起）；`configure({"io_uring_sqpoll": True})` 的校验也从「内核支持吗」改成「**有效后端是 io_uring 吗**」——强制 thread_pool 之后这个选项不会生效，即使本机内核支持 SQPOLL，现在会直接 `ValueError` 而不是静默接受。
 - **CI 覆盖线程池回退后端。** `ThreadIOBackend` 是 io_uring / GCD / IOCP 都不可用时的唯一路径，但正常 CI 里一行都跑不到（Linux 装了 liburing 就走 io_uring、macOS 走 GCD、Windows 走 IOCP）。新增两个 job：`test-fallback-backend`（Linux + macOS，通过 `AYAFILEIO_TEST_BACKEND=thread_pool` 让整套用例切到回退后端；`tests/conftest.py` 会在切换后核对生效，防止「配置静默无效」把整轮 CI 变成假绿）和 `test-no-io-uring-build`（Linux 刻意不装 liburing，`HAVE_IO_URING` 不成立，线程池是唯一后端——很多 manylinux 用户拿到的正是这样一份构建）。回归测试 `tests/test_backend_select.py`。
 
+### 性能
+- **open 不再每次取一次文件大小。** `create_session`（IOCP）与 `ThreadIOBackend` 构造原先无条件跑一次
+  `GetFileSizeEx` / `fstat`，只为给读取路径的 EOF 截断提供长度；而长度可以「需要时再补」——EOF 判决点、
+  短读、`seek(SEEK_END)` 都会刷新。改成惰性后（append 模式仍当场取，它必须知道起始位置），
+  实测 `open()` p50 **41 µs → 38 µs**（i7-6700K / NTFS / 600 次）。适用面要说清：批量 open
+  （`batch open`、`aopen only`）净省一次 syscall；「open + 一次 read」相当于把它挪到首读，中性。
+  另外测明：`aopen()` 的 155 µs 与 `open()` 的 38 µs 之差不是代码浪费——`io_worker_count` 取 1/2/16
+  实测都是 152–159 µs，瓶颈是池唤醒 + 2~3 次 GIL 交接 + 事件循环唤醒这几个**固定往返**。
+
 ### 修复
 - **Windows 上并发写 access violation：`OVERLAPPED` 用了 `hEvent = NULL`。（移植线程池后端时发现）**
   只用 ctypes 直调 Win32 就能复现：同一个 `FILE_FLAG_OVERLAPPED` 句柄上 16 线程各 300 次 `WriteFile`，
