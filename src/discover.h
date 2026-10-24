@@ -10,9 +10,25 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 #include "globals.hpp"
+#include "config.hpp"
 #include <string>
 
 namespace ayafileio {
+
+// ── 后端解析 ────────────────────────────────────────────────────────────────
+// effective_backend(): 把 configure({"backend": ...}) 的强制值解析成实际要用的
+// 后端——Auto 走平台探测，强制值再按可用性兜一次底（configure 已经校验过，
+// 这里兜底是为了「配置是旧的/平台不支持」时不至于构造出不存在的东西）。
+BackendKind effective_backend();
+
+// 后端名（与 Python 侧的字符串一致：iocp / io_uring / dispatch_io / thread_pool）
+const char *backend_name(BackendKind kind);
+
+// 名字 → 枚举；未知名字返回 false
+bool parse_backend_name(const std::string &name, BackendKind &out);
+
+// 该后端在**本构建**里是否存在且运行时可用
+bool backend_available(BackendKind kind);
 
 // ── OS / 内核版本字符串 ─────────────────────────────────────────────────────
 // Windows: RtlGetVersion（GetVersionEx 会受 manifest 兼容模式欺骗）

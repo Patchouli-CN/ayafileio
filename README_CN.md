@@ -149,6 +149,7 @@ ayafileio.reset_config()  # 恢复默认
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
+| `backend` | `"auto"` | 后端选择：`auto` / `iocp` / `io_uring` / `dispatch_io` / `thread_pool`。只影响**之后**打开的句柄；强制一个本平台不可用的后端会抛 `ValueError`。`get_backend_info()` 与 `get_capabilities()` 都会反映这个选择 |
 | `io_worker_count` | 0 | I/O 工作线程数，0 = 自动 |
 | `buffer_pool_max` | 512 | 最大缓存缓冲区数 |
 | `buffer_size` | 65536 | 单个缓冲区大小（字节） |

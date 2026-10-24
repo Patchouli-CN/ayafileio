@@ -277,29 +277,110 @@ py::dict gcd_detail() {
 // 跨平台汇总
 // ════════════════════════════════════════════════════════════════════════════
 
-py::dict backend_detail() {
+// ════════════════════════════════════════════════════════════════════════════
+// 后端解析
+// ════════════════════════════════════════════════════════════════════════════
+
+bool backend_available(BackendKind kind) {
+    switch (kind) {
+    case BackendKind::Iocp:
+#ifdef _WIN32
+        return true;
+#else
+        return false;
+#endif
+    case BackendKind::IoUring:
+#ifdef HAVE_IO_URING
+        return io_uring_available();
+#else
+        return false;
+#endif
+    case BackendKind::DispatchIo:
+#ifdef __APPLE__
+        return gcd_dispatch_io_available();
+#else
+        return false;
+#endif
+    case BackendKind::ThreadPool:
+        // thread_io_backend.cpp 只编进 POSIX 构建；Windows 只有 IOCP 后端
+#ifdef _WIN32
+        return false;
+#else
+        return true;
+#endif
+    case BackendKind::Auto:
+    default:
+        return true;   // Auto 永远合法：它就是「按平台探测」
+    }
+}
+
+BackendKind effective_backend() {
+    const BackendKind forced = config().backend();
+    if (forced != BackendKind::Auto && backend_available(forced)) return forced;
+
+    // Auto（或强制值在本构建里不可用）→ 平台探测，与历史行为一致
 #if defined(_WIN32)
-    py::dict d;
-    d["completion_model"] = true;  // IRP + IOCP：提交后无线程等待，中断报完成
-    d["batch_harvest"] = true;     // GetQueuedCompletionStatusEx 批量收割
-    return d;
+    return BackendKind::Iocp;
 #elif defined(HAVE_IO_URING)
-    if (!io_uring_available()) {
+    return io_uring_available() ? BackendKind::IoUring : BackendKind::ThreadPool;
+#elif defined(__APPLE__)
+    return gcd_dispatch_io_available() ? BackendKind::DispatchIo : BackendKind::ThreadPool;
+#else
+    return BackendKind::ThreadPool;
+#endif
+}
+
+const char *backend_name(BackendKind kind) {
+    switch (kind) {
+    case BackendKind::Iocp:       return "iocp";
+    case BackendKind::IoUring:    return "io_uring";
+    case BackendKind::DispatchIo: return "dispatch_io";
+    case BackendKind::ThreadPool: return "thread_pool";
+    case BackendKind::Auto:
+    default:                      return "auto";
+    }
+}
+
+bool parse_backend_name(const std::string &name, BackendKind &out) {
+    if (name == "auto")        { out = BackendKind::Auto;       return true; }
+    if (name == "iocp")        { out = BackendKind::Iocp;       return true; }
+    if (name == "io_uring")    { out = BackendKind::IoUring;    return true; }
+    if (name == "dispatch_io") { out = BackendKind::DispatchIo; return true; }
+    if (name == "thread_pool") { out = BackendKind::ThreadPool; return true; }
+    return false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 跨平台汇总
+// ════════════════════════════════════════════════════════════════════════════
+
+py::dict backend_detail() {
+    // 跟着**有效后端**走，而不是编译期平台：configure({"backend": ...}) 之后
+    // 能力矩阵必须如实反映「现在用的不是 io_uring/IOCP」。
+    switch (effective_backend()) {
+    case BackendKind::Iocp: {
         py::dict d;
-        d["available"] = false;
-        d["completion_model"] = false;
-        d["note"] = "thread pool fallback (io_uring unavailable)";
+        d["completion_model"] = true;  // IRP + IOCP：提交后无线程等待，中断报完成
+        d["batch_harvest"] = true;     // GetQueuedCompletionStatusEx 批量收割
         return d;
     }
-    return io_uring_detail();
-#elif defined(__APPLE__)
-    return gcd_detail();
-#else
-    py::dict d;
-    d["completion_model"] = false;
-    d["note"] = "thread pool fallback";
-    return d;
+#ifdef HAVE_IO_URING
+    case BackendKind::IoUring:
+        return io_uring_detail();
 #endif
+#ifdef __APPLE__
+    case BackendKind::DispatchIo:
+        return gcd_detail();
+#endif
+    case BackendKind::ThreadPool:
+    case BackendKind::Auto:
+    default: {
+        py::dict d;
+        d["completion_model"] = false;
+        d["note"] = "thread pool fallback";
+        return d;
+    }
+    }
 }
 
 } // namespace ayafileio

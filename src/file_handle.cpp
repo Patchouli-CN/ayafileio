@@ -1,4 +1,5 @@
 #include "file_handle.hpp"
+#include "discover.h"          // effective_backend()
 #ifdef _WIN32
 #include "backends/windows_io_backend.hpp"
 #elif defined(__APPLE__)
@@ -23,44 +24,40 @@ FileHandle::FileHandle(const std::string &path, const std::string &mode,
     // POSIX 后端惰性绑定事件循环（首次 I/O 时），注入参数仅 Windows 使用
     (void)loop; (void)create_future;
 #endif
+    // 后端由 configure({"backend": ...}) 决定：Auto 走平台探测，强制值直接
+    // 生效（可用性在 configure 时已校验，effective_backend 再兜一次底）。
+    const BackendKind kind = effective_backend();
+
 #ifdef _WIN32
+    (void)kind;   // Windows 只有 IOCP 后端（thread_io_backend 是 POSIX 实现）
     if (loop) {
         // open_async 注入路径：工作线程无 running loop，用预取的 loop
         m_backend = new WindowsIOBackend(path, mode, loop, create_future);
     } else {
         m_backend = new WindowsIOBackend(path, mode);
     }
-#elif defined(__APPLE__)
-    // macOS: 优先使用 Dispatch I/O 实现真异步
-    try {
-        m_backend = new MacOSGCDBackend(path, mode);
-    } catch (const std::exception& e) {
-        // 如果 GCD 后端失败，降级到线程池
-        m_backend = new ThreadIOBackend(path, mode);
-    }
 #else
-    // Linux/其他 POSIX: 优先使用 io_uring
-#ifdef HAVE_IO_URING
-    static bool has_io_uring = []() {
-        struct io_uring ring;
-        int ret = io_uring_queue_init(8, &ring, 0);
-        if (ret == 0) {
-            io_uring_queue_exit(&ring);
-            return true;
+#  ifdef __APPLE__
+    if (kind == BackendKind::DispatchIo) {
+        try {
+            m_backend = new MacOSGCDBackend(path, mode);
+            return;
+        } catch (const std::exception &) {
+            // GCD 后端创建失败 → 降级到线程池
         }
-        return false;
-    }();
-    
-    if (has_io_uring) {
+    }
+#  endif
+#  ifdef HAVE_IO_URING
+    if (kind == BackendKind::IoUring) {
         try {
             m_backend = new IOUringBackend(path, mode);
             return;
-        } catch (const std::exception& e) {
-            // io_uring 后端创建失败，降级到线程池
+        } catch (const std::exception &) {
+            // io_uring 后端创建失败 → 降级到线程池
         }
     }
-#endif
-    // 降级到线程池后端
+#  endif
+    (void)kind;
     m_backend = new ThreadIOBackend(path, mode);
 #endif
 }
@@ -71,33 +68,32 @@ FileHandle::~FileHandle() {
 
 // 从 fd 打开
 FileHandle::FileHandle(int fd, const std::string& mode, bool owns_fd) {
+    const BackendKind kind = effective_backend();
 #ifdef _WIN32
+    (void)kind;
     m_backend = new WindowsIOBackend(fd, mode, owns_fd);
-#elif defined(__APPLE__)
-    try {
-        m_backend = new MacOSGCDBackend(fd, mode, owns_fd);
-    } catch (const std::exception&) {
-        m_backend = new ThreadIOBackend(fd, mode, owns_fd);
-    }
 #else
-#ifdef HAVE_IO_URING
-    static bool has_io_uring = []() {
-        struct io_uring ring;
-        int ret = io_uring_queue_init(8, &ring, 0);
-        if (ret == 0) {
-            io_uring_queue_exit(&ring);
-            return true;
+#  ifdef __APPLE__
+    if (kind == BackendKind::DispatchIo) {
+        try {
+            m_backend = new MacOSGCDBackend(fd, mode, owns_fd);
+            return;
+        } catch (const std::exception&) {
+            // 降级到线程池
         }
-        return false;
-    }();
-    
-    if (has_io_uring) {
+    }
+#  endif
+#  ifdef HAVE_IO_URING
+    if (kind == BackendKind::IoUring) {
         try {
             m_backend = new IOUringBackend(fd, mode, owns_fd);
             return;
-        } catch (const std::exception&) {}
+        } catch (const std::exception&) {
+            // 降级到线程池
+        }
     }
-#endif
+#  endif
+    (void)kind;
     m_backend = new ThreadIOBackend(fd, mode, owns_fd);
 #endif
 }
@@ -106,6 +102,10 @@ bool try_native_aopen(PyObject* loop, PyObject* future,
                       ResultBatcher* batcher,
                       const char* path, const char* mode) {
 #ifdef HAVE_IO_URING
+    // 后端被强制成 thread_pool 时不能悄悄走 io_uring 的原生 OPENAT：
+    // 否则 configure({"backend": "thread_pool"}) 之后 aopen 仍然用 io_uring，
+    // 能力矩阵和实际行为对不上，CI 的 thread_pool 覆盖也就落空了。
+    if (effective_backend() != BackendKind::IoUring) return false;
     return submit_native_aopen(loop, future, batcher, path, mode);
 #else
     (void)loop;

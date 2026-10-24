@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 新增
+- **`configure({"backend": ...})`：显式选择后端。** 取值 `auto`（默认，平台探测）/ `iocp` / `io_uring` / `dispatch_io` / `thread_pool`。只影响**之后**打开的句柄，已经打开的文件保持各自的后端；强制一个本构建/本机床上没有的后端会在 `configure()` 时抛 `ValueError`，而不是留到第一次 `open()` 才炸。`get_backend_info()` 与 `get_capabilities()` 现在都按**有效后端**回答，不再永远报平台默认值——「我现在到底在用哪个后端、是不是真异步」终于可回答了。顺带修正一处：Linux 上没有 liburing 的构建以前把 `platform` 报成 `"posix"`，现在是 `"linux"`（`platform` 管「在哪跑」，`backend` 管「用哪个」，两者不该混在一起）。
+- **CI 覆盖线程池回退后端。** `ThreadIOBackend` 是 io_uring / GCD / IOCP 都不可用时的唯一路径，但正常 CI 里一行都跑不到（Linux 装了 liburing 就走 io_uring、macOS 走 GCD、Windows 走 IOCP）。新增两个 job：`test-fallback-backend`（Linux + macOS，通过 `AYAFILEIO_TEST_BACKEND=thread_pool` 让整套用例切到回退后端；`tests/conftest.py` 会在切换后核对生效，防止「配置静默无效」把整轮 CI 变成假绿）和 `test-no-io-uring-build`（Linux 刻意不装 liburing，`HAVE_IO_URING` 不成立，线程池是唯一后端——很多 manylinux 用户拿到的正是这样一份构建）。回归测试 `tests/test_backend_select.py`。
+
 ### 修复
 - **负偏移的 `seek()` 会把逻辑位置静默污染成 2^64-1。** `seek(-1, 0)` 返回 `18446744073709551615` 并把位置设成这个值；此后每次 `read()` 只报 `ReadFile failed, errno 87`（Windows）或直接读到 EOF（POSIX）——错误信息和真正原因毫无关系，位置也再回不来。Windows IOCP、io_uring、线程池三个后端都是裸 `static_cast<uint64_t>`，只有 macOS 的 GCD 后端早就有 `new_pos < 0` 校验。现在三个后端统一按 macOS 的语义拒绝（抛 `ValueError("negative seek position")`，且**不改动当前位置**）。刻意没有采用 stdlib 的 `OSError(EINVAL)`：macOS 后端一直是 `ValueError`，跨后端一致比逐字对齐内置更重要；这一处与内置的差异记在测试注释里。回归测试 `tests/test_io_parity.py`（5 个负偏移组合 +「报错后位置不变」+「报错后流仍可用」+「内部回退路径没被误杀」）。
 - **非法模式串被静默接受。** `_normalize_mode` 只校验字符是否落在合法集合内，于是 `"rbb"` / `"rr"` / `"rw"` / `"rtb"` / `"r++"` 全部通过。其中 `"rw"` 最危险：挑起始模式字符时取第一个命中项，于是一个写着读写的模式实际按**只读**打开，调用方毫无察觉。现在补上与内置 `open()` 对齐的结构校验（恰好一个 `rwax`、至多一个 `+`/`b`/`t`、`b` 与 `t` 互斥），错误消息里带上模式串本身。

@@ -26,6 +26,9 @@ _CACHE_ENABLED = True
 class AyafileioConfig(TypedDict, total=False):
     """ayafileio 配置字典类型 — 所有键均为可选（total=False，无需 NotRequired）"""
 
+    # ── 后端选择 ───────────────────────────────────────────────────────────
+    backend: str
+
     # ── 跨平台 / 通用 ──────────────────────────────────────────────────────
     io_worker_count: int
     buffer_pool_max: int
@@ -56,6 +59,22 @@ def configure(options: AyafileioConfig) -> None:
     """统一配置 ayafileio。
 
     options 支持以下键：
+
+    **后端选择**
+    ``backend``
+        选后端，默认 ``"auto"``（按平台探测）。可取值：
+
+        - ``"auto"`` —— 平台默认（Windows IOCP / Linux io_uring 或线程池 /
+          macOS Dispatch I/O 或线程池）
+        - ``"iocp"`` / ``"io_uring"`` / ``"dispatch_io"`` / ``"thread_pool"``
+
+        只影响**之后**打开的句柄，已经打开的文件保持各自的后端。强制一个在
+        本构建/本机器上不可用的后端会当场抛 ``ValueError``（例如在 Windows 上
+        指定 ``"thread_pool"``——线程池后端是 POSIX 实现）。典型用途是把整套
+        代码跑在回退后端上做验证，以及排查「到底是哪个后端慢」。
+
+        ``get_backend_info()["backend"]`` 与 ``get_capabilities()`` 都会反映
+        这个选择，而不是平台默认值。
 
     **跨平台 / 通用**
     ``io_worker_count``

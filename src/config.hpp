@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <atomic>
 #include <shared_mutex>
 #include <unordered_map>
@@ -11,11 +12,28 @@
 namespace ayafileio {
 
 // ════════════════════════════════════════════════════════════════════════════
+// 后端选择
+//
+// Auto 走平台探测（原来的行为）；其余值强制指定，只影响**之后**打开的句柄，
+// 已经打开的保持各自的后端。可用性由 configure() 校验（见 discover.cpp 的
+// backend_available()），所以构造文件时不会拿到一个不存在的后端。
+// ════════════════════════════════════════════════════════════════════════════
+
+enum class BackendKind : uint8_t {
+    Auto = 0,
+    Iocp,
+    IoUring,
+    DispatchIo,
+    ThreadPool,
+};
+
+// ════════════════════════════════════════════════════════════════════════════
 // Unified configuration struct
 // ════════════════════════════════════════════════════════════════════════════
 
 struct Config {
     // ── Cross-platform / general ──────────────────────────────────────────
+    BackendKind backend         = BackendKind::Auto;  // 后端选择，Auto=平台探测
     unsigned io_worker_count   = 0;            // I/O worker threads, 0=auto (max 128)
     size_t   buffer_pool_max   = 512;          // Max cached buffers
     size_t   buffer_size       = 64 * 1024;    // Buffer size in bytes
@@ -93,6 +111,7 @@ public:
 
     // ── Convenience getters (thread-safe) ─────────────────────────────────
     unsigned io_worker_count()    const { std::shared_lock lk(m_mutex); return m_config.io_worker_count; }
+    BackendKind backend()         const { std::shared_lock lk(m_mutex); return m_config.backend; }
     size_t   buffer_pool_max()    const { std::shared_lock lk(m_mutex); return m_config.buffer_pool_max; }
     size_t   buffer_size()        const { std::shared_lock lk(m_mutex); return m_config.buffer_size; }
     unsigned close_timeout_ms()   const { std::shared_lock lk(m_mutex); return m_config.close_timeout_ms; }

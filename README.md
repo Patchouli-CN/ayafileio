@@ -153,6 +153,7 @@ ayafileio.reset_config()  # back to defaults
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `backend` | `"auto"` | Backend selection: `auto` / `iocp` / `io_uring` / `dispatch_io` / `thread_pool`. Affects handles opened **afterwards**; forcing one that is unavailable on this platform raises `ValueError`. Both `get_backend_info()` and `get_capabilities()` reflect the choice |
 | `io_worker_count` | 0 | IO worker threads, 0 = auto |
 | `buffer_pool_max` | 512 | Max cached buffers |
 | `buffer_size` | 65536 | Buffer size in bytes |

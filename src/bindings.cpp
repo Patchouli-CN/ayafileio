@@ -34,6 +34,26 @@ using namespace ayafileio;
 static void py_configure(py::dict options) {
     auto cfg = ayafileio::config().get();
 
+    // 后端选择：只影响之后打开的句柄
+    if (options.contains("backend")) {
+        std::string name = py::cast<std::string>(options["backend"]);
+        BackendKind kind = BackendKind::Auto;
+        if (!parse_backend_name(name, kind)) {
+            throw py::value_error(
+                "backend must be one of: 'auto', 'iocp', 'io_uring', "
+                "'dispatch_io', 'thread_pool'");
+        }
+        // 强制一个本构建/本机器上没有的后端，只会让之后每个 open 都失败；
+        // 当场报错比留到运行时更诚实（与 io_uring_sqpoll 的校验同一风格）
+        if (kind != BackendKind::Auto && !backend_available(kind)) {
+            const std::string msg =
+                "backend '" + name + "' is not available on this platform; "
+                "call ayafileio.get_backend_info() to see the default backend";
+            throw py::value_error(msg.c_str());
+        }
+        cfg.backend = kind;
+    }
+
     // handle_pool_max_per_key / handle_pool_max_total 已废弃（句柄池移除），
     // 静默忽略以免已发布的用户代码报错
     if (options.contains("io_worker_count")) {
@@ -107,6 +127,7 @@ static void py_configure(py::dict options) {
 static py::dict py_get_config() {
     auto cfg = ayafileio::config().get();
     py::dict result;
+    result["backend"] = backend_name(cfg.backend);
     result["io_worker_count"] = cfg.io_worker_count;
     result["buffer_pool_max"] = cfg.buffer_pool_max;
     result["buffer_size"] = cfg.buffer_size;
@@ -137,43 +158,40 @@ static py::dict py_get_backend_info() {
     py::dict info;
     info["os_version"] = os_version();
 
-#ifdef _WIN32
+    // platform 是「在哪跑」，backend 是「现在用哪个」——后者跟着
+    // configure({"backend": ...}) 走，所以这里按有效后端分支，而不是按平台宏。
+#if defined(_WIN32)
     info["platform"] = "windows";
-    info["backend"] = "iocp";
-    info["is_truly_async"] = true;
-    info["description"] = "I/O Completion Ports - native async I/O";
-
-#elif defined(HAVE_IO_URING)
-    info["platform"] = "linux";
-    if (io_uring_available()) {
-        info["backend"] = "io_uring";
-        info["is_truly_async"] = true;
-        info["description"] = "io_uring - native async I/O (Linux 5.1+)";
-    } else {
-        info["backend"] = "thread_pool";
-        info["is_truly_async"] = false;
-        info["description"] = "Thread pool - fallback mode (io_uring not available)";
-    }
-
 #elif defined(__APPLE__)
     info["platform"] = "macos";
-
-    if (gcd_dispatch_io_available()) {
-        info["backend"] = "dispatch_io";
-        info["is_truly_async"] = true;
-        info["description"] = "Dispatch I/O (GCD) - native async I/O";
-    } else {
-        info["backend"] = "thread_pool";
-        info["is_truly_async"] = false;
-        info["description"] = "Thread pool - fallback mode (Dispatch I/O not available)";
-    }
-
+#elif defined(__linux__)
+    info["platform"] = "linux";
 #else
     info["platform"] = "posix";
-    info["backend"] = "thread_pool";
-    info["is_truly_async"] = false;
-    info["description"] = "Thread pool - fallback mode";
 #endif
+
+    const BackendKind kind = effective_backend();
+    info["backend"] = backend_name(kind);
+    switch (kind) {
+    case BackendKind::Iocp:
+        info["is_truly_async"] = true;
+        info["description"] = "I/O Completion Ports - native async I/O";
+        break;
+    case BackendKind::IoUring:
+        info["is_truly_async"] = true;
+        info["description"] = "io_uring - native async I/O (Linux 5.1+)";
+        break;
+    case BackendKind::DispatchIo:
+        info["is_truly_async"] = true;
+        info["description"] = "Dispatch I/O (GCD) - native async I/O";
+        break;
+    case BackendKind::ThreadPool:
+    case BackendKind::Auto:
+    default:
+        info["is_truly_async"] = false;
+        info["description"] = "Thread pool - fallback mode";
+        break;
+    }
 
     return info;
 }

@@ -321,6 +321,82 @@ jobs:
         fi
         exit $EXIT_CODE
 
+  # ── 回退后端（线程池）覆盖 ──────────────────────────────────────────────
+  # ThreadIOBackend 是「io_uring / GCD / IOCP 都不可用」时的唯一路径，可以在
+  # 正常 CI 里一行都跑不到（Linux 装了 liburing 就走 io_uring、macOS 走 GCD、
+  # Windows 走 IOCP）。这两个 job 让它终于有名有姓地被测到：
+  #   * test-fallback-backend   —— 运行时用 configure({"backend": "thread_pool"})
+  #                                 强制切换，验证「同一个库换后端仍然正确」
+  #   * test-no-io-uring-build  —— 干脆不装 liburing，HAVE_IO_URING 不成立，
+  #                                 线程池是唯一后端（很多 manylinux 用户拿到的
+  #                                 就是这样一份构建）
+  # 用例里 test_async_open.py 的原生 OPENAT 断言会按 get_backend_info() 自动跳过。
+  test-fallback-backend:
+    name: "Fallback backend (${{ matrix.os }}, py3.14)"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      CMAKE_BUILD_TYPE: Release
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      AYAFILEIO_TEST_BACKEND: thread_pool
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.14"
+    - name: Install system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liburing-dev
+    - name: Build
+      timeout-minutes: 5
+      run: |
+        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
+        pip install -e ".[dev]" -v
+    - name: Confirm the forced backend is active
+      # 这一步必须走 pytest：切后端在 conftest 里做，下面这条用例会断言
+      # AYAFILEIO_TEST_BACKEND 真的生效——否则整轮 CI 就是在默认后端上假绿。
+      run: python -m pytest tests/test_backend_select.py -q
+    - name: Run tests on the fallback backend
+      timeout-minutes: 8
+      run: python -m pytest -q
+
+  test-no-io-uring-build:
+    name: "Linux built without io_uring"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CMAKE_BUILD_TYPE: Release
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.14"
+    # 刻意**不装** liburing-dev：HAVE_IO_URING 不成立，线程池是唯一后端
+    - name: Build (thread pool only)
+      timeout-minutes: 5
+      run: |
+        export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
+        pip install -e ".[dev]" -v
+    - name: Confirm this build has no io_uring
+      run: |
+        python -c "import ayafileio, json; i = ayafileio.get_backend_info(); print(json.dumps(i, indent=2)); assert i['backend'] == 'thread_pool', i"
+    - name: Run tests
+      timeout-minutes: 8
+      run: python -m pytest -q
+
   benchmark:
     name: "Benchmark (${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
