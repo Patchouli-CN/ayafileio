@@ -12,9 +12,28 @@
 - **CI 覆盖线程池回退后端。** `ThreadIOBackend` 是 io_uring / GCD / IOCP 都不可用时的唯一路径，但正常 CI 里一行都跑不到（Linux 装了 liburing 就走 io_uring、macOS 走 GCD、Windows 走 IOCP）。新增两个 job：`test-fallback-backend`（Linux + macOS，通过 `AYAFILEIO_TEST_BACKEND=thread_pool` 让整套用例切到回退后端；`tests/conftest.py` 会在切换后核对生效，防止「配置静默无效」把整轮 CI 变成假绿）和 `test-no-io-uring-build`（Linux 刻意不装 liburing，`HAVE_IO_URING` 不成立，线程池是唯一后端——很多 manylinux 用户拿到的正是这样一份构建）。回归测试 `tests/test_backend_select.py`。
 
 ### 修复
-- **`ThreadIOBackend` 的 `m_pending` 只增不减，导致 `close()` 永远超时并在任务仍在飞时强关句柄。** 四条完成路径（read / read_at / write / readinto）都只 `fetch_add`，从来没有配平；`close_impl()` 的等待循环注释写着「完成路径会 release `m_close_wake`」，但实际没人做。后果是每次 `close()` 都白等满 `close_timeout_ms`（默认 4 s），超时后关句柄——此时仍在执行的读/写任务把 `WriteFile`/`ReadFile` 打在已关闭（甚至已被复用的）句柄上：Windows 上直接 access violation，POSIX 上是未定义行为。现在统一走 `complete_pending()`：递减 `m_pending` 并 `m_close_wake.release()`，`close()` 立即醒来。这条在往 Windows 移植该后端时才暴露出来（50 000 次并发写的一条用例把它踩成崩溃）。
-- **文件原语抽到 `src/utils/native_file.hpp`。** `ThreadIOBackend` 以前直接调 POSIX 的 `open/pread/pwrite/fstat/fsync/ftruncate/fcntl`，因此只能在 POSIX 编译。现在这层统一成 `file_open/file_pread/file_pwrite/file_size/file_fsync/file_truncate/file_close/file_is_append`：POSIX 侧直调系统调用（行为不变，错误码仍是 errno），Windows 侧用 `CreateFileW(FILE_FLAG_OVERLAPPED)` + `ReadFile/WriteFile`（带 OVERLAPPED 偏移）+ `GetOverlappedResult(..., TRUE)` 实现**定位** I/O（非 overlapped 句柄会静默忽略偏移，多 worker 并发会互相踩）。
-  **Windows 上暂不启用该后端**：原语层和 `fileno()`（复制句柄语义）都已就位、可本地编译，但把 `backend` 指向 `thread_pool` 跑全套用例时仍会 access violation，且有一次运行把进程内存推到 16 GB（Task Manager 实测）。在把这两个现象定位清楚之前，Windows 保持只有 IOCP：`configure({"backend": "thread_pool"})` 在 Windows 上仍抛「该后端不可用」。POSIX 侧改动由 CI 的 30 个 job 验证。
+- **Windows 上并发写 access violation：`OVERLAPPED` 用了 `hEvent = NULL`。（移植线程池后端时发现）**
+  只用 ctypes 直调 Win32 就能复现：同一个 `FILE_FLAG_OVERLAPPED` 句柄上 16 线程各 300 次 `WriteFile`，
+  `OVERLAPPED` 每次新建且 `hEvent = NULL` 时 **8 次跑崩 7 次**；给每个 `OVERLAPPED` 挂一个线程私有
+  manual-reset 事件（每次提交前 `ResetEvent`）后 **0/8**；每线程复用一个 `OVERLAPPED` 也 0/8。
+  原因：`hEvent == NULL` 时 `GetOverlappedResult(..., TRUE)` 是拿**文件句柄**当等待对象的，而对
+  overlapped 句柄来说那个信号并不按 op 一对一，等待会提前返回；此时内核仍在往那块 OVERLAPPED
+  （栈上、每次新建）里写完成状态，下一次调用覆盖同一地址 → 访问冲突。`native_file.hpp` 现在给
+  `file_pread` / `file_pwrite` 都挂线程私有事件。
+- **更正上一版的一处错误结论：`ThreadIOBackend` 的 `m_pending` 并没有失衡。**
+  `IOBackendBase::complete_ok()` / `complete_error()` 开头就有 `m_pending.fetch_sub(1)` 与
+  `m_close_wake.release()`，本来就是配平的。我上一版据此加的 `complete_pending()` 属于**双重递减**，
+  会把计数打成负数、让 `close()` 误判「没有在飞的 I/O」而提前关句柄——反而制造了新的崩溃条件。该调用已撤回。
+- **文件原语抽到 `src/utils/native_file.hpp`。** `ThreadIOBackend` 以前直接调 POSIX 的
+  `open/pread/pwrite/fstat/fsync/ftruncate/fcntl`，因此只能在 POSIX 编译。现在这层统一成
+  `file_open/file_pread/file_pwrite/file_size/file_fsync/file_truncate/file_close/file_is_append`：
+  POSIX 侧直调系统调用（行为不变，错误码仍是 errno），Windows 侧用 `CreateFileW(FILE_FLAG_OVERLAPPED)`
+  + 带 OVERLAPPED 偏移的 `ReadFile/WriteFile` + `GetOverlappedResult` 实现**定位** I/O（非 overlapped
+  句柄会静默忽略偏移，多 worker 并发会互相踩）。
+  **Windows 上仍未启用该后端**：上面那条 `hEvent` 修好之后，隔离用例已 0/8，但把 `backend` 指向
+  `thread_pool` 跑库内并发写（20 协程 × 20 次 append、16 worker）仍有约 **1/8** 的 access violation，
+  说明剩余问题在库内并发完成路径而不是 I/O 原语本身，尚未定位。因此 Windows 保持只有 IOCP：
+  `configure({"backend": "thread_pool"})` 在 Windows 上仍报「该后端不可用」。POSIX 侧由 CI 30 个 job 验证。
 - **用错模式读写不再是一句与原因无关的 `OSError`，而是标准的 `io.UnsupportedOperation`。** 此前对只写文件（`"wb"`/`"ab"`）调 `read()`，或对只读文件（`"rb"`）调 `write()`，请求会真的发到 OS，然后拿回 `OSError: Errno 5`（Windows）或 `EBADF`（POSIX）——错误类型和消息都和真正的原因对不上。内置 `io` 在这种情况抛 `io.UnsupportedOperation("read"/"write"/"truncate")`，现在这里也一样。11 个入口加了守卫：`read`/`readline`/`readlines`/`read_at`/`read_many`/`readinto`/`chunk`（读）与 `write`/`write_at`/`write_many`/`truncate`（写）。`io.UnsupportedOperation` 的 MRO 同时含 `OSError` 和 `ValueError`，所以既有 `except OSError:` / `except ValueError:` 的写法全部继续有效。守卫直接判 `self._mode` 首字符（模式串不可变），热路径上没有引入方法调用，也没有新增实例属性。
   **注意一处行为变化**：`wrap_file(fd, mode)` 现在严格按**声明的** mode 判定，与 `io.FileIO(fd, "wb").read()` 抛 `UnsupportedOperation` 一致。用 `"wb"` 包装一个 O_RDWR 的 fd 再读，以前能过、现在会抛——`tests/test_wrap_file.py` 里就有两个这样的用例（包装后要读回来），已改成 `"w+b"`。
 - **macOS 与 POSIX 线程池后端：`read()`/`read_at()` 看不到别的句柄追加的数据。** 这套 `m_cachedFileSize`（open 时快照，之后只由本会话的 write/truncate 更新）此前只有 Windows IOCP 后端做了「到 EOF 判决点就问内核」的刷新，另两个后端仍把旧长度当真相：外部追加后 `read()` 读到旧 EOF 就停、`read_at` 越界的一侧永远返回 `b""`、`seek(0, 2)` 报旧长度。现在两边都补齐（端点与 Windows 完全对应）：`read`/`read_at`/`readinto` 在 **EOF 判决点**和**发生短读**时 `fstat` 刷新，`seek(SEEK_END)` 前也刷一次；正常满载读一次 syscall 都不多加。macOS 的 mincore 内联快车道不受影响——刷新只让「超出原 EOF」的范围落到 dispatch_io/线程快速路，映射窗口本身不动。

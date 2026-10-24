@@ -62,6 +62,25 @@ inline thread_local int g_native_file_error = 0;
 
 inline int native_file_last_error() { return g_native_file_error; }
 
+#ifdef _WIN32
+// 每个线程一个 manual-reset 事件，供 OVERLAPPED.hEvent 使用。
+//
+// ⚠ 这一条是**必须**的，实测数据：同一 overlapped 句柄上 16 线程 × 300 次并发写，
+//    “每次新建 OVERLAPPED + hEvent=NULL” 崩 7/8 次（0xC0000005）；给 OVERLAPPED
+//    配线程私有事件后 0/8。
+//
+//   原因：hEvent == NULL 时 GetOverlappedResult(..., TRUE) 是拿**文件句柄**当等待
+//   对象的，而对 FILE_FLAG_OVERLAPPED 的句柄来说那个信号并不按 op 一对一，等待会
+//   提前返回；此时内核仍在往那块 OVERLAPPED（栈上，每次新建）里写完成状态，下一次
+//   调用覆盖同一地址 → 访问冲突。
+//
+//   事件句柄随线程退出留一次（池里线程数有界，可忽略）。
+inline HANDLE thread_overlapped_event() {
+    static thread_local HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    return ev;
+}
+#endif
+
 inline file_handle_t file_open(const char *path, int flags) {
     g_native_file_error = 0;
 #ifdef _WIN32
@@ -116,8 +135,10 @@ inline long long file_pread(file_handle_t h, void *buf, size_t n, long long offs
 #ifdef _WIN32
     const DWORD want = n > 0xFFFFFFFFull ? 0xFFFFFFFFul : static_cast<DWORD>(n);
     OVERLAPPED ov{};
+    ov.hEvent     = thread_overlapped_event();
     ov.Offset     = static_cast<DWORD>(static_cast<unsigned long long>(offset) & 0xFFFFFFFFull);
     ov.OffsetHigh = static_cast<DWORD>((static_cast<unsigned long long>(offset) >> 32) & 0xFFFFFFFFull);
+    ResetEvent(ov.hEvent);
 
     DWORD got = 0;
     if (!ReadFile(reinterpret_cast<HANDLE>(h), buf, want, &got, &ov)) {
@@ -152,8 +173,10 @@ inline long long file_pwrite(file_handle_t h, const void *buf, size_t n, long lo
 #ifdef _WIN32
     const DWORD want = n > 0xFFFFFFFFull ? 0xFFFFFFFFul : static_cast<DWORD>(n);
     OVERLAPPED ov{};
+    ov.hEvent     = thread_overlapped_event();
     ov.Offset     = static_cast<DWORD>(static_cast<unsigned long long>(offset) & 0xFFFFFFFFull);
     ov.OffsetHigh = static_cast<DWORD>((static_cast<unsigned long long>(offset) >> 32) & 0xFFFFFFFFull);
+    ResetEvent(ov.hEvent);
 
     DWORD wrote = 0;
     if (!WriteFile(reinterpret_cast<HANDLE>(h), buf, want, &wrote, &ov)) {

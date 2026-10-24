@@ -334,7 +334,6 @@ PyObject *ThreadIOBackend::read(int64_t size) {
                          native_file_last_error());
             complete_error(req, native_file_last_error());
         }
-        complete_pending();
     });
 
     UR_DEBUG_LOG0("ThreadIOBackend::read returning future");
@@ -424,7 +423,6 @@ PyObject *ThreadIOBackend::read_at(int64_t offset, int64_t size) {
                          native_file_last_error());
             complete_error(req, native_file_last_error());
         }
-        complete_pending();
     });
 
     UR_DEBUG_LOG0("ThreadIOBackend::read_at returning future");
@@ -499,7 +497,6 @@ PyObject *ThreadIOBackend::write(Py_buffer *view, int64_t position) {
                          native_file_last_error());
             complete_error(req, native_file_last_error());
         }
-        complete_pending();
     });
 
     return future;
@@ -812,7 +809,6 @@ PyObject* ThreadIOBackend::readinto(PyObject* buf) {
             complete_ok(req, static_cast<size_t>(got));
         }
         else complete_error(req, static_cast<DWORD>(native_file_last_error()));
-        complete_pending();
     });
     
     return future;

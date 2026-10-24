@@ -62,15 +62,6 @@ private:
     void ensure_loop_initialized();
     void enqueue_task(std::function<void()> task);
 
-    // I/O 完成后配平 m_pending 并唤醒 close_impl()。
-    // ⚠ 这一对曾经只有 fetch_add、没有配平：close() 于是永远等到超时，然后在池
-    // 任务还在飞的时候强制关句柄——WriteFile/ReadFile 打在已关闭（或已被复用）
-    // 的句柄上直接 access violation。50K 并发写的一条用例就是这么崩的。
-    void complete_pending() {
-        m_pending.fetch_sub(1, std::memory_order_release);
-        m_close_wake.release();
-    }
-
     // 用内核真值刷新 m_cachedFileSize。缓存是 open 时的快照，之后只由本会话的
     // 写入/截断更新——别的进程（或同进程另一个句柄）追加的数据这里看不到，
     // 把旧长度当真相就会静默少读。只在「已到 EOF 判决点」或「发生短读」时调用，
