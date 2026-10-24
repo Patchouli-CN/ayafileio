@@ -2,6 +2,7 @@
 
 import asyncio
 import codecs
+import io
 import os
 import locale
 from collections import deque
@@ -579,6 +580,8 @@ class AsyncFile(Generic[T]):
         """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         if self._is_text:
             return await self._read_text(size)  # type: ignore[return-value]
         if self._buffered():
@@ -640,6 +643,8 @@ class AsyncFile(Generic[T]):
         if self._closed:
             raise ValueError("I/O operation on closed file.")
 
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         # 文本模式：走字符流（已解码、已翻译，行尾按 newline 模式查找）
         if self._is_text:
             chars = self._char_stream()
@@ -691,6 +696,8 @@ class AsyncFile(Generic[T]):
     async def readlines(self, hint: int = -1) -> list[str | bytes]:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         lines = []
         total = 0
         while True:
@@ -736,6 +743,8 @@ class AsyncFile(Generic[T]):
         """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         if self._is_text:
             raise ValueError("read_at() only supports binary mode")
         return await self._impl.read_at(offset, size)
@@ -758,6 +767,8 @@ class AsyncFile(Generic[T]):
         """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         if self._is_text:
             raise ValueError("read_many() only supports binary mode")
         return await _gather_io(self._impl.read_at(o, s) for o, s in spans)
@@ -766,6 +777,8 @@ class AsyncFile(Generic[T]):
         """零拷贝读取到预分配缓冲区，返回读取字节数。"""
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         if self._is_text:
             raise ValueError("readinto() only supports binary mode")
         if self._buffered():
@@ -813,6 +826,8 @@ class AsyncFile(Generic[T]):
         """
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if not self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("read")
         if self._is_text:
             raise ValueError("chunk() only supports binary mode. Use readline() for text.")
         if chunk_size <= 0:
@@ -854,6 +869,8 @@ class AsyncFile(Generic[T]):
         if self._closed:
             raise ValueError("I/O operation on closed file.")
 
+        if self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("write")
         if self._is_text:
             if not isinstance(data, str):
                 raise TypeError("Text mode requires str input.")
@@ -882,6 +899,8 @@ class AsyncFile(Generic[T]):
         a short write is possible, as with write(). Overlapping concurrent
         writes have unspecified ordering. Read-ahead is invalidated first.
         """
+        if self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("write")
         self._check_positioned_write()
         await self._rewind_readahead()
         return await self._impl.write_at(offset, data)
@@ -907,6 +926,8 @@ class AsyncFile(Generic[T]):
         matters. Buffers are held zero-copy until each write completes; do
         not resize or mutate them while the batch is in flight.
         """
+        if self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("write")
         self._check_positioned_write()
         await self._rewind_readahead()
         return await _gather_io(self._impl.write_at(o, data) for o, data in writes)
@@ -985,6 +1006,8 @@ class AsyncFile(Generic[T]):
         """截断文件到指定大小。"""
         if self._closed:
             raise ValueError("I/O operation on closed file.")
+        if self._mode.startswith("r") and "+" not in self._mode:
+            raise io.UnsupportedOperation("truncate")
         if size < 0:
             raise ValueError("negative size not allowed")
         await self._rewind_readahead()

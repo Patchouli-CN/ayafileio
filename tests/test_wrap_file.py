@@ -29,7 +29,7 @@ async def test_wrap_file_fd():
     f = open(tmp.name, "w+b")
     fd = f.fileno()
 
-    aio = ayafileio.wrap_file(fd, "wb")
+    aio = ayafileio.wrap_file(fd, "w+b")
     assert isinstance(aio, AyaFileIO), "Should be AyaIO"
 
     n = await aio.write(b"Hello from wrap_fd!")
@@ -71,7 +71,9 @@ async def test_wrap_text_mode():
     # 注意：wrap_fd 目前只支持二进制（_from_impl 里写死了 _is_text=False）
     # 如果需要文本模式，后面可以扩展
     fd = os.open(tempfile.mktemp(), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-    aio = ayafileio.wrap_file(fd, "wb")
+    # "w+b" 而不是 "wb"：下面要读回来，而声明成只写会被模式守卫拦住
+    # （与 io.FileIO(fd, "wb").read() 抛 UnsupportedOperation 一致）
+    aio = ayafileio.wrap_file(fd, "w+b")
 
     await aio.write(b"hello\nworld\n")
     await aio.seek(0)

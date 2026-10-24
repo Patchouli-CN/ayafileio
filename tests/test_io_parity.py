@@ -145,3 +145,101 @@ def test_invalid_mode_beats_binary_encoding_check(tmp_path):
 
     with pytest.raises(ValueError, match="invalid mode|Invalid mode"):
         ayafileio.open(str(path), "rbb", encoding="utf-8")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 打开模式决定可读/可写：越界操作抛 io.UnsupportedOperation
+# ════════════════════════════════════════════════════════════════════════════
+#
+# 内置 open() 对「用错模式」的操作抛 io.UnsupportedOperation（它的 MRO 同时含
+# OSError 和 ValueError，所以 `except OSError` / `except ValueError` 两种既有
+# 写法都继续有效）。此前这里会把请求真的发到 OS，拿回一个与原因无关的
+# OSError（Windows 上 errno 5、POSIX 上 EBADF）——错误类型和消息都对不上。
+
+
+UNSUPPORTED_CASES = [
+    ("wb", "read", "read"),
+    ("wb", "read", "readline"),
+    ("wb", "read", "readlines"),
+    ("wb", "read", "read_at"),
+    ("wb", "read", "read_many"),
+    ("wb", "read", "readinto"),
+    ("ab", "read", "read"),
+    ("rb", "write", "write"),
+    ("rb", "write", "write_at"),
+    ("rb", "write", "write_many"),
+    ("rb", "truncate", "truncate"),
+]
+
+
+@pytest.mark.parametrize("mode,op,method", UNSUPPORTED_CASES)
+async def test_wrong_mode_raises_unsupported_operation(tmp_path, mode, op, method):
+    """对只读文件写入、或对只写文件读取，都要抛 io.UnsupportedOperation。"""
+    import io
+
+    path = tmp_path / f"guard_{mode}_{method}.bin"
+    path.write_bytes(b"abcd")
+
+    call = {
+        "read": lambda f: f.read(2),
+        "readline": lambda f: f.readline(),
+        "readlines": lambda f: f.readlines(),
+        "read_at": lambda f: f.read_at(0, 2),
+        "read_many": lambda f: f.read_many([(0, 2)]),
+        "readinto": lambda f: f.readinto(bytearray(4)),
+        "write": lambda f: f.write(b"x"),
+        "write_at": lambda f: f.write_at(0, b"x"),
+        "write_many": lambda f: f.write_many([(0, b"x")]),
+        "truncate": lambda f: f.truncate(1),
+    }[method]
+
+    async with ayafileio.open(str(path), mode) as handle:
+        with pytest.raises(io.UnsupportedOperation) as info:
+            await call(handle)
+
+    assert str(info.value) == op, f"消息应与内置一致（{op}），实际 {info.value!s}"
+    # MRO 与内置一致：既是 OSError 也是 ValueError，既有 catch 写法都还能用
+    assert isinstance(info.value, OSError)
+    assert isinstance(info.value, ValueError)
+
+
+async def test_chunk_on_write_only_raises(tmp_path):
+    """chunk() 是异步生成器：守卫在首次迭代时触发（与内置的惰性一致）。"""
+    import io
+
+    path = tmp_path / "guard_chunk.bin"
+    path.write_bytes(b"abcd")
+
+    async with ayafileio.open(str(path), "wb") as handle:
+        generator = handle.chunk(2)
+        with pytest.raises(io.UnsupportedOperation):
+            await generator.__anext__()
+
+
+@pytest.mark.parametrize("mode", ["r+b", "w+b", "a+b", "x+b"])
+async def test_read_write_modes_are_not_guarded(tmp_path, mode):
+    """带 + 的模式读写都必须放行。"""
+    path = tmp_path / f"rw_{mode.replace('+', 'p')}.bin"
+    if "x" not in mode:
+        path.write_bytes(b"abcdef")
+
+    async with ayafileio.open(str(path), mode) as handle:
+        assert await handle.write(b"XY") == 2
+        await handle.truncate(2)
+        await handle.seek(0)
+        data = await handle.read()
+
+    # 只断言「读写都没被守卫拦住」+ 长度；内容随模式不同（a+ 写在末尾，
+    # 所以最终字节不一定是 b"XY"）
+    assert len(data) == 2
+
+
+async def test_truncate_allowed_on_write_only(tmp_path):
+    """只写模式截断是合法的（内置 BufferedWriter.truncate 同样允许）。"""
+    path = tmp_path / "trunc_w.bin"
+
+    async with ayafileio.open(str(path), "wb") as handle:
+        await handle.write(b"abcdef")
+        await handle.truncate(3)
+
+    assert path.read_bytes() == b"abc"
