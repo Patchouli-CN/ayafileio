@@ -10,29 +10,6 @@
 
 namespace ayafileio {
 
-namespace {
-
-// 取回弱引用指向的对象（**新**引用）；referent 已死或出错返回 nullptr。
-// 3.13+ 用 PyWeakref_GetRef（PyWeakref_GetObject 自 3.13 起废弃），
-// 旧版本走 GetObject + 手工 INCREF。
-PyObject *weakref_target(PyObject *ref) {
-#if PY_VERSION_HEX >= 0x030D0000
-    PyObject *obj = nullptr;
-    if (PyWeakref_GetRef(ref, &obj) != 1) {   // 0 = referent 已死，-1 = error
-        PyErr_Clear();
-        return nullptr;
-    }
-    return obj;
-#else
-    PyObject *obj = PyWeakref_GetObject(ref);  // borrowed；死后返回 Py_None
-    if (!obj || obj == Py_None) return nullptr;
-    Py_INCREF(obj);
-    return obj;
-#endif
-}
-
-} // namespace
-
 ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
                              unsigned idle_timeout_ms)
     : m_threshold_max(threshold), m_idle_timeout_max_ms(idle_timeout_ms) {

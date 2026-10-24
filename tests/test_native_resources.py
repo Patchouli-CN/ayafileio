@@ -153,6 +153,7 @@ async def test_open_does_not_grow_loop_refcount(tmp_path, opener):
     assert grew <= 20, f"200 次 {opener} 让 loop 引用计数增长了 {grew}"
 
 
+@WIN_ONLY
 def test_event_loop_is_released_after_open(tmp_path):
     """做过 I/O 的事件循环，``close()`` + ``del`` 之后必须能被回收。
 
@@ -164,6 +165,13 @@ def test_event_loop_is_released_after_open(tmp_path):
 
     用子进程跑：pytest 的 frame / 断言改写会额外持有 loop，对照组都过不了。
     刻意不做 I/O：quarantine 会合法地暂扣 future（那是设计内的延迟释放）。
+
+    仅 Windows：POSIX 三个后端各自缓存了一个全局的 ``loop.create_future``
+    绑定方法（``g_cachedFutureFn``，避免每个 op 一次属性查找），而绑定方法
+    天生持有 loop 实例——那是**有意的热路径优化**，代价是「最近用过的那个
+    loop」被钉住直到下一个 loop 做 I/O。它不是按次泄漏，所以这里只断言
+    Windows（那条路径上没有任何绑定方法缓存）。跨平台的「不按 loop 累积」
+    由下面 test_loops_do_not_accumulate_across_loops 守。
     """
     path = tmp_path / "loop.bin"
     path.write_bytes(b"x" * 64)
@@ -196,8 +204,9 @@ def test_event_loop_is_released_after_open(tmp_path):
                 asyncio.set_event_loop(None)
             del loop
             gc.collect()
-            assert watch() is None or dead, "weakref 状态异常"
-            return bool(dead)
+            # 直接看 referent 还在不在。之前这里写的是自检断言，措辞把真信号
+            # 掩盖成了「weakref 状态异常」（Linux 上就是这么报的）。
+            return watch() is None
 
         print(
             collected(use_open=False, use_aopen=False),
@@ -213,9 +222,60 @@ def test_event_loop_is_released_after_open(tmp_path):
     assert result.returncode == 0, f"子进程异常退出: {result.stderr}"
 
     control, plain, async_open = result.stdout.split()
+    # 对照组：不碰 ayafileio 时循环必须能回收，否则这个用例没有判别力
     assert control == "True", "对照组失效：不碰 ayafileio 时 loop 也回收不了"
     assert plain == "True", "open() 之后事件循环对象回收不了（batcher 强引用？）"
     assert async_open == "True", "aopen() 之后事件循环对象回收不了（batcher 强引用？）"
+
+
+def test_loops_do_not_accumulate_across_loops(tmp_path):
+    """反复「新建 loop → open/aopen → 关闭 loop」不该让 loop 对象越积越多。
+
+    这是跨平台的：POSIX 后端允许**一个** loop 被全局缓存钉住（``g_cachedFutureFn``，
+    见上一条用例的说明），但绝不能是「每个 loop 都留一个」。
+
+    修复前的两类持有都能被这条抓住：
+      * io_uring 的 ``UringInstance`` 对 loop 做 ``Py_INCREF``，且 DECREF 只在
+        进程退出时执行 → 每个跑过 io_uring I/O 的 loop 永久滞留；
+      * ``ResultBatcher`` 缓存 ``loop.call_soon_threadsafe`` 绑定方法 → 同理。
+
+    刻意不做 I/O：quarantine 会合法地暂扣 future（设计内的 1 秒延迟释放）。
+    """
+    path = tmp_path / "many.bin"
+    path.write_bytes(b"x" * 64)
+
+    def loops_alive() -> int:
+        gc.collect()
+        return sum(
+            1 for o in gc.get_objects() if isinstance(o, asyncio.AbstractEventLoop)
+        )
+
+    def one_round() -> None:
+        loop = asyncio.new_event_loop()
+
+        async def job():
+            async with ayafileio.open(str(path), "rb"):
+                pass
+            async with ayafileio.aopen(str(path), "rb"):
+                pass
+
+        try:
+            loop.run_until_complete(job())
+            loop.close()
+        finally:
+            asyncio.set_event_loop(None)
+        del loop
+
+    one_round()  # 预热：让各后端的一次性缓存/线程池就位，不计入增量
+    baseline = loops_alive()
+
+    for _ in range(10):
+        one_round()
+
+    grew = loops_alive() - baseline
+    assert grew <= 2, (
+        f"10 个不同的 loop 之后仍有 {grew} 个存活：有东西按 loop 缓存却持着强引用"
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════

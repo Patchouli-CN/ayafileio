@@ -13,6 +13,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include <poll.h>
+#include "globals.hpp"          // weakref_target()
 #include "utils/debug_log.hpp"
 
 namespace ayafileio {
@@ -43,7 +44,12 @@ struct UringInstance {
     std::atomic<bool> reaper_started{false};
     std::atomic<bool> running{true};
     std::mutex start_mutex;
-    PyObject* loop = nullptr;
+    // 事件循环的**弱**引用（owned，由 UringManager 在 GIL 下释放）。
+    // 之前这里是 Py_INCREF 的强引用，而且这个字段从头到尾只写不读——纯粹用来
+    // 「给 loop 续命」，于是任何跑过 io_uring I/O 的 loop 都被钉到进程退出
+    // （`asyncio.run()` 包在每个请求里的代码等于每请求漏一个）。现在它只用于
+    // 一件事：判断这个缓存实例是否仍属于当前 loop（见 acquire 的失效检测）。
+    PyObject* loop_ref = nullptr;
     int event_fd = -1;
 
     unsigned queue_depth = 256;
@@ -127,11 +133,18 @@ public:
         auto it = m_instances.find(key);
         if (it != m_instances.end()) {
             auto inst = it->second;
-            if (inst && inst->running.load(std::memory_order_acquire)) {
+            if (inst && inst->running.load(std::memory_order_acquire) &&
+                instance_is_for(inst.get(), loop)) {
                 UR_LOG("UringManager::acquire: found existing instance=%p", (void*)inst.get());
                 return inst;
             }
-            UR_LOG("UringManager::acquire: existing instance expired, removing");
+            // 过期，或者缓存键（裸 PyObject*）被新 loop 复用了：必须换新实例，
+            // 否则新 loop 的完成结果会投递给已经失效的 reaper/batcher。
+            UR_LOG("UringManager::acquire: existing instance stale, removing");
+            if (inst) {
+                inst->stop_reaper();
+                release_loop_ref(inst.get());
+            }
             m_instances.erase(it);
         }
         
@@ -139,13 +152,20 @@ public:
         inst->queue_depth = queue_depth;
         inst->flags = flags;
         inst->sqpoll = sqpoll;
-        inst->loop = loop;
-        Py_INCREF(loop);  // 增加引用计数
+        // 弱引用，不钉住 loop（见 UringInstance::loop_ref 的说明）
+        inst->loop_ref = PyWeakref_NewRef(loop, nullptr);
+        if (!inst->loop_ref) {
+            UR_LOG("UringManager::acquire: failed to create weakref to loop");
+            // 调用方（IOUringBackend 构造 / submit_native_aopen）在 nullptr 上会
+            // 回退到线程池；别把手里的异常带过去污染那条路径。
+            PyErr_Clear();
+            return nullptr;
+        }
         inst->reaper_func = reaper_func;
         inst->running.store(true, std::memory_order_release);
         
         if (!setup_instance(inst.get())) {
-            Py_DECREF(loop);
+            release_loop_ref(inst.get());
             UR_LOG("UringManager::acquire: setup_instance failed");
             return nullptr;
         }
@@ -180,12 +200,7 @@ public:
             if (inst) {
                 UR_LOG("UringManager::cleanup_all: stopping instance=%p", (void*)inst.get());
                 inst->stop_reaper();
-                if (inst->loop) {
-                    PyGILState_STATE gstate = PyGILState_Ensure();
-                    Py_DECREF(inst->loop);
-                    inst->loop = nullptr;
-                    PyGILState_Release(gstate);
-                }
+                release_loop_ref(inst.get());
             }
         }
         m_instances.clear();
@@ -198,7 +213,7 @@ public:
         UR_LOG("UringManager::cleanup_all: done");
     }
     
-    // 移除不再使用的实例（当 loop 被销毁时调用）
+    // 移除不再使用的实例
     void remove(PyObject* loop) {
         std::lock_guard<std::mutex> lk(m_mutex);
         void* key = loop;
@@ -206,16 +221,35 @@ public:
         if (it != m_instances.end()) {
             UR_LOG("UringManager::remove: removing instance for loop=%p", (void*)loop);
             it->second->stop_reaper();
+            release_loop_ref(it->second.get());
             m_instances.erase(it);
         }
     }
-    
+
     size_t instance_count() const {
         std::lock_guard<std::mutex> lk(m_mutex);
         return m_instances.size();
     }
     
 private:
+    // 缓存实例是否仍属于 *loop*：弱引用解不出对象、或解出的不是同一个，都算失效。
+    static bool instance_is_for(UringInstance* inst, PyObject* loop) {
+        PyObject* live = weakref_target(inst->loop_ref);
+        const bool same = (live == loop);
+        Py_XDECREF(live);
+        return same;
+    }
+
+    // 释放实例对 loop 的弱引用。调用方通常已经持 GIL（acquire 都在 GIL 内），
+    // PyGILState_Ensure 在这里只是让 cleanup_all 之类的路径也能安全调用。
+    static void release_loop_ref(UringInstance* inst) {
+        if (!inst || !inst->loop_ref) return;
+        PyGILState_STATE gs = PyGILState_Ensure();
+        Py_XDECREF(inst->loop_ref);
+        inst->loop_ref = nullptr;
+        PyGILState_Release(gs);
+    }
+    
     UringManager() {
         g_uring_running.store(true, std::memory_order_release);
     }

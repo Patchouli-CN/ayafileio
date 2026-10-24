@@ -48,6 +48,35 @@ void set_worker_count(unsigned count);
 void cache_globals();
 
 // ════════════════════════════════════════════════════════════════════════════
+// 事件循环弱引用
+//
+// 凡是「按 loop 缓存」的东西（ResultBatcher、UringInstance）都不能持 loop 的
+// 强引用：那会把任何跑过一次 I/O 的 loop 钉到进程退出——`asyncio.run()` 包在
+// 每个请求里的代码等于每请求漏一个 loop 对象。改成弱引用后，需要 loop 时用
+// 这个函数现场取回。
+//
+// 返回 referent 的**新**引用；referent 已死或出错返回 nullptr（错误已清）。
+// 3.13+ 用 PyWeakref_GetRef（PyWeakref_GetObject 自 3.13 起废弃，3.15 前
+// 仍可用但会告警），旧版本走 GetObject + 手工 INCREF。
+// ════════════════════════════════════════════════════════════════════════════
+inline PyObject *weakref_target(PyObject *ref) {
+    if (!ref) return nullptr;
+#if PY_VERSION_HEX >= 0x030D0000
+    PyObject *obj = nullptr;
+    if (PyWeakref_GetRef(ref, &obj) != 1) {   // 0 = referent 已死，-1 = error
+        PyErr_Clear();
+        return nullptr;
+    }
+    return obj;
+#else
+    PyObject *obj = PyWeakref_GetObject(ref);  // borrowed；死后返回 Py_None
+    if (!obj || obj == Py_None) return nullptr;
+    Py_INCREF(obj);
+    return obj;
+#endif
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // GilRelease — RAII：持 GIL 的线程上临时释放 GIL（包裹阻塞型系统调用）
 //
 // 用于构造函数内的 open/CreateFile/mmap 等：open_async 的工作线程并行
