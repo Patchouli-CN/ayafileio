@@ -142,4 +142,8 @@ bool try_native_aopen(PyObject* loop, PyObject* future,
                       const char* path, const char* mode);
 uint64_t native_aopen_submission_count();
 
+// ── 异步打开（原 bindings.cpp 的 open_async lambda）─────────────────────────
+// 引用计数契约见 file_handle.cpp 里的实现注释
+py::object py_open_async(const char* path, const char* mode);
+
 } // namespace ayafileio

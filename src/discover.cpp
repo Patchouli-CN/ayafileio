@@ -4,6 +4,10 @@
 
 #include "discover.h"
 
+// py_get_backend_info() 会把 std::string（os_version() 的返回值）塞进 py::dict，
+// 少了这个 caster 运行期会抛 "bad cast"
+#include <nanobind/stl/string.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -376,6 +380,60 @@ py::dict backend_detail() {
         return d;
     }
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 后端身份/能力（原 bindings.cpp）
+// ════════════════════════════════════════════════════════════════════════════
+
+py::dict py_get_backend_info() {
+    py::dict info;
+    info["os_version"] = os_version();
+
+    // platform 是「在哪跑」，backend 是「现在用哪个」——后者跟着
+    // configure({"backend": ...}) 走，所以这里按有效后端分支，而不是按平台宏。
+#if defined(_WIN32)
+    info["platform"] = "windows";
+#elif defined(__APPLE__)
+    info["platform"] = "macos";
+#elif defined(__linux__)
+    info["platform"] = "linux";
+#else
+    info["platform"] = "posix";
+#endif
+
+    const BackendKind kind = effective_backend();
+    info["backend"] = backend_name(kind);
+    switch (kind) {
+    case BackendKind::Iocp:
+        info["is_truly_async"] = true;
+        info["description"] = "I/O Completion Ports - native async I/O";
+        break;
+    case BackendKind::IoUring:
+        info["is_truly_async"] = true;
+        info["description"] = "io_uring - native async I/O (Linux 5.1+)";
+        break;
+    case BackendKind::DispatchIo:
+        info["is_truly_async"] = true;
+        info["description"] = "Dispatch I/O (GCD) - native async I/O";
+        break;
+    case BackendKind::ThreadPool:
+    case BackendKind::Auto:
+    default:
+        info["is_truly_async"] = false;
+        info["description"] = "Thread pool - fallback mode";
+        break;
+    }
+
+    return info;
+}
+
+// 能力发现：身份信息之外，附加当前后端在此机器上探测到的原生能力明细
+// （库级能力矩阵由 Python 层 _capabilities.py 拼装）
+py::dict py_get_capabilities() {
+    py::dict caps = py_get_backend_info();
+    caps["backend_detail"] = backend_detail();
+    return caps;
 }
 
 } // namespace ayafileio

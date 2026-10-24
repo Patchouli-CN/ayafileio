@@ -149,4 +149,8 @@ void clear_batchers();
 // 只改原子量，不做任何 Python 调用，因此调用方持有 GIL 也无死锁风险。
 void refresh_batchers_config();
 
+// ── 回归测试/诊断：当前 loop 的 batcher 记账与生效参数 ──────────────────────
+long py_debug_batcher_outstanding();
+py::dict py_debug_batcher_state();
+
 } // namespace ayafileio

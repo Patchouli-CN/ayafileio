@@ -7,6 +7,9 @@
 #include <cmath>
 #include <memory>
 #include <vector>
+#ifdef _WIN32
+#include "iocp_context.hpp"
+#endif
 
 namespace ayafileio {
 
@@ -432,6 +435,46 @@ void refresh_batchers_config() {
         for (auto &kv : g_batchers) local.push_back(kv.second);
     }
     for (auto *b : local) apply(b);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 回归测试/诊断入口（原 bindings.cpp）
+// ════════════════════════════════════════════════════════════════════════════
+
+long py_debug_batcher_outstanding() {
+    PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
+    if (!loop) throw py::python_error();
+#ifdef _WIN32
+    ResultBatcher* b = IOCPContext::instance().get_batcher(loop);
+#else
+    ResultBatcher* b = get_or_create_batcher(loop);
+#endif
+    Py_DECREF(loop);
+    return b ? b->outstanding() : 0L;
+}
+
+// 当前 loop 的 batcher 实际生效的批处理参数。
+// configure() 热更新的回归测试就是读这里：改完配置后再读，值必须跟着变。
+py::dict py_debug_batcher_state() {
+    PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
+    if (!loop) throw py::python_error();
+#ifdef _WIN32
+    ResultBatcher* b = IOCPContext::instance().get_batcher(loop);
+#else
+    ResultBatcher* b = get_or_create_batcher(loop);
+#endif
+    Py_DECREF(loop);
+    py::dict d;
+    if (!b) return d;
+    d["outstanding"]       = b->outstanding();
+    d["threshold"]         = b->current_threshold();
+    d["threshold_max"]     = b->threshold_max();
+    d["idle_ms"]           = b->current_idle_ms();
+    d["idle_max_ms"]       = b->idle_timeout_max_ms();
+    d["adaptive"]          = b->adaptive();
+    d["target_latency_us"] = b->target_latency_us();
+    d["median_interval_us"] = b->median_interval_us();
+    return d;
 }
 
 } // namespace ayafileio

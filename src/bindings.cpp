@@ -1,266 +1,38 @@
 /*
  * bindings.cpp - nanobind module entry point
+ *
+ * 本文件**只做绑定**：NB_MODULE + m.def / py::class_。
+ * 任何业务逻辑、策略校验、平台 #ifdef 的实现细节都不属于这里——它们各自的
+ * 家是：
+ *
+ *   globals.cpp        py_init_module / py_cleanup / 配置 API（configure 等）
+ *   discover.cpp       py_get_backend_info / py_get_capabilities
+ *   file_handle.cpp    py_open_async（异步打开编排 + 引用计数契约）
+ *   result_batcher.cpp py_debug_batcher_outstanding / py_debug_batcher_state
+ *   iocp_context.cpp   py_debug_quarantine_stats（Windows）
+ *
+ * 这里剩下的 #ifdef 只用于「模块对外 API 在不同平台上有无这个函数」，
+ * 不包含任何实现。
  */
 #include "globals.hpp"
-#include "result_batcher.hpp"   // refresh_batchers_config() / debug_batcher_state()
-#ifdef _WIN32
-#include "iocp.hpp"
-#include "iocp_context.hpp"
-#endif
-#ifdef HAVE_IO_URING
-#include <liburing.h>
-#include "uring_pool.hpp"
-#endif
-#ifdef __APPLE__
-#include <dispatch/dispatch.h>
-#include <unistd.h>
-#include <fcntl.h>
-#endif
+#include "discover.h"      // py_get_backend_info / py_get_capabilities
 #include "file_handle.hpp"
-#include "config.hpp"
 #include "pool.hpp"
-#include "discover.h"
-#include "global_thread_pool.hpp"
-#include <nanobind/stl/string.h>
-#include <algorithm>
 
-// nanobind bindings — 实现全部位于 namespace ayafileio，此处引入
 using namespace ayafileio;
-
-// ════════════════════════════════════════════════════════════════════════════
-// 统一配置 API
-// ════════════════════════════════════════════════════════════════════════════
-
-static void py_configure(py::dict options) {
-    auto cfg = ayafileio::config().get();
-
-    // 后端选择：只影响之后打开的句柄
-    if (options.contains("backend")) {
-        std::string name = py::cast<std::string>(options["backend"]);
-        BackendKind kind = BackendKind::Auto;
-        if (!parse_backend_name(name, kind)) {
-            throw py::value_error(
-                "backend must be one of: 'auto', 'iocp', 'io_uring', "
-                "'dispatch_io', 'thread_pool'");
-        }
-        // 强制一个本构建/本机器上没有的后端，只会让之后每个 open 都失败；
-        // 当场报错比留到运行时更诚实（与 io_uring_sqpoll 的校验同一风格）
-        if (kind != BackendKind::Auto && !backend_available(kind)) {
-            const std::string msg =
-                "backend '" + name + "' is not available on this platform; "
-                "call ayafileio.get_backend_info() to see the default backend";
-            throw py::value_error(msg.c_str());
-        }
-        cfg.backend = kind;
-    }
-
-    // handle_pool_max_per_key / handle_pool_max_total 已废弃（句柄池移除），
-    // 静默忽略以免已发布的用户代码报错
-    if (options.contains("io_worker_count")) {
-        unsigned val = py::cast<unsigned>(options["io_worker_count"]);
-        if (val > 128) throw py::value_error("io_worker_count must be 0-128");
-        cfg.io_worker_count = val;
-    }
-    if (options.contains("buffer_pool_max")) {
-        cfg.buffer_pool_max = py::cast<size_t>(options["buffer_pool_max"]);
-    }
-    if (options.contains("buffer_size")) {
-        cfg.buffer_size = py::cast<size_t>(options["buffer_size"]);
-    }
-    if (options.contains("close_timeout_ms")) {
-        cfg.close_timeout_ms = py::cast<unsigned>(options["close_timeout_ms"]);
-    }
-    if (options.contains("io_uring_queue_depth")) {
-        cfg.io_uring_queue_depth = py::cast<unsigned>(options["io_uring_queue_depth"]);
-    }
-    if (options.contains("iocp_batch_size")) {
-        unsigned val = py::cast<unsigned>(options["iocp_batch_size"]);
-        if (val < 1 || val > 256) throw py::value_error("iocp_batch_size must be 1-256");
-        cfg.iocp_batch_size = val;
-    }
-    if (options.contains("io_uring_sqpoll")) {
-        bool val = py::cast<bool>(options["io_uring_sqpoll"]);
-        if (val) {
-            // 能力校验：请求内核不支持的能力时显式报错，不静默接受。
-            // 关（false）永远允许——跨平台代码可以无条件写 False
-            //
-            // 先看**目标后端**：backend 一栏在上面已经写进 cfg 了，所以这里不能
-            // 用 effective_backend()（它还读着旧配置）。强制 thread_pool 时
-            // 再开 SQPOLL 毫无意义——即使本机内核支持，那个后端也不会用到它。
-            const BackendKind want =
-                cfg.backend == BackendKind::Auto ? effective_backend() : cfg.backend;
-            if (want != BackendKind::IoUring) {
-                throw py::value_error(
-                    "io_uring_sqpoll=True requires the io_uring backend; the effective "
-                    "backend is not io_uring, so this option would have no effect. "
-                    "Check ayafileio.get_backend_info()['backend'] first.");
-            }
-#ifdef HAVE_IO_URING
-            if (!io_uring_available()) {
-                throw py::value_error(
-                    "io_uring_sqpoll=True requested, but io_uring is unavailable "
-                    "on this system (backend: thread_pool). "
-                    "Check ayafileio.get_capabilities()['backend_detail'] first.");
-            }
-            if (!io_uring_sqpoll_supported()) {
-                throw py::value_error(
-                    "io_uring_sqpoll=True requested, but this kernel cannot create "
-                    "an SQPOLL ring (needs kernel 5.11+ or privileges). "
-                    "Check ayafileio.get_capabilities()['backend_detail']['sqpoll'] first.");
-            }
-#else
-            throw py::value_error(
-                "io_uring_sqpoll is only meaningful on the Linux io_uring backend");
-#endif
-        }
-        cfg.io_uring_sqpoll = val;
-    }
-    if (options.contains("adaptive_batch")) {
-        cfg.adaptive_batch = py::cast<bool>(options["adaptive_batch"]);
-    }
-    if (options.contains("adaptive_target_latency_us")) {
-        unsigned val = py::cast<unsigned>(options["adaptive_target_latency_us"]);
-        if (val < 1 || val > 10000) throw py::value_error("adaptive_target_latency_us must be 1-10000");
-        cfg.adaptive_target_latency_us = val;
-    }
-
-    ayafileio::config().update(cfg);
-
-    // 同步 BufferPool 缓存配置
-    BufferPool::instance().refresh_config();
-    // 同步已存在 batcher 的批处理配置：batcher 创建时缓存了
-    // iocp_batch_size / adaptive_batch / adaptive_target_latency_us，少了这一步，
-    // 进程跑过第一个异步操作之后 configure() 对这几个键就是静默无效的。
-    refresh_batchers_config();
-    // 同步旧的全局变量（向后兼容）
-    g_worker_count.store(cfg.io_worker_count);
-}
-
-static py::dict py_get_config() {
-    auto cfg = ayafileio::config().get();
-    py::dict result;
-    result["backend"] = backend_name(cfg.backend);
-    result["io_worker_count"] = cfg.io_worker_count;
-    result["buffer_pool_max"] = cfg.buffer_pool_max;
-    result["buffer_size"] = cfg.buffer_size;
-    result["close_timeout_ms"] = cfg.close_timeout_ms;
-    result["iocp_batch_size"] = cfg.iocp_batch_size;
-    result["io_uring_queue_depth"] = cfg.io_uring_queue_depth;
-    result["io_uring_sqpoll"] = cfg.io_uring_sqpoll;
-    result["adaptive_batch"] = cfg.adaptive_batch;
-    result["adaptive_target_latency_us"] = cfg.adaptive_target_latency_us;
-    return result;
-}
-
-static void py_reset_config() {
-    ayafileio::config().update(ayafileio::Config::defaults());
-
-    BufferPool::instance().refresh_config();
-    // 与 py_configure 对称：重置也必须把已存在的 batcher 拉回默认值，
-    // 否则 reset_config() 之后它们还停在上一次 configure() 的参数上。
-    refresh_batchers_config();
-    g_worker_count.store(0);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// 后端信息 API
-// ════════════════════════════════════════════════════════════════════════════
-
-static py::dict py_get_backend_info() {
-    py::dict info;
-    info["os_version"] = os_version();
-
-    // platform 是「在哪跑」，backend 是「现在用哪个」——后者跟着
-    // configure({"backend": ...}) 走，所以这里按有效后端分支，而不是按平台宏。
-#if defined(_WIN32)
-    info["platform"] = "windows";
-#elif defined(__APPLE__)
-    info["platform"] = "macos";
-#elif defined(__linux__)
-    info["platform"] = "linux";
-#else
-    info["platform"] = "posix";
-#endif
-
-    const BackendKind kind = effective_backend();
-    info["backend"] = backend_name(kind);
-    switch (kind) {
-    case BackendKind::Iocp:
-        info["is_truly_async"] = true;
-        info["description"] = "I/O Completion Ports - native async I/O";
-        break;
-    case BackendKind::IoUring:
-        info["is_truly_async"] = true;
-        info["description"] = "io_uring - native async I/O (Linux 5.1+)";
-        break;
-    case BackendKind::DispatchIo:
-        info["is_truly_async"] = true;
-        info["description"] = "Dispatch I/O (GCD) - native async I/O";
-        break;
-    case BackendKind::ThreadPool:
-    case BackendKind::Auto:
-    default:
-        info["is_truly_async"] = false;
-        info["description"] = "Thread pool - fallback mode";
-        break;
-    }
-
-    return info;
-}
-
-// 能力发现：身份信息之外，附加当前后端在此机器上探测到的原生能力明细
-// （库级能力矩阵由 Python 层 _capabilities.py 拼装）
-static py::dict py_get_capabilities() {
-    py::dict caps = py_get_backend_info();
-    caps["backend_detail"] = backend_detail();
-    return caps;
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// 模块定义
-// ════════════════════════════════════════════════════════════════════════════
 
 NB_MODULE(_ayafileio, m) {
     m.doc() = "Cross-platform async file I/O module";
 
-    // 首先缓存全局变量
-    try {
-        cache_globals();
-    } catch (const std::exception& e) {
-        printf("Warning: Failed to cache globals: %s\n", e.what());
-    }
-    
-#ifdef _WIN32
-    try {
-        init_iocp();
-    } catch (const std::exception& e) {
-        printf("Warning: Failed to init IOCP: %s\n", e.what());
-    }
-#endif
+    // 缓存全局字符串、初始化平台设施（实现见 globals.cpp）
+    py_init_module();
 
-    // 清理由 Python 层负责注册；在 C++ 层暴露一个可调用的 cleanup()
-    m.def("cleanup", []() {
-#ifdef HAVE_IO_URING
-    // Linux 特有：清理所有 io_uring 实例
-    uring_cleanup_all();
-#endif
-    // 关闭全局共享线程池（所有后端的 fallback 都依赖它）
-    GlobalThreadPool::instance().shutdown();
-    // 清理全局 LoopHandle 缓存
-    clear_batchers();
-#ifdef _WIN32
-    // Windows 特有：关闭所有打开文件并停止 IOCP
-    close_all_files();
-    shutdown_iocp();
-#endif
-}, "Perform native cleanup (safe to call from Python atexit)");
-
-    // AsyncFile 类
+    // ── AsyncFile 类 ──────────────────────────────────────────────────────
     py::class_<PyAsyncFile>(m, "AsyncFile")
         .def(py::init<const char*, const char*>(),
              py::arg("path"), py::arg("mode") = "rb")
-        .def(py::init<int, const char*, bool>(), 
-             py::arg("fd"), py::arg("mode") = "rb", 
+        .def(py::init<int, const char*, bool>(),
+             py::arg("fd"), py::arg("mode") = "rb",
              py::arg("owns_fd") = false)
         .def("read",  &PyAsyncFile::read,  py::arg("size") = -1)
         .def("read_at", &PyAsyncFile::read_at,
@@ -276,194 +48,47 @@ NB_MODULE(_ayafileio, m) {
         .def("fileno", &PyAsyncFile::fileno)
         .def("_close_impl", &PyAsyncFile::close_impl);
 
-    // ── open_async：C++ 线程池异步打开 ────────────────────────────────────
-    // OS open 提交到 GlobalThreadPool：工作线程持 GIL 构造 FileHandle，
-    // 构造内部的阻塞系统调用经 GilRelease 释放 GIL，多 worker 因此真正
-    // 并行打开；结果（包装好的 AsyncFile 实例或异常对象）经 ResultBatcher
-    // 投递，与 I/O 完成共用同一条批量唤醒链路。Windows 构造需要的
-    // loop/create_future 在本线程（有 running loop）预取注入；POSIX 后端
-    // 首次 I/O 时才惰性绑定事件循环，注入参数被忽略。
-    m.def("open_async", [](const char* path, const char* mode) {
-        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
-        if (!loop) throw py::python_error();
-        PyObject* create_future = PyObject_GetAttr(loop, g_str_create_future);
-        if (!create_future) { Py_DECREF(loop); throw py::python_error(); }
-        PyObject* future = PyObject_CallNoArgs(create_future);
-        if (!future) { Py_DECREF(create_future); Py_DECREF(loop); throw py::python_error(); }
-        ResultBatcher* batcher = get_or_create_batcher(loop);
-        PyObject* set_result = PyObject_GetAttr(future, g_str_set_result);
-        if (!set_result) {
-            Py_DECREF(future); Py_DECREF(create_future); Py_DECREF(loop);
-            throw py::python_error();
-        }
+    // ── 生命周期 ──────────────────────────────────────────────────────────
+    m.def("cleanup", &py_cleanup,
+          "Perform native cleanup (safe to call from Python atexit)");
 
-        batcher->op_submitted();
+    // ── 异步打开 ──────────────────────────────────────────────────────────
+    m.def("open_async", &py_open_async, py::arg("path"), py::arg("mode") = "rb",
+          "Open a file asynchronously: Linux uses io_uring when available, "
+          "other platforms and fallback use the C++ thread pool, "
+          "resolving to a ready-to-use AsyncFile.");
 
-        // 平台分发：Linux 优先 io_uring OPENAT；不支持时返回 false。
-        // 回退会继续使用同一个提交计数，由线程池完成路径负责配平。
-        if (try_native_aopen(loop, future, batcher, path, mode)) {
-            Py_DECREF(create_future);
-            Py_DECREF(loop);
-            Py_DECREF(set_result);
-            return py::steal<py::object>(py::handle(future));
-        }
+    // ── 诊断 / 回归测试 ───────────────────────────────────────────────────
+    m.def("debug_batcher_outstanding", &py_debug_batcher_outstanding,
+          "Current loop's in-flight op accounting (test/debug aid)");
 
-        // worker 结尾会 DECREF future——但下面 return 的那份 steal 引用属于
-        // Python 调用方，不是 worker 的。原先两者共享 CallNoArgs 的那一份
-        // 引用：正常情况下 batcher 里的 set_result 绑定方法临时持有的一份
-        // 恰好盖住窗口，但在并发大量失败（如 EMFILE）触发立即 flush 时窗口
-        // 会被击中，future 提前释放 → await 方读到已释放对象 → 段错误。
-        // 让 worker 持有自己的那一份（macOS CI 实测修复，见回归场景）。
-        Py_INCREF(future);
-
-        // GlobalThreadPool 是按需启动的：IOCP/uring/GCD 后端都不会启动
-        // 它，只有线程池后端会 ensure_started——open_async 可能是第一个
-        // 用户，必须先确保 worker 在跑，否则任务永远躺在队列里
-        unsigned workers = ayafileio::config().io_worker_count();
-        if (workers == 0) {
-            unsigned hc = std::thread::hardware_concurrency();
-            if (hc == 0) hc = 1;
-            workers = std::max(1u, std::min(hc * 2u, 16u));
-        }
-        GlobalThreadPool::instance().ensure_started(workers);
-
-        std::string p(path), m(mode);
-        GlobalThreadPool::instance().enqueue(
-            [batcher, future, set_result, loop, create_future, p, m]() {
-                PyGILState_STATE gs = PyGILState_Ensure();
-
-                PyObject* set_fn = nullptr;
-                PyObject* val = nullptr;
-                try {
-                    auto* pf = new PyAsyncFile(p.c_str(), m.c_str(), loop, create_future);
-                    py::object obj = py::cast(pf, py::rv_policy::take_ownership);
-                    val = obj.ptr();
-                    Py_INCREF(val);   // batcher 持一个引用；obj 析构归还另一个
-                    set_fn = set_result;
-                    Py_INCREF(set_fn);
-                } catch (py::python_error &e) {
-                    e.restore();
-                    val = fetch_current_exc();
-                    set_fn = PyObject_GetAttr(future, g_str_set_exception);
-                    if (!set_fn) PyErr_Clear();
-                } catch (const py::builtin_exception &e) {
-                    // nanobind 内建异常（value_error 是返回 builtin_exception
-                    // 的工厂函数而非类型，不能直接 catch）。构造路径唯一来源
-                    // 是 parse_mode 的非法模式 → ValueError
-                    PyErr_SetString(g_ValueError, e.what());
-                    val = fetch_current_exc();
-                    set_fn = PyObject_GetAttr(future, g_str_set_exception);
-                    if (!set_fn) PyErr_Clear();
-                } catch (const std::exception &e) {
-                    PyErr_SetString(g_OSError, e.what());
-                    val = fetch_current_exc();
-                    set_fn = PyObject_GetAttr(future, g_str_set_exception);
-                    if (!set_fn) PyErr_Clear();
-                }
-
-                // 与 complete_ok 相同的批量 flush 策略
-                bool last = batcher->op_completed();
-                if (set_fn && val) {
-                    bool threshold = batcher->push(set_fn, val);
-                    if (threshold || last) batcher->flush();
-                } else {
-                    Py_XDECREF(set_fn);
-                    Py_XDECREF(val);
-                }
-
-                Py_DECREF(create_future);
-                // Session 在 create_session 里对 loop 自行 Py_INCREF、在
-                // ~Session 里 Py_DECREF；这里这一份是 open_async 自己拿的
-                // （工作线程回调捕获），必须还回去。以前把它当成 Session 的
-                // 「续命来源」留着不放，于是每次 aopen() 泄漏一个事件循环引用
-                // ——loop.close() 之后那个对象依然回收不了。
-                Py_DECREF(loop);
-                Py_DECREF(future);
-                Py_DECREF(set_result);
-                PyGILState_Release(gs);
-            });
-
-        return py::steal<py::object>(py::handle(future));
-    }, py::arg("path"), py::arg("mode") = "rb",
-    "Open a file asynchronously: Linux uses io_uring when available, "
-    "other platforms and fallback use the C++ thread pool, "
-    "resolving to a ready-to-use AsyncFile.");
-
-    // 调试/回归测试：当前 loop 的 batcher 在飞 op 记账（正常应为 0）。
-    // 同步完成路径若泄漏 op_submitted，这里会看到只增不减的计数
-    m.def("debug_batcher_outstanding", []() {
-        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
-        if (!loop) throw py::python_error();
 #ifdef _WIN32
-        ResultBatcher* b = IOCPContext::instance().get_batcher(loop);
-#else
-        ResultBatcher* b = get_or_create_batcher(loop);
-#endif
-        Py_DECREF(loop);
-        return b ? b->outstanding() : 0L;
-    }, "Current loop's in-flight op accounting (test/debug aid)");
-
-    // 调试/回归测试：IOCP quarantine 深度与 drain 扫描量。
-    // 持续负载下 live 应稳定在 (吞吐 × QUARANTINE_MS) 量级，
-    // scanned 应按 op 数线性增长（摊销 O(1)），而不是随队列深度平方增长。
-    // quarantine 本身是 IOCP 专属（io_uring / GCD 后端没有这层延迟释放），
-    // 所以只在 Windows 上导出；tests/test_quarantine.py 在其它平台跳过。
-#ifdef _WIN32
-    m.def("debug_quarantine_stats", []() {
-        QuarantineStats s = quarantine_stats();
-        py::dict d;
-        d["live"]    = s.live;
-        d["pushes"]  = s.pushes;
-        d["scanned"] = s.scanned;
-        d["drains"]  = s.drains;
-        d["peak"]    = s.peak;
-        return d;
-    }, "Quarantine depth / drain scan accounting (test/debug aid)");
+    m.def("debug_quarantine_stats", &py_debug_quarantine_stats,
+          "Quarantine depth / drain scan accounting (test/debug aid)");
 #endif
 
-    // 调试/回归测试：当前 loop 的 batcher 实际生效的批处理参数。
-    // configure() 热更新的回归测试就是读这里：改完配置后再读，值必须跟着变。
-    m.def("debug_batcher_state", []() {
-        PyObject* loop = PyObject_CallNoArgs(g_get_running_loop);
-        if (!loop) throw py::python_error();
-#ifdef _WIN32
-        ResultBatcher* b = IOCPContext::instance().get_batcher(loop);
-#else
-        ResultBatcher* b = get_or_create_batcher(loop);
-#endif
-        Py_DECREF(loop);
-        py::dict d;
-        if (!b) return d;
-        d["outstanding"]       = b->outstanding();
-        d["threshold"]         = b->current_threshold();
-        d["threshold_max"]     = b->threshold_max();
-        d["idle_ms"]           = b->current_idle_ms();
-        d["idle_max_ms"]       = b->idle_timeout_max_ms();
-        d["adaptive"]          = b->adaptive();
-        d["target_latency_us"] = b->target_latency_us();
-        d["median_interval_us"] = b->median_interval_us();
-        return d;
-    }, "Effective batching parameters of the current loop (test/debug aid)");
+    m.def("debug_batcher_state", &py_debug_batcher_state,
+          "Effective batching parameters of the current loop (test/debug aid)");
 
     m.def("debug_native_aopen_count", &native_aopen_submission_count,
           "Number of opens submitted through the native backend (test/debug aid)");
 
     m.def("drain_buffer_pool", &pool_clear,
-        "Drain all cached I/O buffers from the buffer pool");
+          "Drain all cached I/O buffers from the buffer pool");
 
-    // 向后兼容的 worker count API
+    // ── 向后兼容的 worker count 入口 ──────────────────────────────────────
 #ifdef _WIN32
-    m.def("set_iocp_worker_count", &set_iocp_worker_count,
-        "set iocp worker count");
+    m.def("set_iocp_worker_count", &py_set_iocp_worker_count,
+          "set iocp worker count");
 #endif
-    m.def("set_worker_count", &set_worker_count,
-        "Set global IO worker count (cross-platform)", py::arg("count"));
+    m.def("set_worker_count", &py_set_worker_count,
+          "Set global IO worker count (cross-platform)", py::arg("count"));
 
     // ════════════════════════════════════════════════════════════════════════
     // 统一配置 API (推荐使用)
     // ════════════════════════════════════════════════════════════════════════
-    
-    m.def("configure", &py_configure, 
+
+    m.def("configure", &py_configure,
           R"doc(Configure ayafileio with a dictionary of options.
 
 Options:
@@ -488,10 +113,10 @@ Example:
 )doc",
           py::arg("options"));
 
-    m.def("get_config", &py_get_config, 
+    m.def("get_config", &py_get_config,
           "Get current configuration as a dictionary");
 
-    m.def("reset_config", &py_reset_config, 
+    m.def("reset_config", &py_reset_config,
           "Reset configuration to defaults");
 
     m.def("get_backend_info", &py_get_backend_info,

@@ -184,4 +184,22 @@ inline PyObject* fetch_current_exc() {
     return v;
 }
 
+// ── Python 侧入口的实现（原先内联在 bindings.cpp）──────────────────────────
+// 模块启动/关停 = 全局生命周期；配置 API 要动 g_worker_count、BufferPool 与
+// 已存在 batcher 的同步，这三样都归本文件管。
+void py_init_module();
+void py_cleanup();
+
+void py_configure(py::dict options);
+py::dict py_get_config();
+void py_reset_config();
+
+// 向后兼容的 worker count 入口（把平台分支留在实现里，别带回绑定层）
+void py_set_worker_count(int count);
+#ifdef _WIN32
+void py_set_iocp_worker_count(int count);
+// 诊断：quarantine 深度与 drain 扫描量（实现在 iocp_context.cpp）
+py::dict py_debug_quarantine_stats();
+#endif
+
 } // namespace ayafileio

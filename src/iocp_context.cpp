@@ -1601,4 +1601,23 @@ void IOCPContext::close_all_sessions() {
     m_sessions.clear();
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 回归测试/诊断：quarantine 深度与 drain 扫描量（原 bindings.cpp）
+//
+// 持续负载下 live 应稳定在 (吞吐 × QUARANTINE_MS) 量级，scanned 应按 op 数线性
+// 增长（摊销 O(1)），而不是随队列深度平方增长。quarantine 本身是 IOCP 专属
+// （io_uring / GCD 后端没有这层延迟释放），所以只有这个文件提供它。
+// ════════════════════════════════════════════════════════════════════════════
+
+py::dict py_debug_quarantine_stats() {
+    QuarantineStats s = quarantine_stats();
+    py::dict d;
+    d["live"]    = s.live;
+    d["pushes"]  = s.pushes;
+    d["scanned"] = s.scanned;
+    d["drains"]  = s.drains;
+    d["peak"]    = s.peak;
+    return d;
+}
+
 } // namespace ayafileio

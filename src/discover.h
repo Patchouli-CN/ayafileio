@@ -64,4 +64,8 @@ py::dict gcd_detail();
 //   thread_pool: completion_model=false + note
 py::dict backend_detail();
 
+// ── 后端身份/能力（原 bindings.cpp 的 py_get_backend_info 一族）────────────
+py::dict py_get_backend_info();
+py::dict py_get_capabilities();
+
 } // namespace ayafileio

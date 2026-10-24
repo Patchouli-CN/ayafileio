@@ -189,6 +189,9 @@ struct QuarantineStats {
 
 QuarantineStats quarantine_stats();
 
+// ── 回归测试/诊断：quarantine 深度与 drain 扫描量 ──────────────────────────
+py::dict py_debug_quarantine_stats();
+
 } // namespace ayafileio
 
 #endif // _WIN32

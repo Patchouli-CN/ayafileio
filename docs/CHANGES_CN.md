@@ -11,6 +11,14 @@
 - **`configure({"backend": ...})`：显式选择后端。** 取值 `auto`（默认，平台探测）/ `iocp` / `io_uring` / `dispatch_io` / `thread_pool`。只影响**之后**打开的句柄，已经打开的文件保持各自的后端；强制一个本构建/本机床上没有的后端会在 `configure()` 时抛 `ValueError`，而不是留到第一次 `open()` 才炸。`get_backend_info()` 与 `get_capabilities()` 现在都按**有效后端**回答，不再永远报平台默认值——「我现在到底在用哪个后端、是不是真异步」终于可回答了。顺带修正两处：Linux 上没有 liburing 的构建以前把 `platform` 报成 `"posix"`，现在是 `"linux"`（`platform` 管「在哪跑」，`backend` 管「用哪个」，两者不该混在一起）；`configure({"io_uring_sqpoll": True})` 的校验也从「内核支持吗」改成「**有效后端是 io_uring 吗**」——强制 thread_pool 之后这个选项不会生效，即使本机内核支持 SQPOLL，现在会直接 `ValueError` 而不是静默接受。
 - **CI 覆盖线程池回退后端。** `ThreadIOBackend` 是 io_uring / GCD / IOCP 都不可用时的唯一路径，但正常 CI 里一行都跑不到（Linux 装了 liburing 就走 io_uring、macOS 走 GCD、Windows 走 IOCP）。新增两个 job：`test-fallback-backend`（Linux + macOS，通过 `AYAFILEIO_TEST_BACKEND=thread_pool` 让整套用例切到回退后端；`tests/conftest.py` 会在切换后核对生效，防止「配置静默无效」把整轮 CI 变成假绿）和 `test-no-io-uring-build`（Linux 刻意不装 liburing，`HAVE_IO_URING` 不成立，线程池是唯一后端——很多 manylinux 用户拿到的正是这样一份构建）。回归测试 `tests/test_backend_select.py`。
 
+### 内部
+- **`src/bindings.cpp` 回归纯绑定层。** 它原先除了 `m.def`/`py::class_` 还内联了 543 行里的约
+  350 行业务代码：`py_configure` 的策略校验、`get_backend_info`/`get_capabilities` 的探测拼装、
+  `open_async` 的线程池编排与引用计数契约、`cleanup` 的关停顺序、以及若干诊断入口。这些已按职责
+  搬回**各自既有的模块**（没有新建目录/层）：`globals.cpp`（配置 API + 模块启动/关停）、
+  `discover.cpp`（后端身份与能力）、`file_handle.cpp`（异步打开）、`result_batcher.cpp` 与
+  `iocp_context.cpp`（诊断）。`bindings.cpp` 现在 168 行、4 个 include、零平台头文件。
+
 ### 性能
 - **open 不再每次取一次文件大小。** `create_session`（IOCP）与 `ThreadIOBackend` 构造原先无条件跑一次
   `GetFileSizeEx` / `fstat`，只为给读取路径的 EOF 截断提供长度；而长度可以「需要时再补」——EOF 判决点、
