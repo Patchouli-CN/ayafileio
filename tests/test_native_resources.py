@@ -159,25 +159,20 @@ async def test_open_does_not_grow_loop_refcount(tmp_path, opener):
     assert grew <= 20, f"200 次 {opener} 让 loop 引用计数增长了 {grew}"
 
 
-@WIN_ONLY
 def test_event_loop_is_released_after_open(tmp_path):
     """做过 I/O 的事件循环，``close()`` + ``del`` 之后必须能被回收。
 
-    `ResultBatcher` 按 loop 缓存，构造时缓存了 ``loop.call_soon_threadsafe``
-    这个**绑定方法**——那是个强引用，于是任何跑过一次 I/O 的 loop 都会被
-    ``IOCPContext::m_batchers`` 持有到进程退出。``asyncio.run()`` 包在每个请求
-    里的代码（gunicorn 同步栈里很常见）就会每请求留下一个 loop 对象。
-    现在 batcher 只持弱引用，并在 flush 时按弱引用取回 loop。
+    两条历史坑，现在都堵上了：
+    * `ResultBatcher` 曾缓存 ``loop.call_soon_threadsafe`` 这个**绑定方法**（强引用），
+      于是任何跑过一次 I/O 的 loop 都被 ``IOCPContext::m_batchers`` 钉到进程退出。
+      现在 batcher 只持弱引用，flush 时按弱引用取回 loop。
+    * POSIX 三个后端曾各自缓存一个全局的 ``loop.create_future`` 绑定方法
+      （``g_cachedFutureFn``），同样钉住「最近用过的那个 loop」；而且它们
+      ``m_loop = loop; Py_INCREF(m_loop);`` 之后把 ``get_running_loop()` 的那份
+      引用漏掉了——**每个文件初始化都多钉一个引用**。两处都已删除/修正。
 
     用子进程跑：pytest 的 frame / 断言改写会额外持有 loop，对照组都过不了。
     刻意不做 I/O：quarantine 会合法地暂扣 future（那是设计内的延迟释放）。
-
-    仅 Windows：POSIX 三个后端各自缓存了一个全局的 ``loop.create_future``
-    绑定方法（``g_cachedFutureFn``，避免每个 op 一次属性查找），而绑定方法
-    天生持有 loop 实例——那是**有意的热路径优化**，代价是「最近用过的那个
-    loop」被钉住直到下一个 loop 做 I/O。它不是按次泄漏，所以这里只断言
-    Windows（那条路径上没有任何绑定方法缓存）。跨平台的「不按 loop 累积」
-    由下面 test_loops_do_not_accumulate_across_loops 守。
     """
     path = tmp_path / "loop.bin"
     path.write_bytes(b"x" * 64)
@@ -237,15 +232,8 @@ def test_event_loop_is_released_after_open(tmp_path):
 def test_loops_do_not_accumulate_across_loops(tmp_path):
     """反复「新建 loop → open/aopen → 关闭 loop」不该让 loop 对象越积越多。
 
-    这是跨平台的：POSIX 后端允许**一个** loop 被全局缓存钉住（``g_cachedFutureFn``，
-    见上一条用例的说明），但绝不能是「每个 loop 都留一个」。
-
-    修复前的两类持有都能被这条抓住：
-      * io_uring 的 ``UringInstance`` 对 loop 做 ``Py_INCREF``，且 DECREF 只在
-        进程退出时执行 → 每个跑过 io_uring I/O 的 loop 永久滞留；
-      * ``ResultBatcher`` 缓存 ``loop.call_soon_threadsafe`` 绑定方法 → 同理。
-
-    刻意不做 I/O：quarantine 会合法地暂扣 future（设计内的 1 秒延迟释放）。
+    这是跨平台的：每个 loop 都必须能独立回收（POSIX 三后端的全局 create_future
+    缓存与 loop 引用泄漏都已删除，不再有「最近用过的 loop 被钉住」这回事）。
     """
     path = tmp_path / "many.bin"
     path.write_bytes(b"x" * 64)

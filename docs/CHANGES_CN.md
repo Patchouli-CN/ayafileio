@@ -20,6 +20,15 @@
   `iocp_context.cpp`（诊断）。`bindings.cpp` 现在 168 行、4 个 include、零平台头文件。
 
 ### 修复
+- **删掉 POSIX 三后端进程级的 `create_future` 缓存，并修掉一处每个文件都在泄漏的 loop 引用。**
+  io_uring / macOS GCD / thread_io 曾各自缓存一个全局 `loop.create_future` **绑定方法**
+  （`g_cachedFutureFn`），每文件 open 省一次属性查找（约 0.2 µs）。代价三条：绑定方法强引用 loop
+  →「最后用过的那个 loop」永不可回收；`g_cachedLoop` 用**裸指针**做身份比较 → 新 loop 复用同一地址时
+  会拿到死 loop 的方法；写侧加锁、读侧不加锁 → 多线程多 loop 下的引用计数竞争。都远贵过那 0.2 µs，
+  缓存已删除，改为在 `ensure_loop_initialized` 里直接 `PyObject_GetAttr`（每文件一次，非热路径）。
+  同处还修掉一个引用泄漏：`m_loop = loop; Py_INCREF(m_loop);` 之后 `get_running_loop()` 的那份引用
+  从未归还——**每个 `FileHandle` 初始化都多钉一个 loop 引用**；现在直接接管那份所有权。
+  功效：`test_event_loop_is_released_after_open` 从 Windows-only **解禁为全平台**。
 - **`configure({"io_worker_count": N})` 在全局线程池启动之后是静默无效的。**
   `GlobalThreadPool::ensure_started()` 是 start-once——第一个调用者传的规模永久生效，
   之后调什么都没用，也没有 resize 接口。于是配置写进去了、`get_config()` 也报新值，
@@ -32,17 +41,6 @@
   顺带修掉同一处的一个更严重的既有缺陷：jthread 变体的 worker 在**空闲 50 ms 后就 `break` 退出**，
   而 `m_running_workers` 不减——池在空闲之后名存实亡（计数还在、线程没了），这也正是缩容逻辑
   永远不执行的原因。现在空闲只是回到循环顶部重新评估退役条件，且任何退出路径都会配平计数。
-
-### 性能
-- **open 不再每次取一次文件大小。** `create_session`（IOCP）与 `ThreadIOBackend` 构造原先无条件跑一次
-  `GetFileSizeEx` / `fstat`，只为给读取路径的 EOF 截断提供长度；而长度可以「需要时再补」——EOF 判决点、
-  短读、`seek(SEEK_END)` 都会刷新。改成惰性后（append 模式仍当场取，它必须知道起始位置），
-  实测 `open()` p50 **41 µs → 38 µs**（i7-6700K / NTFS / 600 次）。适用面要说清：批量 open
-  （`batch open`、`aopen only`）净省一次 syscall；「open + 一次 read」相当于把它挪到首读，中性。
-  另外测明：`aopen()` 的 155 µs 与 `open()` 的 38 µs 之差不是代码浪费——`io_worker_count` 取 1/2/16
-  实测都是 152–159 µs，瓶颈是池唤醒 + 2~3 次 GIL 交接 + 事件循环唤醒这几个**固定往返**。
-
-### 修复
 - **Windows 上并发写 access violation：`OVERLAPPED` 用了 `hEvent = NULL`。（移植线程池后端时发现）**
   只用 ctypes 直调 Win32 就能复现：同一个 `FILE_FLAG_OVERLAPPED` 句柄上 16 线程各 300 次 `WriteFile`，
   `OVERLAPPED` 每次新建且 `hEvent = NULL` 时 **8 次跑崩 7 次**；给每个 `OVERLAPPED` 挂一个线程私有
@@ -68,12 +66,12 @@
 - **用错模式读写不再是一句与原因无关的 `OSError`，而是标准的 `io.UnsupportedOperation`。** 此前对只写文件（`"wb"`/`"ab"`）调 `read()`，或对只读文件（`"rb"`）调 `write()`，请求会真的发到 OS，然后拿回 `OSError: Errno 5`（Windows）或 `EBADF`（POSIX）——错误类型和消息都和真正的原因对不上。内置 `io` 在这种情况抛 `io.UnsupportedOperation("read"/"write"/"truncate")`，现在这里也一样。11 个入口加了守卫：`read`/`readline`/`readlines`/`read_at`/`read_many`/`readinto`/`chunk`（读）与 `write`/`write_at`/`write_many`/`truncate`（写）。`io.UnsupportedOperation` 的 MRO 同时含 `OSError` 和 `ValueError`，所以既有 `except OSError:` / `except ValueError:` 的写法全部继续有效。守卫直接判 `self._mode` 首字符（模式串不可变），热路径上没有引入方法调用，也没有新增实例属性。
   **注意一处行为变化**：`wrap_file(fd, mode)` 现在严格按**声明的** mode 判定，与 `io.FileIO(fd, "wb").read()` 抛 `UnsupportedOperation` 一致。用 `"wb"` 包装一个 O_RDWR 的 fd 再读，以前能过、现在会抛——`tests/test_wrap_file.py` 里就有两个这样的用例（包装后要读回来），已改成 `"w+b"`。
 - **macOS 与 POSIX 线程池后端：`read()`/`read_at()` 看不到别的句柄追加的数据。** 这套 `m_cachedFileSize`（open 时快照，之后只由本会话的 write/truncate 更新）此前只有 Windows IOCP 后端做了「到 EOF 判决点就问内核」的刷新，另两个后端仍把旧长度当真相：外部追加后 `read()` 读到旧 EOF 就停、`read_at` 越界的一侧永远返回 `b""`、`seek(0, 2)` 报旧长度。现在两边都补齐（端点与 Windows 完全对应）：`read`/`read_at`/`readinto` 在 **EOF 判决点**和**发生短读**时 `fstat` 刷新，`seek(SEEK_END)` 前也刷一次；正常满载读一次 syscall 都不多加。macOS 的 mincore 内联快车道不受影响——刷新只让「超出原 EOF」的范围落到 dispatch_io/线程快速路，映射窗口本身不动。
-  随之**解禁 5 条测试**：`tests/test_native_resources.py` 里的 4 条大小缓存用例（含 `readinto`）与 `fileno()` 稳定性用例不再 `WIN_ONLY`。现在的 gating 只剩**引擎语义**确实不同的四处：fileno 的复制句柄（2 条，Windows 专属语义）、`g_cachedFutureFn` 造成的单 loop 有界滞留（1 条）、以及 IOCP 专属的 quarantine（1 条）。
+  随之**解禁 5 条测试**：`tests/test_native_resources.py` 里的 4 条大小缓存用例（含 `readinto`）与 `fileno()` 稳定性用例不再 `WIN_ONLY`。现在的 gating 只剩**引擎语义**确实不同的三处：fileno 的复制句柄（2 条，Windows 专属语义）、以及 IOCP 专属的 quarantine（1 条）。
 - **负偏移的 `seek()` 会把逻辑位置静默污染成 2^64-1。** `seek(-1, 0)` 返回 `18446744073709551615` 并把位置设成这个值；此后每次 `read()` 只报 `ReadFile failed, errno 87`（Windows）或直接读到 EOF（POSIX）——错误信息和真正原因毫无关系，位置也再回不来。Windows IOCP、io_uring、线程池三个后端都是裸 `static_cast<uint64_t>`，只有 macOS 的 GCD 后端早就有 `new_pos < 0` 校验。现在三个后端统一按 macOS 的语义拒绝（抛 `ValueError("negative seek position")`，且**不改动当前位置**）。刻意没有采用 stdlib 的 `OSError(EINVAL)`：macOS 后端一直是 `ValueError`，跨后端一致比逐字对齐内置更重要；这一处与内置的差异记在测试注释里。回归测试 `tests/test_io_parity.py`（5 个负偏移组合 +「报错后位置不变」+「报错后流仍可用」+「内部回退路径没被误杀」）。
 - **非法模式串被静默接受。** `_normalize_mode` 只校验字符是否落在合法集合内，于是 `"rbb"` / `"rr"` / `"rw"` / `"rtb"` / `"r++"` 全部通过。其中 `"rw"` 最危险：挑起始模式字符时取第一个命中项，于是一个写着读写的模式实际按**只读**打开，调用方毫无察觉。现在补上与内置 `open()` 对齐的结构校验（恰好一个 `rwax`、至多一个 `+`/`b`/`t`、`b` 与 `t` 互斥），错误消息里带上模式串本身。
   另外记一笔**未修**的偏差：对只写模式（如 `"wb"`）调用 `read()` 时，内置抛 `io.UnsupportedOperation("read")`，这里会把请求发到 OS 拿到 `OSError`（Windows 上是 `errno 5`）。都是错误、只是类型不同；要对齐得在 Python 层给 8 个读写入口都加可访问性前置检查，留作独立改动。
 - **Linux：跑过 io_uring I/O 的事件循环对象永远回收不了。** `UringInstance` 对 loop 做 `Py_INCREF`，而那个字段**从头到尾只写不读**——纯粹用来「给 loop 续命」，DECREF 只在 `cleanup_all()`（进程退出）里执行。于是任何一次 `aopen()`（Linux 原生 `OPENAT` 路径）或 io_uring I/O 都会把当前 loop 钉到进程退出。现在改成弱引用，并用它做缓存键的失效检测：`UringManager::acquire()` 的键是裸 `PyObject*`，旧 loop 已死、新 loop 复用同一地址时必须换新实例，否则新 loop 的完成结果会投给已经失效的 reaper/batcher（这是去掉强引用后才暴露出来的第二个问题）。`acquire()` 的失效路径、`remove()`、`cleanup_all()`、建实例失败路径统一走 `release_loop_ref()`。`weakref_target()` 抽到 `globals.hpp`，与 `ResultBatcher` 共用同一套 3.13 前后的版本分支。CI 由新增的 `test_loops_do_not_accumulate_across_loops` 守住：10 个不同的 loop 各做一次 open+aopen，存活 loop 增量必须 ≤2。
-  另外记一笔**未修**的有界滞留：POSIX 三个后端各自缓存了一个全局的 `loop.create_future` **绑定方法**（`g_cachedFutureFn`，省掉每个 op 一次属性查找），绑定方法天生持有 loop 实例，所以「最近用过的那个 loop」会一直被钉到下一个 loop 做 I/O。这是有意的热路径取舍（不是按次泄漏），要改得把它换成按 loop 的弱引用 + 每次调用现场取回——那是每个 op 都走的路径，本机（Windows）量不到 io_uring/macOS 上的开销，留作独立改动。
+  （原先记在这里的 `g_cachedFutureFn` 有界滞留已在上面的修复条目里解决。）
 - **做过一次 I/O 的事件循环对象永远回收不了。** `ResultBatcher` 按 loop 缓存（Windows 在 `IOCPContext::m_batchers`，其它后端在全局注册表），构造时缓存了 `loop.call_soon_threadsafe` 这个**绑定方法**——强引用，于是任何跑过一次 I/O 的 loop 都被钉到进程退出。`asyncio.run()` 包在每个请求里的代码（gunicorn 同步栈里很常见）等于每请求留下一个 loop 对象。现在 batcher 只持 loop 的**弱引用**，flush 时按弱引用取回（取不到就把这批结果丢掉并复位派发位——没有谁能再消费它们了，留着只会把 future 和它引用的 loop 一起压住）。缓存键仍是裸 `PyObject*`，所以 `get_batcher()` 会比对弱引用当前指向的对象：新 loop 复用了旧 loop 的地址时不匹配，旧 batcher **退役**（只退役不销毁——`Session::batcher` 与 `snapshot_batchers()` 可能仍握着这个裸指针，销毁即 UAF）并新建一个；不比对的话新 loop 的所有完成结果会被静默送进失效的旧 batcher。实测：200 次 `asyncio.run` + open + read 之后存活的 loop 对象从 +200 回到 0（跑完立刻统计时的 +200 是 quarantine 那 1 秒扣留，空闲 1.5 s 后归零）；随机 4 KiB 读 x16–x256 仍为 9.6–10.5x aiofiles，没有可测的性能回归（每次 flush 多一次属性查找，flush 是批量投递，不在每个 op 上）。
 - **Windows：`fileno()` 每次调用泄漏一个 CRT 描述符，调用方 `os.close()` 会连累文件对象。** 原实现对会话自己的 HANDLE 做 `_open_osfhandle`：连续调三次返回 2003、2004、2005，前两个永远不释放；而那个描述符拥有的是**会话的**句柄，`os.close(f.fileno())` 之后 `await f.read()` 立刻报 `OSError: ReadFile failed`（errno 6）。现在复制一份句柄再包装，并且只创建一次（`io.FileIO.fileno()` 语义：同一个对象返回稳定的 fd）。关闭时两个坑都要防：一是调用方已经自己关掉了这个 fd，此时任何 CRT 校验函数（`_get_osfhandle`/`_close`）都会走 invalid-parameter handler 直接 `__fastfail`，进程 0xC0000409 —— 整段改在非致命的 thread-local handler 下跑；二是 fd 号可能已被后开的描述符复用，光判断「有效」会把别人的描述符当成自己的（实测会关掉 asyncio 的 self-pipe socketpair），因此比对的是**句柄身份**。回归测试 `tests/test_native_resources.py` 覆盖：fd 稳定、调用方 close 后文件仍可读、号码被复用时不误伤（子进程跑，真回归是整进程崩溃而非异常）。
 - **每次 `open()` / `aopen()` 泄漏一个事件循环引用。** `WindowsIOBackend` 构造函数拿到 `get_running_loop()` 的 `+1` 却从不归还，注释把它说成 Session 的「续命来源」，而 `Session::loop` 同时被标注为 borrowed、`~Session` 明确不释放——那个引用就凭空消失了。所有权现在单向：`create_session()` 自行 `Py_INCREF`，`~Session` 释放；构造函数与 `open_async` 的回投 lambda 各自归还自己那一份（后者在 POSIX 上还多漏一个，因为注入参数本来就被忽略）。实测 200 次 open/close 后 loop 引用计数增长从 +200 降到 0。注意这**没有**解决事件循环对象的另一种滞留：`ResultBatcher` 按 loop 缓存并持有 `loop.call_soon_threadsafe` 绑定方法，任何做过一次 I/O 的 loop 都会被 `IOCPContext::m_batchers` 持有到进程退出（要做成弱引用 + 失效检测才能修，属独立改动）。
@@ -81,6 +79,15 @@
 - **Windows：quarantine 只在有后续流量时才排空，最后一批完成的请求永久滞留。** 此前只在本线程 push 到 256 条、或 worker 收到一批完成包之后 drain，因此一批 I/O 跑完就空闲时，队列里那批 `IORequest`（连同它的 `future`，以及 `future` 里对事件循环的引用）会一直留着，直到下次有流量才释放——内存停在上次峰值上不回落。现在 worker 的等待超时把队首到期时间算进去，空闲时也会醒来 drain。实测 300 次读后空闲 1.6 s，`debug_quarantine_stats()['live']` 从 300 回到 0。
 
 - **Windows IOCP 的 `flush()` 阻塞事件循环。** `submit_flush()` 在调用方线程（即事件循环）上直接执行 `FlushFileBuffers`：慢盘实测单次 40–50 ms，期间整个 loop 停摆，用 `asyncio.sleep(0)` 心跳测得最长 79.6 ms（空转基线 0.9 ms）。同一个调用在 io_uring 后端走 `IORING_OP_FSYNC`，本来就是真异步的，三个后端在这里行为不一致。现在 `FlushFileBuffers` 交给 `GlobalThreadPool`，结果经 `ResultBatcher` 回投——与 `aopen` 走同一条链路。记账沿用 `submit_write` 的规矩：提交时 `Session::pending` +1、`batcher->op_submitted()`，完成后 `complete_request()` 与 `op_completed()` 配平，所以 `close()` 仍会等这次 fsync 走完再关句柄（否则句柄被复用后 fsync 会刷到别的文件上）；任务捕获 `shared_ptr<Session>` 保证 session 存活，并在持 GIL 的状态下释放，避免「最后一个引用恰好在此析构」时 `~Session` 里的 `Py_XDECREF` 在裸线程上执行。顺序语义不变：`FlushFileBuffers` 覆盖此前已经交给驱动的写入，因此不额外等 `pending` 归零。同一块盘实测：flush 期间循环最长停摆 **79.6 ms → 0.8 ms**，单次 flush 耗时不变（23.9 → 25.0 ms，fsync 照做，只是不再占用循环）；`tests/` 153 passed / 1 skipped（Linux io_uring 用例），另做了并发与竞态验证（同句柄 40 并发、30 个文件并发、`flush` 与 `close` 竞态），每项之后 `debug_batcher_outstanding()` 均回到 0。本次只改 Windows IOCP：`thread_io_backend`（`src/backends/thread_io_backend.cpp`）与 `macos_gcd_backend`（`src/backends/macos_gcd_backend.cpp`）的 `flush()` 仍是内联 `fsync`，同样会阻塞调用方。
+
+### 性能
+- **open 不再每次取一次文件大小。** `create_session`（IOCP）与 `ThreadIOBackend` 构造原先无条件跑一次
+  `GetFileSizeEx` / `fstat`，只为给读取路径的 EOF 截断提供长度；而长度可以「需要时再补」——EOF 判决点、
+  短读、`seek(SEEK_END)` 都会刷新。改成惰性后（append 模式仍当场取，它必须知道起始位置），
+  实测 `open()` p50 **41 µs → 38 µs**（i7-6700K / NTFS / 600 次）。适用面要说清：批量 open
+  （`batch open`、`aopen only`）净省一次 syscall；「open + 一次 read」相当于把它挪到首读，中性。
+  另外测明：`aopen()` 的 155 µs 与 `open()` 的 38 µs 之差不是代码浪费——`io_worker_count` 取 1/2/16
+  实测都是 152–159 µs，瓶颈是池唤醒 + 2~3 次 GIL 交接 + 事件循环唤醒这几个**固定往返**。
 
 ## [1.15.0] - 2026-10-20
 

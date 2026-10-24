@@ -22,31 +22,6 @@ namespace ayafileio {
 // 全局缓存（线程安全）
 // ════════════════════════════════════════════════════════════════════════════
 
-static PyObject*   g_cachedLoop       = nullptr;
-static PyObject*   g_cachedFutureFn   = nullptr;
-static ResultBatcher* g_cachedLoopHandle = nullptr;
-static std::mutex  g_cacheMtx;
-
-static void refresh_loop_cache(PyObject* loop) {
-    UR_DEBUG_LOG0("MacOSGCDBackend: refresh_loop_cache start");
-    std::lock_guard<std::mutex> lk(g_cacheMtx);
-    if (loop == g_cachedLoop) {
-        UR_DEBUG_LOG0("MacOSGCDBackend: refresh_loop_cache cache hit");
-        return;
-    }
-    Py_XDECREF(g_cachedFutureFn);
-    g_cachedLoop = loop;
-    g_cachedFutureFn = PyObject_GetAttr(loop, g_str_create_future);
-    if (g_cachedFutureFn) {
-        Py_INCREF(g_cachedFutureFn);
-        UR_DEBUG_LOG0("MacOSGCDBackend: refresh_loop_cache got create_future");
-    } else {
-        UR_DEBUG_LOG0("MacOSGCDBackend: refresh_loop_cache FAILED to get create_future");
-    }
-    g_cachedLoopHandle = get_or_create_batcher(loop);
-    UR_DEBUG_LOG0("MacOSGCDBackend: refresh_loop_cache done");
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // 构造函数 / 析构函数
 // ════════════════════════════════════════════════════════════════════════════
@@ -325,12 +300,19 @@ void MacOSGCDBackend::ensure_loop_initialized() {
         return;
     }
     
-    refresh_loop_cache(loop);
-    m_loop = loop;
-    Py_INCREF(m_loop);
-    m_create_future = g_cachedFutureFn;
-    Py_INCREF(m_create_future);
-    m_batcher = g_cachedLoopHandle;
+    // 直接按当前 loop 取 create_future / batcher：这里是每个文件 open 一次，
+    // 不在热路径上。以前用进程级全局缓存省这一次属性查找，代价是：绑定方法强引用
+    // loop（最后用过的 loop 永不可回收）、裸指针身份比较（新 loop 复用同一地址时
+    // 会拿到死 loop 的方法）、以及「写加锁、读不加锁」的跨线程竞争。
+    PyObject* create_future = PyObject_GetAttr(loop, g_str_create_future);
+    if (!create_future) {
+        PyErr_Clear();
+        Py_DECREF(loop);   // 本函数持有 get_running_loop() 的那一份
+        throw std::runtime_error("create_future unavailable on the running loop");
+    }
+    m_loop = loop;                    // 接管 get_running_loop() 的引用（析构里 XDECREF）
+    m_create_future = create_future;  // GetAttr 返回新引用，同样由析构释放
+    m_batcher = get_or_create_batcher(loop);
 
     // 大请求线程快速路依赖全局线程池（macOS 主路径是 GCD，
     // ThreadIOBackend 可能从不存在，线程池需自行拉起）
