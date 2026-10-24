@@ -1209,13 +1209,7 @@ PyObject *IOCPContext::submit_flush(uint64_t session_id) {
     batcher->op_submitted();
 
     GlobalThreadPool &pool = GlobalThreadPool::instance();
-    unsigned workers = config().io_worker_count();
-    if (workers == 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 1;
-        workers = std::max(1u, std::min(hc * 2u, 16u));
-    }
-    pool.ensure_started(workers);
+    pool.ensure_started(effective_io_worker_count());
 
     // FlushFileBuffers 是同步调用（慢盘实测 40–50 ms），不能留在事件循环
     // 线程上。丢给全局线程池，结果经 ResultBatcher 回投 —— 与 open_async

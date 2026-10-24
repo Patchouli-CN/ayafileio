@@ -1,6 +1,8 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
+#include <thread>
 #include <atomic>
 #include <shared_mutex>
 #include <unordered_map>
@@ -132,6 +134,20 @@ private:
 
 inline ConfigManager& config() {
     return ConfigManager::instance();
+}
+
+// 全局线程池的 worker 数：0 = auto（2 × 核数，上限 16，至少 1）。
+//
+// 这个公式原先在 5 处各写了一遍（open_async / iocp_context / thread_io_backend
+// 两个构造 / macos_gcd_backend）。于是「谁先启动池」隐式决定了池的大小，而
+// configure({"io_worker_count": N}) 只改配置、不影响已经起来的池——看起来生效、
+// 实际没有。现在只有这一份公式，且 configure 会用它热同步池。
+inline unsigned effective_io_worker_count() {
+    const unsigned configured = config().io_worker_count();
+    if (configured != 0) return configured;
+    unsigned hc = std::thread::hardware_concurrency();
+    if (hc == 0) hc = 1;
+    return std::max(1u, std::min(hc * 2u, 16u));
 }
 
 } // namespace ayafileio

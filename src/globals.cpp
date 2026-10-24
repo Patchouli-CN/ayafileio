@@ -238,6 +238,9 @@ void py_configure(py::dict options) {
     // iocp_batch_size / adaptive_batch / adaptive_target_latency_us，少了这一步，
     // 进程跑过第一个异步操作之后 configure() 对这几个键就是静默无效的。
     refresh_batchers_config();
+    // 同步全局线程池的 worker 数：池一旦启动就只认第一次的规模，不主动同步的话
+    // configure({"io_worker_count": N}) 会「配置生效、实际无效」。
+    GlobalThreadPool::instance().target_workers(effective_io_worker_count());
     // 同步旧的全局变量（向后兼容）
     g_worker_count.store(cfg.io_worker_count);
 }
@@ -265,6 +268,7 @@ void py_reset_config() {
     // 与 py_configure 对称：重置也必须把已存在的 batcher 拉回默认值，
     // 否则 reset_config() 之后它们还停在上一次 configure() 的参数上。
     refresh_batchers_config();
+    GlobalThreadPool::instance().target_workers(effective_io_worker_count());
     g_worker_count.store(0);
 }
 

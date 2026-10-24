@@ -183,13 +183,7 @@ py::object py_open_async(const char* path, const char* mode) {
     // GlobalThreadPool 是按需启动的：IOCP/uring/GCD 后端都不会启动
     // 它，只有线程池后端会 ensure_started——open_async 可能是第一个
     // 用户，必须先确保 worker 在跑，否则任务永远躺在队列里
-    unsigned workers = ayafileio::config().io_worker_count();
-    if (workers == 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 1;
-        workers = std::max(1u, std::min(hc * 2u, 16u));
-    }
-    GlobalThreadPool::instance().ensure_started(workers);
+    GlobalThreadPool::instance().ensure_started(effective_io_worker_count());
 
     std::string p(path), m(mode);
     GlobalThreadPool::instance().enqueue(

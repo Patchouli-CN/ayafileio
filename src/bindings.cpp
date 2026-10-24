@@ -17,6 +17,7 @@
 #include "globals.hpp"
 #include "discover.h"      // py_get_backend_info / py_get_capabilities
 #include "file_handle.hpp"
+#include "global_thread_pool.hpp"   // py_debug_pool_workers
 #include "pool.hpp"
 
 using namespace ayafileio;
@@ -69,6 +70,9 @@ NB_MODULE(_ayafileio, m) {
 
     m.def("debug_batcher_state", &py_debug_batcher_state,
           "Effective batching parameters of the current loop (test/debug aid)");
+
+    m.def("debug_pool_workers", &py_debug_pool_workers,
+          "Live worker count of the global thread pool (test/debug aid)");
 
     m.def("debug_native_aopen_count", &native_aopen_submission_count,
           "Number of opens submitted through the native backend (test/debug aid)");

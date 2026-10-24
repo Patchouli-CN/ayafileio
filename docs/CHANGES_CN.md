@@ -19,6 +19,20 @@
   `discover.cpp`（后端身份与能力）、`file_handle.cpp`（异步打开）、`result_batcher.cpp` 与
   `iocp_context.cpp`（诊断）。`bindings.cpp` 现在 168 行、4 个 include、零平台头文件。
 
+### 修复
+- **`configure({"io_worker_count": N})` 在全局线程池启动之后是静默无效的。**
+  `GlobalThreadPool::ensure_started()` 是 start-once——第一个调用者传的规模永久生效，
+  之后调什么都没用，也没有 resize 接口。于是配置写进去了、`get_config()` 也报新值，
+  但真正干活的还是老数量。实测（进程线程数采样）：配置从 2 改成 16 后，线程数全程
+  钉在 9 不动。现在：worker 数公式收敛成一份 `effective_io_worker_count()`（原先在
+  5 处各写一遍，谁先启动池谁说了算），池新增 `target_workers()`——多就补线程、少就让
+  多余 worker 在取下一个任务前自行退出——`configure()` / `reset_config()` 末尾都会
+  调用它。回归测试 `tests/test_pool_config.py` 断言「起 2 → 改 8 → 改 3 → reset 回
+  auto」每一步的实时 worker 数。
+  顺带修掉同一处的一个更严重的既有缺陷：jthread 变体的 worker 在**空闲 50 ms 后就 `break` 退出**，
+  而 `m_running_workers` 不减——池在空闲之后名存实亡（计数还在、线程没了），这也正是缩容逻辑
+  永远不执行的原因。现在空闲只是回到循环顶部重新评估退役条件，且任何退出路径都会配平计数。
+
 ### 性能
 - **open 不再每次取一次文件大小。** `create_session`（IOCP）与 `ThreadIOBackend` 构造原先无条件跑一次
   `GetFileSizeEx` / `fstat`，只为给读取路径的 EOF 截断提供长度；而长度可以「需要时再补」——EOF 判决点、

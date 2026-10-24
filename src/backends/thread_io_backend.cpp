@@ -66,15 +66,8 @@ ThreadIOBackend::ThreadIOBackend(const std::string &path, const std::string &mod
     m_cached_buffer_pool_max = cfg.buffer_pool_max();
     m_cached_close_timeout_ms = cfg.close_timeout_ms();
     
-    m_num_workers = cfg.io_worker_count();
-    if (m_num_workers == 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 1;
-        m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
-        UR_DEBUG_LOG("ThreadIOBackend: auto worker count = %u (hc=%u)", m_num_workers, hc);
-    } else {
-        UR_DEBUG_LOG("ThreadIOBackend: configured worker count = %u", m_num_workers);
-    }
+    m_num_workers = effective_io_worker_count();
+    UR_DEBUG_LOG("ThreadIOBackend: worker count = %u", m_num_workers);
 
     int flags = kOpenRead;
     ModeInfo mi;
@@ -147,12 +140,7 @@ ThreadIOBackend::ThreadIOBackend(int fd, const std::string& mode, bool owns_fd) 
     m_cached_buffer_pool_max = cfg.buffer_pool_max();
     m_cached_close_timeout_ms = cfg.close_timeout_ms();
     
-    m_num_workers = cfg.io_worker_count();
-    if (m_num_workers == 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 1;
-        m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
-    }
+    m_num_workers = effective_io_worker_count();
     
     ModeInfo mi = parse_mode(mode);
     m_appendMode = mi.appendMode;

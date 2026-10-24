@@ -335,12 +335,7 @@ void MacOSGCDBackend::ensure_loop_initialized() {
     // 大请求线程快速路依赖全局线程池（macOS 主路径是 GCD，
     // ThreadIOBackend 可能从不存在，线程池需自行拉起）
     auto& cfg = ayafileio::config();
-    m_num_workers = cfg.io_worker_count();
-    if (m_num_workers == 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 1;
-        m_num_workers = std::max(1u, std::min(hc * 2u, 16u));
-    }
+    m_num_workers = effective_io_worker_count();
     GlobalThreadPool::instance().ensure_started(m_num_workers);
 
     m_loop_initialized = true;

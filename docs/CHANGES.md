@@ -21,6 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (async open), `result_batcher.cpp` and `iocp_context.cpp` (diagnostics). `bindings.cpp` is now 168 lines
   with four includes and no platform headers.
 
+### Fixed
+- **`configure({"io_worker_count": N})` was silently ignored once the global thread pool had started.**
+  `GlobalThreadPool::ensure_started()` is start-once — the size passed by the first caller wins forever,
+  later calls do nothing, and there was no resize path. So the config was written, `get_config()` reported
+  the new value, and the actual worker count stayed where it was. Measured by sampling the process thread
+  count: after changing the config from 2 to 16 the count stayed flat at 9. Now the worker-count formula
+  lives in exactly one place, `effective_io_worker_count()` (it used to be copy-pasted into five call sites,
+  so whichever path started the pool first decided its size), the pool gained `target_workers()` — grow by
+  spawning, shrink by letting surplus workers retire before taking their next task — and `configure()` /
+  `reset_config()` call it. `tests/test_pool_config.py` asserts the live worker count at every step:
+  start at 2, configure 8, configure 3, reset back to auto.
+  A more serious pre-existing defect in the same place was fixed too: in the jthread variant a worker did
+  `break` and exit after **50 ms of idleness**, without decrementing `m_running_workers` — so the pool
+  became a zombie once idle (counter says alive, threads are gone), which is also why shrinking never ran.
+  Idle now just returns to the top of the loop to re-evaluate retirement, and every exit path balances the
+  counter.
+
 ### Performance
 - **`open` no longer fetches the file size on every call.** `create_session` (IOCP) and the
   `ThreadIOBackend` constructor used to run `GetFileSizeEx` / `fstat` unconditionally, purely to give the
