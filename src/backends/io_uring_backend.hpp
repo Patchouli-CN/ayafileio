@@ -52,6 +52,12 @@ private:
     std::shared_ptr<UringInstance> m_uring;
     
     void ensure_loop_initialized();
+
+    // 用内核真值刷新 m_cachedFileSize。缓存是 open 时的快照，之后只由本会话的
+    // 写入/截断更新——别的进程（或同进程另一个句柄）追加的数据这里看不到，
+    // 把旧长度当真相就会静默少读。只在「已到 EOF 判决点」或 SEEK_END 这类本来
+    // 就要问「现在多长」的地方调用，热路径不加 syscall。
+    void refresh_cached_size_locked();   // 调用方须持 m_posMtx
     void submit_io(IORequest* req, int op, int fd, std::span<const std::byte> data, off_t offset);
     // 提交后内联收割"提交即完成"的 CQE（IOCP 同步完成分支的 uring 对应物）
     void try_harvest_inline();

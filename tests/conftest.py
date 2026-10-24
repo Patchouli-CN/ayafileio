@@ -49,3 +49,19 @@ if _TEST_BACKEND:
         raise RuntimeError(
             f"configure({{'backend': {_TEST_BACKEND!r}}}) 没有生效（当前 {_active!r}）"
         )
+
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _reenforce_test_backend():
+        """每个用例结束后把后端重新压回 CI 指定的值。
+
+        有些用例会调 ``reset_config()``（例如 test_capabilities 的 sqpoll 校验
+        在 finally 里重置），那会把 ``backend`` 一并重置回 ``auto``——于是后面的
+        用例悄悄跑在平台默认后端上，整轮「回退后端」覆盖就白跑了。实测过这个
+        坑：Linux 上 reset 之后悄悄切回 io_uring，而当时 io_uring 那份大小缓存
+        还没修，红得莫名其妙。
+        """
+        yield
+        if ayafileio.get_config()["backend"] != _TEST_BACKEND:
+            ayafileio.configure({"backend": _TEST_BACKEND})

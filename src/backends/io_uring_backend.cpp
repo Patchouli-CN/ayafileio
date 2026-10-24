@@ -376,6 +376,11 @@ PyObject* IOUringBackend::read(int64_t size) {
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        if (rem <= 0) [[unlikely]] {
+            // 可能只是缓存长度过期（外部追加）：判 EOF 前先问一次内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        }
         if (rem <= 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
         readSize = (size < 0) ? static_cast<size_t>(rem)
                  : std::min(static_cast<size_t>(size), static_cast<size_t>(rem));
@@ -416,6 +421,11 @@ PyObject* IOUringBackend::read_at(int64_t offset, int64_t size) {
         // 不读取也不修改 m_filePos —— 位置读与并发 read()/seek() 无竞争
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - offset;
+        if (rem <= 0) [[unlikely]] {
+            // 缓存长度可能过期（外部追加）：offset 看着越界时先问内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - offset;
+        }
         if (rem <= 0) [[unlikely]] { resolve_bytes(future, nullptr, 0); return future; }
         readSize = (size < 0) ? static_cast<size_t>(rem)
                  : std::min(static_cast<size_t>(size), static_cast<size_t>(rem));
@@ -488,6 +498,17 @@ PyObject* IOUringBackend::write(Py_buffer* view, int64_t position) {
     return future;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 缓存文件大小的刷新（见头文件里的说明）
+// ════════════════════════════════════════════════════════════════════════════
+
+void IOUringBackend::refresh_cached_size_locked() {
+    struct stat st;
+    if (fstat(m_fd, &st) == 0 && st.st_size >= 0) {
+        m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+    }
+}
+
 PyObject* IOUringBackend::seek(int64_t offset, int whence) {
     try { ensure_loop_initialized(); }
     catch (const std::runtime_error&) {
@@ -502,7 +523,11 @@ PyObject* IOUringBackend::seek(int64_t offset, int whence) {
         int64_t new_pos;
         if (whence == 0) new_pos = offset;
         else if (whence == 1) new_pos = static_cast<int64_t>(m_filePos) + offset;
-        else if (whence == 2) new_pos = static_cast<int64_t>(m_cachedFileSize) + offset;
+        else if (whence == 2) {
+            // SEEK_END 问的就是「现在多长」：缓存值可能过期（外部追加）
+            refresh_cached_size_locked();
+            new_pos = static_cast<int64_t>(m_cachedFileSize) + offset;
+        }
         else { resolve_exc(future, g_ValueError, 0, "Invalid whence value"); return future; }
 
         // 负位置必须当场拒绝：static_cast<uint64_t> 会把 -1 变成 2^64-1，
@@ -674,6 +699,11 @@ PyObject* IOUringBackend::readinto(PyObject* buf) {
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：判 EOF 前先问内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        }
         if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject* z = PyLong_FromLong(0);
