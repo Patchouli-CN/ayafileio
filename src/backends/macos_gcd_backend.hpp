@@ -67,6 +67,12 @@ private:
 
     void ensure_loop_initialized();
 
+    // 用内核真值刷新 m_cachedFileSize。缓存是 open 时的快照，之后只由本会话的
+    // 写入/截断更新——别的进程（或同进程另一个句柄）追加的数据这里看不到，
+    // 把旧长度当真相就会静默少读。只在「已到 EOF 判决点」或 SEEK_END 这类本来
+    // 就要问「现在多长」的地方调用，热路径不加 syscall。
+    void refresh_cached_size_locked();   // 调用方须持 m_posMtx
+
     // ── 大请求线程快速路 ─────────────────────────────────────────────────
     // dispatch_io 的 high_water 会把大请求切成 64KB 小块逐块回调（4MB =
     // 64 次回调 + 64 次 memcpy），大块顺序 I/O 被严重拖慢。因此按大小

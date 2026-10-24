@@ -156,6 +156,22 @@ ThreadIOBackend::~ThreadIOBackend() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// 缓存文件大小的刷新（见头文件里的说明）
+// ════════════════════════════════════════════════════════════════════════════
+
+void ThreadIOBackend::refresh_cached_size_locked() {
+    struct stat st;
+    if (fstat(m_fd, &st) == 0 && st.st_size >= 0) {
+        m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+    }
+}
+
+void ThreadIOBackend::refresh_cached_size() {
+    std::lock_guard<std::mutex> lk(m_posMtx);
+    refresh_cached_size_locked();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // 初始化方法
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -242,6 +258,11 @@ PyObject *ThreadIOBackend::read(int64_t size) {
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = (int64_t)m_cachedFileSize - (int64_t)m_filePos;
+        if (rem <= 0) {
+            // 可能只是缓存长度过期（外部追加）：判 EOF 前先问一次内核
+            refresh_cached_size_locked();
+            rem = (int64_t)m_cachedFileSize - (int64_t)m_filePos;
+        }
         if (rem <= 0) { 
             UR_DEBUG_LOG0("ThreadIOBackend::read EOF");
             resolve_bytes(future, nullptr, 0); 
@@ -276,6 +297,8 @@ PyObject *ThreadIOBackend::read(int64_t size) {
         ssize_t got = pread(m_fd, req->buf(), readSize, offset);
         UR_DEBUG_LOG("ThreadIOBackend::read task done, got=%zd", got);
         if (got >= 0) {
+            // 短读 = 真碰到 EOF（文件被外部截短 / 读穿了缓存长度）：校正缓存
+            if (static_cast<size_t>(got) < readSize) refresh_cached_size();
             complete_ok(req, static_cast<size_t>(got));
         } else {
             UR_DEBUG_LOG("ThreadIOBackend::read task failed, errno=%d", errno);
@@ -323,6 +346,11 @@ PyObject *ThreadIOBackend::read_at(int64_t offset, int64_t size) {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = (int64_t)m_cachedFileSize - offset;
         if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：offset 看着越界时先问内核
+            refresh_cached_size_locked();
+            rem = (int64_t)m_cachedFileSize - offset;
+        }
+        if (rem <= 0) {
             // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
             UR_DEBUG_LOG0("ThreadIOBackend::read_at offset beyond EOF");
             resolve_bytes(future, nullptr, 0);
@@ -356,6 +384,7 @@ PyObject *ThreadIOBackend::read_at(int64_t offset, int64_t size) {
         ssize_t got = pread(m_fd, req->buf(), readSize, static_cast<off_t>(offset));
         UR_DEBUG_LOG("ThreadIOBackend::read_at task done, got=%zd", got);
         if (got >= 0) {
+            if (static_cast<size_t>(got) < readSize) refresh_cached_size();  // 短读 → 校正缓存
             complete_ok(req, static_cast<size_t>(got));
         } else {
             UR_DEBUG_LOG("ThreadIOBackend::read_at task failed, errno=%d", errno);
@@ -457,6 +486,8 @@ PyObject *ThreadIOBackend::seek(int64_t offset, int whence) {
         } else if (whence == 1) {
             new_pos = static_cast<int64_t>(m_filePos) + offset;
         } else if (whence == 2) {
+            // SEEK_END 问的就是「现在多长」：缓存值可能过期（外部追加）
+            refresh_cached_size_locked();
             new_pos = static_cast<int64_t>(m_cachedFileSize) + offset;
         } else {
             resolve_exc(future, g_ValueError, 0, "Invalid whence value");
@@ -664,6 +695,11 @@ PyObject* ThreadIOBackend::readinto(PyObject* buf) {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
         if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：判 EOF 前先问内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        }
+        if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject* z = PyLong_FromLong(0);
             resolve_ok(future, z); Py_DECREF(z);
@@ -679,7 +715,10 @@ PyObject* ThreadIOBackend::readinto(PyObject* buf) {
     m_pending.fetch_add(1, std::memory_order_relaxed);
     enqueue_task([this, req, offset, readSize]() {
         ssize_t got = pread(m_fd, req->buf(), readSize, static_cast<off_t>(offset));
-        if (got >= 0) complete_ok(req, static_cast<size_t>(got));
+        if (got >= 0) {
+            if (static_cast<size_t>(got) < readSize) refresh_cached_size();  // 短读 → 校正缓存
+            complete_ok(req, static_cast<size_t>(got));
+        }
         else complete_error(req, static_cast<DWORD>(errno));
     });
     

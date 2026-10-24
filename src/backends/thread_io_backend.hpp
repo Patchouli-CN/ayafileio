@@ -51,6 +51,13 @@ private:
     // 初始化方法
     void ensure_loop_initialized();
     void enqueue_task(std::function<void()> task);
+
+    // 用内核真值刷新 m_cachedFileSize。缓存是 open 时的快照，之后只由本会话的
+    // 写入/截断更新——别的进程（或同进程另一个句柄）追加的数据这里看不到，
+    // 把旧长度当真相就会静默少读。只在「已到 EOF 判决点」或「发生短读」时调用，
+    // 热路径一次 syscall 都不多加。
+    void refresh_cached_size_locked();   // 调用方须持 m_posMtx
+    void refresh_cached_size();          // 自行加锁（供 worker 线程的完成路径用）
 };
 
 } // namespace ayafileio

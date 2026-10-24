@@ -24,10 +24,12 @@ import pytest
 
 import ayafileio
 
-# fileno 的「复制句柄」语义是 Windows IOCP 专属：POSIX 后端直接把真实 fd
-# 交给调用方（与标准库一致，关掉它就等于关掉文件），没有可复制的东西。
+# 只有**引擎语义**不一样的地方才 skip。fileno() 的「复制句柄」是 Windows IOCP
+# 专属：POSIX 后端直接把真实 fd 交给调用方（与标准库一致，关掉它就等于关掉
+# 文件），没有可复制的东西。fd 稳定、句柄独立这些性质则该跨平台成立。
 WIN_ONLY = pytest.mark.skipif(
-    sys.platform != "win32", reason="fileno() 复制句柄只存在于 Windows IOCP 后端"
+    sys.platform != "win32",
+    reason="复制句柄语义只存在于 Windows IOCP 后端（POSIX 返回真实 fd）",
 )
 
 
@@ -36,9 +38,13 @@ WIN_ONLY = pytest.mark.skipif(
 # ════════════════════════════════════════════════════════════════════════════
 
 
-@WIN_ONLY
 async def test_fileno_is_stable_and_not_leaked(tmp_path):
-    """反复调用 fileno() 返回同一个 fd（不再每次新建一个 CRT 描述符）。"""
+    """反复调用 fileno() 返回同一个 fd，且它真的指向这个文件。
+
+    不 gated：所有平台都该满足。Windows 曾经每次调用新建一个 CRT 描述符
+    （连续调返回 2003、2004、2005），POSIX 一直返回同一个真实 fd——所以这条
+    用例对两种后端都有判别力。
+    """
     path = tmp_path / "stable.bin"
     path.write_bytes(b"x" * 64)
 
@@ -282,14 +288,11 @@ def test_loops_do_not_accumulate_across_loops(tmp_path):
 # 文件大小缓存
 # ════════════════════════════════════════════════════════════════════════════
 
-# 大小缓存（open 时快照）目前只在 Windows IOCP 后端做了「到 EOF 判决点就
-# 问内核」的刷新。macOS 的 dispatch_io 后端与 POSIX 线程池后端有同一套缓存，
-# 尚未跟进——那两个后端的修复留待能在对应平台上验证时再做，这里先不假装
-# 跨平台通过。
-WIN_ONLY_SIZE_CACHE = WIN_ONLY
+# 文件大小缓存（open 时快照）在**三个后端**都已改成「到 EOF 判决点或短读时
+# 问一次内核」，所以这几条不 gated：它们是库的通用契约，不是某个引擎的实现
+# 细节。真要在某平台上不成立，那是库的 bug，应该红——而不是 skip。
 
 
-@WIN_ONLY_SIZE_CACHE
 async def test_read_sees_external_append(tmp_path):
     """别的句柄追加数据后，read_at / seek 必须看到新长度。
 
@@ -310,7 +313,6 @@ async def test_read_sees_external_append(tmp_path):
         assert await handle.seek(0, 2) == 18   # 10 + len("APPENDED")
 
 
-@WIN_ONLY_SIZE_CACHE
 async def test_read_continues_after_external_append(tmp_path):
     """顺序读到 EOF 之后再来一次 read()，应该看到外部追加的内容。"""
     path = tmp_path / "tail.bin"
@@ -324,7 +326,6 @@ async def test_read_continues_after_external_append(tmp_path):
         assert await handle.read() == b""
 
 
-@WIN_ONLY_SIZE_CACHE
 async def test_truncated_file_does_not_return_stale_garbage(tmp_path):
     """文件被外部截短后，read() 不能返回超出新长度的内容，且长度要收敛。"""
     path = tmp_path / "shrink.bin"
@@ -340,7 +341,6 @@ async def test_truncated_file_does_not_return_stale_garbage(tmp_path):
         assert await handle.tell() == 20
 
 
-@WIN_ONLY_SIZE_CACHE
 async def test_readinto_sees_external_append(tmp_path):
     """readinto 走同一条缓存长度判决，短读后必须刷新。"""
     path = tmp_path / "into.bin"

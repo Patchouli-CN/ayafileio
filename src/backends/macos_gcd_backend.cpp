@@ -287,6 +287,17 @@ MacOSGCDBackend::~MacOSGCDBackend() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// 缓存文件大小的刷新（见头文件里的说明）
+// ════════════════════════════════════════════════════════════════════════════
+
+void MacOSGCDBackend::refresh_cached_size_locked() {
+    struct stat st;
+    if (fstat(m_fd, &st) == 0 && st.st_size >= 0) {
+        m_cachedFileSize = static_cast<uint64_t>(st.st_size);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // 初始化
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -458,6 +469,11 @@ PyObject* MacOSGCDBackend::read(int64_t size) {
         
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
         if (rem <= 0) {
+            // 可能只是缓存长度过期（外部追加）：判 EOF 前先问一次内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        }
+        if (rem <= 0) {
             UR_DEBUG_LOG0("MacOSGCDBackend::read EOF");
             resolve_bytes(future, nullptr, 0);
             return future;
@@ -581,6 +597,11 @@ PyObject* MacOSGCDBackend::read_at(int64_t offset, int64_t size) {
         std::lock_guard<std::mutex> lk(m_posMtx);
 
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - offset;
+        if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：offset 看着越界时先问内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - offset;
+        }
         if (rem <= 0) {
             // offset 越界（≥ 文件大小）→ pread 语义：空 bytes
             UR_DEBUG_LOG0("MacOSGCDBackend::read_at offset beyond EOF");
@@ -787,6 +808,8 @@ PyObject* MacOSGCDBackend::seek(int64_t offset, int whence) {
         } else if (whence == 1) {
             new_pos = static_cast<int64_t>(m_filePos) + offset;
         } else if (whence == 2) {
+            // SEEK_END 问的就是「现在多长」：缓存值可能过期（外部追加）
+            refresh_cached_size_locked();
             new_pos = static_cast<int64_t>(m_cachedFileSize) + offset;
         } else {
             resolve_exc(future, g_ValueError, 0, "Invalid whence value");
@@ -1063,6 +1086,11 @@ PyObject* MacOSGCDBackend::readinto(PyObject* buf) {
     {
         std::lock_guard<std::mutex> lk(m_posMtx);
         int64_t rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        if (rem <= 0) {
+            // 缓存长度可能过期（外部追加）：判 EOF 前先问内核
+            refresh_cached_size_locked();
+            rem = static_cast<int64_t>(m_cachedFileSize) - static_cast<int64_t>(m_filePos);
+        }
         if (rem <= 0) {
             PyBuffer_Release(&view);
             PyObject* z = PyLong_FromLong(0);
