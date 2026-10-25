@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-25
+
+> **Versioning policy**: strict semver starts at `2.0.0`. Public Python behavior is documented in
+> `docs/migration-2.0.md`; private C++ files, classes and namespaces are not a stable ABI.
+
+### Changed
+- **New native layering.** `core`, `platform`, `backend`, `discovery`, `diagnostics` and
+  `bindings/python` now have matching directory and namespace boundaries. Backends produce native
+  completions and no longer create or resolve Python Futures.
+- **Python package moved to `python/ayafileio/`.** Mode parsing, text streaming and batch helpers
+  were extracted from `_async_file.py` without changing its public API.
+- **Native completion and state model.** `Buffer`, `Completion`, `Operation`, `FileState` and
+  `BackendRegistry` are shared by all backends. Zero-copy `PyBytes`, held `Py_buffer`, readinto,
+  inline completion and the request freelist remain supported.
+- **IOCP decomposition.** Context, sessions, submission, worker and request code are separate;
+  the Python-specific batcher registry is unified across all platforms.
+- **Build and tests.** CMake now builds separate core/backend/discovery/diagnostics object
+  libraries and native `aya_core_tests` and `aya_diagnostics_tests`. Python tests live in
+  `tests/python/`; benchmarks live in `benchmarks/`.
+- **Architecture guard.** `tools/check_cpp_dependencies.py` validates include direction,
+  component cycles, namespace consistency and unresolved project includes. It runs in pytest,
+  CTest and a dedicated CI job, with deliberately failing checker regression cases.
+- **Diagnostics decomposition.** Yuyuko allocation tracking, asynchronous logging, CRC checks and
+  HTML reporting have separate headers; `memory_tracker.hpp` retains the existing macro interface.
+
+### Fixed
+- Async open preserves native exception types instead of wrapping them in `RuntimeError`.
+- Closed event loops stop retrying completion delivery instead of producing repeated errors.
+- IOCP failure ownership was made explicit; the association-failure path no longer risks duplicate
+  handle or Future-reference releases.
+- The MSVC Yuyuko option now actually defaults to ON as documented and reaches the diagnostics
+  target; diagnostics use lifecycle hooks instead of being pulled into the hot request header.
+- Stopping Yuyuko asynchronous logging now flushes buffered messages before closing the log.
+- Routine Yuyuko allocation/free traces stay off `stderr` unless asynchronous logging is explicitly enabled; memory-safety diagnostics retain the synchronous fallback.
+
+### Compatibility
+- Python public APIs and their semantics remain compatible as described in `docs/migration-2.0.md`.
+- No public C++ or C ABI and no other-language bindings are introduced in this release.
+
 ## [1.16.0] - 2026-10-24
 
 > **Versioning policy**: `2.0.0` is reserved for the upcoming **architecture layering** and will not be

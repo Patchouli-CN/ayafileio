@@ -40,6 +40,19 @@ env:
   PYTHONIOENCODING: utf-8
 
 jobs:
+  architecture:
+    name: "C++ architecture dependencies"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Check dependency and namespace boundaries
+        run: python tools/check_cpp_dependencies.py
+
   test-linux:
     name: "Linux (Python ${{ matrix.python-version }})"
     runs-on: ubuntu-24.04
@@ -372,7 +385,7 @@ jobs:
     - name: Confirm the forced backend is active
       # 这一步必须走 pytest：切后端在 conftest 里做，下面这条用例会断言
       # AYAFILEIO_TEST_BACKEND 真的生效——否则整轮 CI 就是在默认后端上假绿。
-      run: python -m pytest tests/test_backend_select.py -q
+      run: python -m pytest tests/python/test_backend_select.py -q
     - name: Run tests on the fallback backend
       timeout-minutes: 8
       run: python -m pytest -q
@@ -464,9 +477,9 @@ jobs:
       shell: bash
       run: |
         set +e
-        python tests/t_compare.py
+        python benchmarks/t_compare.py
         COMPARE_EXIT=$?
-        python tests/test_loguru.py
+        python tests/python/test_loguru.py
         LOGURU_EXIT=$?
         set -e
 

@@ -5,6 +5,44 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [2.0.0] - 2026-10-25
+
+> **版本策略**：从 `2.0.0` 起严格执行 semver。公开 Python 行为见 `docs/migration-2.0.md`；
+> 私有 C++ 文件、类与 namespace 不构成稳定 ABI。
+
+### 变更
+- **新的原生分层。** `core`、`platform`、`backend`、`discovery`、`diagnostics` 与
+  `bindings/python` 的目录和 namespace 边界一一对应。后端只产出原生完成结果，
+  不再直接创建或 resolve Python Future。
+- **Python 包迁到 `python/ayafileio/`。** 模式解析、文本流与批量辅助从 `_async_file.py`
+  拆出，公开 API 保持不变。
+- **统一原生完成与状态模型。** `Buffer`、`Completion`、`Operation`、`FileState` 与
+  `BackendRegistry` 由各后端共享；预建 PyBytes、持有 Py_buffer、readinto、内联完成和
+  请求 freelist 继续保留。
+- **IOCP 拆分。** 上下文、Session、提交、worker 与请求分别独立；各平台共用一套
+  Python 侧 batcher 注册表。
+- **构建与测试。** CMake 改为独立的 core/backend/discovery/diagnostics 对象库，并新增
+  原生 `aya_core_tests` 与 `aya_diagnostics_tests`。pytest 位于 `tests/python/`，
+  基准脚本位于 `benchmarks/`。
+- **架构依赖门禁。** `tools/check_cpp_dependencies.py` 检查 include 方向、组件环、
+  namespace 一致性与未解析项目 include，接入 pytest、CTest 和独立 CI job；同时带有
+  故意违规的检查器回归用例。
+- **diagnostics 拆分。** Yuyuko 的分配追踪、异步日志、CRC 校验和 HTML 报告分别独立，
+  `memory_tracker.hpp` 保留原有宏接口。
+
+### 修复
+- 异步打开保留原生异常类型，不再把 FileNotFoundError 包成 RuntimeError。
+- 事件循环关闭后停止反复投递完成结果，不再持续刷出异常日志。
+- 明确 IOCP 失败路径的所有权，避免关联失败时重复释放句柄或 Future 引用。
+- MSVC 的 Yuyuko 默认开关现在与文档一致，并传递到 diagnostics 构建目标；
+  diagnostics 改为通过生命周期钩子接入，不再由热路径公共头直接包含。
+- 停止 Yuyuko 异步日志时，先写完缓冲消息再关闭文件。
+- 常规 Yuyuko 分配/释放轨迹只在显式启用异步日志后记录，不再污染 `stderr`；内存安全诊断仍保留同步输出回退。
+
+### 兼容性
+- Python 公共 API 及语义保持 `docs/migration-2.0.md` 所述的兼容性。
+- 本版本不新增 C++/C ABI，也不新增其它语言绑定。
+
 ## [1.16.0] - 2026-10-24
 
 > **版本策略**：`2.0.0` 保留给即将进行的**架构分层**，不用于发布功能。从 `2.0.0` 起严格执行

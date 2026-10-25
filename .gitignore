@@ -43,5 +43,13 @@ __pycache__/
 test_1gb.bin
 test_small.bin
 
+# Native build
+*.obj
+*.o
+
+# Generated benchmarks
+/benchmark_results.json
+/benchmark_results_detailed.json
+
 # scratch
 temp/

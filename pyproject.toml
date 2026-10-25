@@ -53,9 +53,9 @@ cmake.args = [
 
 # 全部测试统一走 pytest：`python -m pytest` 一条命令覆盖 unittest 风格、
 # 函数风格和异步用例（tests/test_base.py 里那 72 个 async def 也在内）。
-# 单个文件仍然可以直接 `python tests/test_xxx.py`，脚本模式会打印更详细报告。
+# 单个文件仍然可以直接 `python tests/python/test_xxx.py`，脚本模式会打印更详细报告。
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/python"]
 python_files = ["test_*.py"]
 # 本仓库的历史命名（AcopyTests / WrapperTests / FileLifecycleTests …）不匹配
 # pytest 默认的 Test* 前缀，显式列出来，避免再靠 unittest discover 兜底。
@@ -75,8 +75,8 @@ dev = [
     "aiofiles",
     "pyyaml",
     "rich",
+    "build",
 ]
 
-# 让系统为每个 Python 版本生成原生 wheel
-# [tool.scikit-build.wheel]
-# py-api = "cp310"
+[tool.scikit-build.wheel]
+packages = ["python/ayafileio"]

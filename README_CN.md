@@ -19,6 +19,7 @@
 ## 更新日志
 
 见 [CHANGES_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/CHANGES_CN.md)。
+2.0 架构与依赖规则见 [architecture.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/architecture.md)。
 完整使用指南见 [USAGE_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/USAGE_CN.md)。
 在用 ayafileio 玩有趣的东西？见 [STORY_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/STORY_CN.md)。
 
@@ -332,9 +333,9 @@ def drain_buffer_pool() -> None: ...            # 清空缓冲区池中的所有
 
 ## 基准测试
 
-每次推送都会在 CI 上三平台跑完整基准（`tests/t_compare.py`），JSON 结果作为
+每次推送都会在 CI 上三平台跑完整基准（`benchmarks/t_compare.py`），JSON 结果作为
 artifact 挂在每次运行上。除非标注*本地*，以下数字来自最近一次 CI 运行
-（GitHub Actions, Python 3.14）。本地复现：`python tests/t_compare.py`。
+（GitHub Actions, Python 3.14）。本地复现：`python benchmarks/t_compare.py`。
 
 ### 随机 4 KiB 读（Linux, io_uring）
 
@@ -368,7 +369,7 @@ GitHub 的 Windows runner 对原始顺序吞吐限流明显，这几个 CI 格�
   4 KiB 顺序读 6.8K → 499K ops/s（对 aiofiles 27.2x）、4 KiB 随机读 x1
   4.6K → 432K ops/s（54.2x；x64 416K，25.7x）、64 KiB 顺序读 384 → 6,441
   MB/s（6.7x）；写路径不走快速路径（4 MiB 顺序写 8.2 GB/s）。macos-15 CI
-  runner 实测（Python 3.14，`tests/t_compare.py` 口径）；小读格子在共享
+  runner 实测（Python 3.14，`benchmarks/t_compare.py` 口径）；小读格子在共享
   runner 上轮间抖动约 2x——此处引用的是最新一轮的数字，在 macOS fd 泄漏
   修复（修复前每次 open/close 都有额外同步开销——open 是同步版本，
   返回底层同步创建的异步文件句柄）之后测得。
@@ -382,7 +383,7 @@ GitHub 的 Windows runner 对原始顺序吞吐限流明显，这几个 CI 格�
 | `shutil.copyfile` | 0.217 s | 2,358 MiB/s |
 | `acopy()` 强制流水线 | 0.330 s | 1,554 MiB/s |
 
-### 并发日志写入（`tests/test_loguru.py`）
+### 并发日志写入（`tests/python/test_loguru.py`）
 
 10K 条 × 128 B 并发写 5 个文件：各轮次对"同步写 + 线程池"快 3.5–5.2x。
 
