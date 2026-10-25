@@ -10,7 +10,6 @@ namespace ayafileio::core {
 struct BackendInfo {
     std::string platform;
     std::string backend;
-    bool is_truly_async{false};
     std::string os_version;
     std::string description;
 };

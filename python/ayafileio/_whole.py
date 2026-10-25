@@ -68,7 +68,7 @@ async def read_bytes_many(paths: Iterable[str | os.PathLike[str]], *, max_concur
     """并发读取多个文件，返回与输入顺序一致的 ``bytes`` 列表。
 
     打开动作经 :func:`ayafileio.aopen` 优先使用 Linux io_uring（不可用时回退 C++ 线程池）（多个 OS open
-    真正并行），读取走各平台真异步后端；``max_concurrency`` 限制最大
+    真正并行），读取走各平台原生后端；``max_concurrency`` 限制最大
     并发数，避免海量路径打爆 fd。任一路径失败则整体抛出（同
     ``asyncio.gather`` 默认语义）。
 
@@ -111,7 +111,7 @@ async def write_bytes_many(pairs: Iterable[tuple[str | os.PathLike[str], bytes]]
     """并发写入多个文件，返回与输入顺序一致的字节数列表。
 
     *pairs* 是 ``(path, data)`` 对的可迭代对象（覆盖写）。打开动作经
-    :func:`ayafileio.aopen` 优先使用 Linux io_uring（不可用时回退 C++ 线程池），写入走各平台真异步后端；
+    :func:`ayafileio.aopen` 优先使用 Linux io_uring（不可用时回退 C++ 线程池），写入走各平台原生后端；
     ``max_concurrency`` 限制最大并发数。任一失败则整体抛出（同
     ``asyncio.gather`` 默认语义）——注意批量不是事务：抛出时其它
     文件的写入可能已经落盘。

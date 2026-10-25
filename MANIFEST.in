@@ -2,11 +2,8 @@
 include README.md
 include README_CN.md
 include docs/CHANGES.md
-include docs/CHANGES_CN.md
 include docs/STORY.md
-include docs/STORY_CN.md
 include docs/USAGE.md
-include docs/USAGE_CN.md
 include LICENSE
 recursive-include python/ayafileio *.py *.pyd *.pyi py.typed
 include CMakeLists.txt
@@ -15,7 +12,7 @@ include pyproject.toml
 include docs/architecture.md
 include docs/migration-2.0.md
 include docs/SECURITY.md
-include docs/SECURITY_CN.md
+recursive-include docs/zh_CN *.md
 recursive-include src *.cpp *.hpp *.h
 recursive-include tests/core *.cpp
 recursive-include tests/python *.py *.yaml

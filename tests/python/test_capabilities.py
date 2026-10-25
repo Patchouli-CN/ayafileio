@@ -29,7 +29,7 @@ def test_backend_info():
     info = ayafileio.get_backend_info()
     check("platform 合法", info["platform"] in ("windows", "linux", "macos", "posix"))
     check("backend 非空", bool(info["backend"]))
-    check("is_truly_async 是 bool", isinstance(info["is_truly_async"], bool))
+    check("不包含 is_truly_async", "is_truly_async" not in info)
     check("os_version 是非空字符串", isinstance(info["os_version"], str) and bool(info["os_version"]))
     check("description 非空", bool(info["description"]))
 
@@ -100,8 +100,7 @@ def test_backend_detail():
             check("kernel_managed_workqueue", detail["kernel_managed_workqueue"] is True)
     else:
         check("线程池降级 completion_model=False", detail["completion_model"] is False)
-        check("线程池降级无 completion_model=True 的假象",
-              caps["is_truly_async"] is False)
+        check("线程池不包含 is_truly_async", "is_truly_async" not in caps)
 
 
 def test_cached_consistency():

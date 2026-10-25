@@ -31,7 +31,7 @@
 "   Effective config: {cfg}": "   有效配置: {cfg}"
 
 # ── stress_single_file.py ──────────────────────────────────────────────────
-"ayafileio Single-File Concurrent Stress Test — IOCP True Async Limit": "ayafileio 单文件并发压测 — IOCP 真异步极限测试"
+"ayafileio Single-File Concurrent Stress Test — IOCP Kernel Async Limit": "ayafileio 单文件并发压测 — IOCP 内核异步极限测试"
 "Preparing test file ({size}MB)...": "准备测试文件 ({size}MB)..."
 "  File created: {size}MB, time {elapsed}s": "  文件创建完成: {size}MB, 耗时 {elapsed}s"
 "  ── Read {n} concurrent (chunk={chunk}B) ──": "  ── 读取 {n} 并发 (chunk={chunk}B) ──"

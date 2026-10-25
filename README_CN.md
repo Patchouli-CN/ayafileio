@@ -14,26 +14,26 @@
 > **「幻想郷最速のファイルI/O、風神少女の如く」**
 > *—— 射命丸文*
 
-跨平台异步文件 I/O，用的是真正的内核后端：Windows 上 IOCP，Linux 上 io_uring（内核 5.1+），macOS 上 Dispatch I/O (GCD)。没有拿线程池冒充异步的把戏——`ayafileio.open()` 会自动选对后端。
+跨平台异步文件 I/O：Windows 使用 IOCP，Linux 使用 io_uring（内核 5.1+），macOS 使用 Dispatch I/O (GCD)；原生后端不可用时回退线程池。`ayafileio.open()` 会自动选择后端。
 
 ## 更新日志
 
-见 [CHANGES_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/CHANGES_CN.md)。
-2.0 架构与依赖规则见 [architecture.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/architecture.md)。
-完整使用指南见 [USAGE_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/USAGE_CN.md)。
-在用 ayafileio 玩有趣的东西？见 [STORY_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/STORY_CN.md)。
+见 [CHANGES_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/zh_CN/CHANGES_CN.md)。
+2.0 架构与依赖规则见 [architecture.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/architecture.md)，迁移说明见 [migration-2.0_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/zh_CN/migration-2.0_CN.md)。
+完整使用指南见 [USAGE_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/zh_CN/USAGE_CN.md)。
+在用 ayafileio 玩有趣的东西？见 [STORY_CN.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/zh_CN/STORY_CN.md)。
 
 ## 后端
 
-| 平台 | 后端 | 真异步 | 说明 |
-|------|------|:------:|------|
+| 平台 | 后端 | 内核 I/O | 说明 |
+|------|------|:--------:|------|
 | Windows | IOCP | 是 | NT 内核原生 I/O 完成端口 |
 | Linux | io_uring | 是 | 内核 5.1+ |
-| macOS | Dispatch I/O | 是 | GCD 内核级异步 I/O |
+| macOS | Dispatch I/O | 是 | GCD 内核托管 I/O |
 
 ## 特性
 
-- 真异步平台零线程开销——没有后台线程，也不需要 `run_in_executor`
+- 内核后端无需把阻塞系统调用交给 Python executor
 - 内核级完成通知：IOCP / io_uring / Dispatch I/O
 - 缓存命中内联快车道：热路径小读在调用线程就地完成，await 不让出事件循环（IOCP 同步完成 / io_uring COOP_TASKRUN / macOS mincore + pread）
 - 单文件句柄抗住数千并发操作
@@ -99,9 +99,9 @@ async with ayafileio.open("data.bin", "rb") as f:
 import ayafileio
 
 print(ayafileio.get_backend_info())
-# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, 'os_version': '10.0.19045', ...}
-# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, 'os_version': 'Linux 6.5.0-...', ...}
-# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True, 'os_version': 'Darwin 24.5.0', ...}
+# Windows: {'platform': 'windows', 'backend': 'iocp', 'os_version': '10.0.19045', ...}
+# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'os_version': 'Linux 6.5.0-...', ...}
+# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'os_version': 'Darwin 24.5.0', ...}
 ```
 
 ## 能力发现

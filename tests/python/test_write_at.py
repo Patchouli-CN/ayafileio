@@ -67,10 +67,10 @@ class FileLifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         # 线程池回退构建（例如没编 io_uring 的 Linux）在 import 时就会发
-        # 「假异步」警告——那是构建事实的提示，与这里要守的「析构路径不能抛
+        # 后端提示——那是构建事实的提示，与这里要守的「析构路径不能抛
         # unraisable / 不能往 stderr 漏东西」无关，所以按后端状态放行。
         stderr = result.stderr
-        if not ayafileio.get_backend_info()["is_truly_async"]:
+        if ayafileio.get_backend_info()["backend"] == "thread_pool":
             import re
             stderr = re.sub(r"^.*UserWarning: ayafileio:.*$", "", stderr, flags=re.M)
 

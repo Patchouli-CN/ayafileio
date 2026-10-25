@@ -24,7 +24,6 @@ nb::dict py_get_backend_info() {
     nb::dict result;
     result["platform"] = info.platform.c_str();
     result["backend"] = info.backend.c_str();
-    result["is_truly_async"] = info.is_truly_async;
     result["os_version"] = info.os_version.c_str();
     result["description"] = info.description.c_str();
     return result;

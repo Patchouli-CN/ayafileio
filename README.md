@@ -27,15 +27,15 @@ Using ayafileio in an interesting way? See [STORY.md](https://github.com/Patchou
 
 ## Backends
 
-| Platform | Backend | True async | Notes |
+| Platform | Backend | Kernel I/O | Notes |
 |----------|---------|:----------:|-------|
 | Windows | IOCP | Yes | NT kernel I/O Completion Ports |
 | Linux | io_uring | Yes | Kernel 5.1+ |
-| macOS | Dispatch I/O | Yes | GCD kernel-level async I/O |
+| macOS | Dispatch I/O | Yes | GCD kernel-managed I/O |
 
 ## Features
 
-- Zero thread overhead on true-async platforms — no background threads
+- Kernel backends avoid Python executor offloading
 - Kernel-level completion: IOCP / io_uring / Dispatch I/O
 - Cache-hit inline fast paths: hot small reads complete on the calling thread (IOCP sync-completion / io_uring COOP_TASKRUN / macOS mincore + pread)
 - Thousands of concurrent operations on a single file handle
@@ -102,9 +102,9 @@ async with ayafileio.open("data.bin", "rb") as f:
 import ayafileio
 
 print(ayafileio.get_backend_info())
-# Windows: {'platform': 'windows', 'backend': 'iocp', 'is_truly_async': True, 'os_version': '10.0.19045', ...}
-# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, 'os_version': 'Linux 6.5.0-...', ...}
-# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'is_truly_async': True, 'os_version': 'Darwin 24.5.0', ...}
+# Windows: {'platform': 'windows', 'backend': 'iocp', 'os_version': '10.0.19045', ...}
+# Linux:   {'platform': 'linux', 'backend': 'io_uring', 'os_version': 'Linux 6.5.0-...', ...}
+# macOS:   {'platform': 'macos', 'backend': 'dispatch_io', 'os_version': 'Darwin 24.5.0', ...}
 ```
 
 ## Capability discovery

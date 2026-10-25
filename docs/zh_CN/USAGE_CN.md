@@ -275,12 +275,12 @@ ayafileio.reset_config()
 
 ```python
 print(ayafileio.get_backend_info())
-# {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, ...}
+# {'platform': 'linux', 'backend': 'io_uring', ...}
 ```
 
 后端自动选择：Windows 用 IOCP，Linux 5.1+ 用 io_uring，macOS 用
 Dispatch I/O。原生后端不可用时（旧内核、受限容器），自动降级到线程池
-后端，`is_truly_async` 为 `False`——两种情况 API 完全一致。
+后端，`backend` 为 `thread_pool`——两种情况 API 完全一致。
 
 ## 池管理
 

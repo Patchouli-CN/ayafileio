@@ -136,7 +136,7 @@ async def main() -> None:
         )
 
     info = ayafileio.get_backend_info()
-    print(f"\n后端: {info['backend']} (真异步: {info['is_truly_async']})")
+    print(f"\n后端: {info['backend']}")
     print(f"\n📊 日志: {LOG_COUNT} 条 × {len(MESSAGE)} 字节, 并发写 {NUM_FILES} 个文件\n")
 
     t_aya = await _aya_round()

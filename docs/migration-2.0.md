@@ -1,6 +1,6 @@
 # Migrating to ayafileio 2.0.0
 
-ayafileio 2.0.0 is an architecture-layering release. It does not introduce a public C++ or C ABI, and it does not require applications to rewrite their Python file-I/O code.
+ayafileio 2.0.0 is an architecture-layering release. It does not introduce a public C++ or C ABI. File-I/O calls remain compatible, with the API metadata exception listed below.
 
 ## What stays compatible
 
@@ -12,13 +12,17 @@ The following remain part of the Python public contract unless a future major re
 - `read()`, `readline()`, `readinto()`, `chunk()`, `read_at()`, `write_at()`, `read_many()` and `write_many()`;
 - `seek()`, `tell()`, `truncate()`, `flush()`, `close()` and `fileno()`;
 - `wrap_file()`, `acopy()` and whole-file/batch helpers;
-- configuration keys, backend names, backend information and capability matrices;
+- configuration keys, backend names, and the remaining backend-information and capability fields;
 - native buffer pinning and short-write behavior;
 - the existing debug entry points.
 
 Exceptions retain their intended types. In particular, native open failures remain `FileNotFoundError` where appropriate; they are not converted to a generic `RuntimeError`. On Windows, wrapping an existing fd continues to use IOCP even when path opens are forced to another backend.
 
 Deprecated `handle_pool_max_per_key` and `handle_pool_max_total` configuration keys remain accepted and ignored for compatibility. This is not a new promise to restore the removed handle pool.
+
+## Removed in 2.0
+
+- `is_truly_async` is removed from `get_backend_info()` and `get_capabilities()`. Use `info["backend"]` to identify the I/O mechanism: `iocp`, `io_uring`, `dispatch_io` or `thread_pool`. Code that checked `not info["is_truly_async"]` should check `info["backend"] == "thread_pool"` instead. Asynchronous Python APIs and kernel completion are different layers; a thread pool is not "fake async".
 
 ## What changed internally
 
@@ -71,4 +75,4 @@ Internal restructuring, file moves and namespace changes alone do not require an
 
 ## Validation status
 
-The 2.0 worktree is validated on Windows with both IOCP and the thread-pool backend, plus native CTest and architecture checks. Linux io_uring and macOS Dispatch I/O use the same new interfaces and CI configuration, but those platforms must still be exercised by their respective CI runners before claiming runtime verification there.
+The 2.0 worktree is covered by CI on Windows, Linux and macOS, including native backends, thread-pool fallbacks and free-threaded interpreters. Backend-specific behavior is exercised on the corresponding runners.

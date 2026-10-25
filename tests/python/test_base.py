@@ -1855,7 +1855,7 @@ def main():
     print(f"\nPython: {sys.version}")
     print(f"Platform: {sys.platform}")
     info = ayafileio.get_backend_info()
-    print(f"Backend: {info['backend']} (truly_async: {info['is_truly_async']})")
+    print(f"Backend: {info['backend']}")
     print(
         f"Timeout diagnostics: {'enabled' if runner.enable_timeout_diag else 'disabled'}"
     )

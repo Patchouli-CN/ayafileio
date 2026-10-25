@@ -107,18 +107,18 @@ def test_backend_info_reflects_choice():
         ayafileio.configure({"backend": name})
         info = ayafileio.get_backend_info()
         assert info["backend"] == name, f"backend={name} 但 get_backend_info 报 {info['backend']}"
-        assert info["is_truly_async"] is (name != "thread_pool")
+        assert "is_truly_async" not in info
 
 
 def test_capabilities_follow_choice():
-    """能力矩阵必须跟着有效后端走，否则「现在到底是不是真异步」无从判断。"""
+    """能力矩阵必须跟着有效后端走，否则上报会与实际配置不一致。"""
     if "thread_pool" not in _available_fixed():
         pytest.skip("本平台没有线程池后端")
 
     ayafileio.configure({"backend": "thread_pool"})
     caps = ayafileio.get_capabilities()
     assert caps["backend"] == "thread_pool"
-    assert caps["is_truly_async"] is False
+    assert "is_truly_async" not in caps
     assert caps["backend_detail"]["completion_model"] is False
 
 

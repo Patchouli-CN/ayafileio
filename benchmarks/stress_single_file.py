@@ -207,7 +207,7 @@ STEPS = [10_000, 50_000, 100_000, 250_000, 500_000]
 
 
 async def main(concurrent: int = DEFAULT_CONCURRENT):
-    title = i18n("ayafileio Single-File Concurrent Stress Test — IOCP True Async Limit")
+    title = i18n("ayafileio Single-File Concurrent Stress Test — IOCP Kernel Async Limit")
     print(f"╔{'═' * (len(title) + 4)}╗")
     print(f"║   {title}   ║")
     print(f"╚{'═' * (len(title) + 4)}╝")

@@ -1,6 +1,6 @@
 # ayafileio Usage Guide
 
-[简体中文](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/USAGE_CN.md)
+[简体中文](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/zh_CN/USAGE_CN.md)
 
 This guide covers day-to-day use of ayafileio: opening files, the read/write
 APIs, positioned I/O, batch operations, configuration, and migration notes.
@@ -294,13 +294,13 @@ out of Windows.
 
 ```python
 print(ayafileio.get_backend_info())
-# {'platform': 'linux', 'backend': 'io_uring', 'is_truly_async': True, ...}
+# {'platform': 'linux', 'backend': 'io_uring', ...}
 ```
 
 Backend selection is automatic: IOCP on Windows, io_uring on Linux 5.1+,
 Dispatch I/O on macOS. Where the native backend is unavailable (old kernel,
 restricted container), ayafileio falls back to a thread-pool backend and
-`is_truly_async` reads `False` — the API is identical either way.
+`backend` reads `thread_pool` — the API is identical either way.
 
 ## Pool management
 

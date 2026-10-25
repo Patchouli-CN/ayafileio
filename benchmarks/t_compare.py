@@ -411,7 +411,7 @@ async def main() -> int:
     print("ayafileio benchmark — cross-platform comparison")
     print(f"  platform : {platform.system()} {platform.release()} ({platform.machine()})")
     print(f"  python   : {platform.python_version()}")
-    print(f"  backend  : {info['backend']} (truly async: {info['is_truly_async']})")
+    print(f"  backend  : {info['backend']}")
     print(f"  compare  : {'aiofiles (thread pool, buffered defaults)' if HAS_AIOFILES else 'not installed — ayafileio only'}")
     print(f"  rounds   : {ROUNDS}x{ROUND_SECONDS}s measured + {WARMUP_SECONDS}s warmup per cell")
 

@@ -2,7 +2,7 @@
 ayafileio - 跨平台异步文件 I/O 库
 ====================================
 
-三平台真异步支持:
+三平台内核完成模型支持:
     - Windows: IOCP (I/O Completion Ports)
     - Linux: io_uring (kernel 5.1+) 或线程池降级
     - macOS: Dispatch I/O (GCD) 或线程池降级
@@ -48,7 +48,7 @@ from ._compat import (
     drain_buffer_pool,
 )
 
-# 扩展已加载，后端探测结论可信：此时发出假异步警告（如有）
+# 扩展已加载，后端探测结论可信：此时发出线程池后端警告（如有）
 warn_fake_async()
 
 __all__ = [

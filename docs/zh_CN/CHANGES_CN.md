@@ -7,7 +7,7 @@
 
 ## [2.0.0] - 2026-10-25
 
-> **版本策略**：从 `2.0.0` 起严格执行 semver。公开 Python 行为见 `docs/migration-2.0.md`；
+> **版本策略**：从 `2.0.0` 起严格执行 semver。公开 Python 行为见 `docs/zh_CN/migration-2.0_CN.md`；
 > 私有 C++ 文件、类与 namespace 不构成稳定 ABI。
 
 ### 变更
@@ -39,8 +39,12 @@
 - 停止 Yuyuko 异步日志时，先写完缓冲消息再关闭文件。
 - 常规 Yuyuko 分配/释放轨迹只在显式启用异步日志后记录，不再污染 `stderr`；内存安全诊断仍保留同步输出回退。
 
+### 删除
+- `get_backend_info()` 与 `get_capabilities()` 删除 `is_truly_async`。改用 `backend`
+  判断实际 I/O 机制；线程池警告不再称为“假异步”。迁移说明见 `docs/zh_CN/migration-2.0_CN.md`。
+
 ### 兼容性
-- Python 公共 API 及语义保持 `docs/migration-2.0.md` 所述的兼容性。
+- 文件 I/O API 保持兼容；`is_truly_async` 按 `docs/zh_CN/migration-2.0_CN.md` 的说明删除。
 - 本版本不新增 C++/C ABI，也不新增其它语言绑定。
 
 ## [1.16.0] - 2026-10-24
@@ -234,7 +238,7 @@
 - **异步打开：`ayafileio.aopen()`。** 参数、模式语义、返回的 `AsyncFile` 与 `ayafileio.open()` 完全一致，但 OS open 本身跑在 C++ 全局线程池：工作线程持 GIL 构造后端，构造函数内部的阻塞系统调用（`CreateFileW` / `open` / `openat` 等待 / `mmap`）经新增的 `GilRelease` 守卫释放 GIL，多个 worker 因此真正并行打开文件。结果（可直接使用的 `AsyncFile` 或异常对象）经 `ResultBatcher` 投递，与 I/O 完成共用同一条批量唤醒链路。返回惰性句柄（aiofiles 同款），`async with ayafileio.aopen(...) as f` 与 `await ayafileio.aopen(...)` 两种写法等价。Windows 构造所需的 `loop`/`create_future` 在调用方的事件循环线程预取注入（工作线程上没有 running loop）；POSIX 后端首次 I/O 时才惰性绑定事件循环，忽略注入。同步 `ayafileio.open()` 路径同样受益：open 系统调用期间不再冻结整个解释器。
 - **批量整文件操作：`read_bytes_many()` / `read_text_many()` / `write_bytes_many()` / `write_text_many()`。** 一次调用并发读取或写入多个文件——打开走 `aopen`（OS open 并行），I/O 走各平台异步后端，信号量（`max_concurrency`，默认 64）限制在飞文件数，十万级输入也不会打爆 fd。写系列接收 `(path, data)` 对，返回逐文件字节数。返回顺序与输入一致；任一失败整体抛出（`asyncio.gather` 默认语义——批量不是事务，写批量失败时部分文件可能已落盘）。把"正确写法"（对文件 gather）变成最短的写法。
 - **类型检查支持：`py.typed` 标记 + `open()` / `aopen()` 的 `@overload` 重载对。** 包内随附 `ayafileio/py.typed`（wheel 与 sdist 都有），mypy/pyright 才会真正加载注解——没有这个标记，类型检查器会整个跳过已安装的包，所有重载对用户都不可见。`aopen()` 与 `open()` 保持一致的重载对（文本模式 → `AsyncFile[str]`，二进制 → `AsyncFile[bytes]`）。
-- **双语使用指南：`docs/USAGE.md` / `docs/USAGE_CN.md`。** 日常参考：`open()` vs `aopen()`、定位与批量 I/O、整文件与批量操作、`chunk()` / `readinto()`、`acopy()`、配置表、最佳实践、aiofiles 迁移说明、类型检查。两个 README 均已链接。
+- **双语使用指南：`docs/USAGE.md` / `docs/zh_CN/USAGE_CN.md`。** 日常参考：`open()` vs `aopen()`、定位与批量 I/O、整文件与批量操作、`chunk()` / `readinto()`、`acopy()`、配置表、最佳实践、aiofiles 迁移说明、类型检查。两个 README 均已链接。
 
 ### 修复
 - **Windows：同步完成快路径的在飞 op 记账泄漏。** IOCP 提交路径上每个 `op_submitted()` 都必须由 `op_completed()` 配平，但当 `ReadFile`/`WriteFile` 在 `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` 启用下同步完成时，提交线程就地 resolve 却从未配平——每个同步完成的 op 泄漏一次计数，永不愈合。`m_outstanding` 持续虚高后，"最后一个在飞 op 完成立即 flush" 优化对该 loop 永久失效，所有异步完成的 op 退化为等 ~5ms 空闲清扫。同步完成是否发生取决于存储栈：裸机 Win10 几乎不走此路径（本地不可见），CI 的 windows-2022 VM 会走——实测后果：x1 并发随机 4 KiB 读只有 **144 ops/s**（≈7ms/op），而同 runner 上 aiofiles 为 4,122。四个 submit 点现已在 skipCP 分支经 `complete_tracked_op()` 配平（计数归零且有滞留结果时顺手 flush）。回归覆盖：`tests/test_batcher_accounting.py` 经新增的 `_ayafileio.debug_batcher_outstanding()` 探针断言每 loop 在飞记账归零（仅在同步完成路径会触发的机器上有判别力）。修复后同一 runner 上该格子实测 **12,012 ops/s（对 aiofiles 1.63x）**。

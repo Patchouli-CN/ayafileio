@@ -23,7 +23,6 @@ core::BackendInfo backend_info() {
 
     const auto kind = core::BackendRegistry::instance().effective_backend();
     result.backend = core::backend_name(kind);
-    result.is_truly_async = kind != core::BackendKind::ThreadPool;
     switch (kind) {
         case core::BackendKind::Iocp:
             result.description = "I/O Completion Ports - native async I/O";

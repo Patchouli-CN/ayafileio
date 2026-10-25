@@ -61,7 +61,6 @@ class BackendInfo(TypedDict):
     """``get_backend_info()`` 的返回"""
     platform: Literal["windows", "linux", "macos", "posix"]
     backend: Literal["iocp", "io_uring", "dispatch_io", "thread_pool"]
-    is_truly_async: bool
     os_version: str
     description: str
 

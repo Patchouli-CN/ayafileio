@@ -22,7 +22,7 @@ _WARNED = False
 
 
 def warn_fake_async():
-    """如果当前后端不是真异步，发出 UserWarning。
+    """如果当前后端是线程池，发出 UserWarning。
 
     结论直接来自 C++ 扩展的权威运行时探测（Linux 上真的试建了 io_uring
     ring，macOS 上真的建了 dispatch channel），Python 侧不做任何版本号
@@ -36,11 +36,11 @@ def warn_fake_async():
     from ._ayafileio import get_backend_info
 
     info = get_backend_info()
-    if info["is_truly_async"]:
+    if info["backend"] != "thread_pool":
         return
 
     warnings.warn(
-        f"ayafileio: {info['description']} (fake async). "
+        f"ayafileio: {info['description']} (no kernel completion model). "
         f"Platform: {info['platform']}, kernel: {info['os_version']}. "
         "Run ayafileio.get_capabilities() for probed backend details.",
         UserWarning,
