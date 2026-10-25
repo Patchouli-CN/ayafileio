@@ -55,7 +55,7 @@ struct Completion {
 
 struct SchedulerContext {
     void* key{nullptr};
-    std::shared_ptr<void> owner{};
+    std::weak_ptr<void> owner{};
 };
 
 class Operation {

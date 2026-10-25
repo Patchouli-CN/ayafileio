@@ -179,7 +179,7 @@ def test_event_loop_is_released_after_open(tmp_path):
 
     script = textwrap.dedent(
         f"""
-        import asyncio, gc, weakref
+        import asyncio, gc, time, weakref
         import ayafileio
 
         PATH = {str(path)!r}
@@ -204,7 +204,14 @@ def test_event_loop_is_released_after_open(tmp_path):
             finally:
                 asyncio.set_event_loop(None)
             del loop
-            gc.collect()
+            # aopen 的 Future 完成时，worker 可能仍在释放 operation/context；
+            # 给原生清理一个有限窗口，永久强引用仍会在超时后失败。
+            deadline = time.monotonic() + 1.0
+            while True:
+                gc.collect()
+                if watch() is None or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
             # 直接看 referent 还在不在。之前这里写的是自检断言，措辞把真信号
             # 掩盖成了「weakref 状态异常」（Linux 上就是这么报的）。
             return watch() is None
