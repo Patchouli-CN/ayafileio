@@ -4,6 +4,7 @@
 #include <array>
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -98,7 +99,15 @@ public:
     // 于是新 loop 的所有完成结果都会被静默丢掉。
     bool loop_is(PyObject *loop) const;
 
+    std::shared_ptr<void> scheduler_owner() {
+        std::lock_guard<std::mutex> lock(m_scheduler_mtx);
+        return m_scheduler_lifetime;
+    }
+
 private:
+    std::mutex m_scheduler_mtx;
+    std::shared_ptr<void> m_scheduler_lifetime{std::make_shared<int>(0)};
+
     // 事件循环的**弱**引用。刻意不缓存 `loop.call_soon_threadsafe` 这个绑定
     // 方法：那是强引用，会让 IOCPContext::m_batchers 把任何做过一次 I/O 的
     // loop 钉到进程退出（每 asyncio.run() 一次就永久留下一个 loop 对象）。

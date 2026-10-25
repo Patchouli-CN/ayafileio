@@ -29,7 +29,7 @@ MESSAGE_BYTES = len(MESSAGE.replace("\n", os.linesep).encode("utf-8"))
 
 
 def _cleanup(prefix: str) -> None:
-    for path in Path(tempfile.gettempdir()).glob(f"{prefix}_concurrent_*.log"):
+    for path in Path(tempfile.gettempdir()).glob(f"{prefix}_concurrent_{os.getpid()}_*.log"):
         path.unlink()
 
 
@@ -37,7 +37,7 @@ async def _aya_round(log_count: int = LOG_COUNT, num_files: int = NUM_FILES) -> 
     """ayafileio：N 个协程并发 append 到 num_files 个文件（打开不计入计时）。"""
     _cleanup("aya")
     paths = [
-        Path(tempfile.gettempdir()) / f"aya_concurrent_{i}.log"
+        Path(tempfile.gettempdir()) / f"aya_concurrent_{os.getpid()}_{i}.log"
         for i in range(num_files)
     ]
     async with AsyncExitStack() as stack:
@@ -67,7 +67,7 @@ async def _sync_round(log_count: int = LOG_COUNT, num_files: int = NUM_FILES) ->
     """
     _cleanup("sync")
     paths = [
-        Path(tempfile.gettempdir()) / f"sync_concurrent_{i}.log"
+        Path(tempfile.gettempdir()) / f"sync_concurrent_{os.getpid()}_{i}.log"
         for i in range(num_files)
     ]
     handles: list = []
@@ -92,7 +92,7 @@ async def _sync_round(log_count: int = LOG_COUNT, num_files: int = NUM_FILES) ->
 def _total_bytes(prefix: str) -> int:
     return sum(
         path.stat().st_size
-        for path in Path(tempfile.gettempdir()).glob(f"{prefix}_concurrent_*.log")
+        for path in Path(tempfile.gettempdir()).glob(f"{prefix}_concurrent_{os.getpid()}_*.log")
     )
 
 

@@ -63,7 +63,7 @@ nb::object PyOperation::future_object() {
 }
 
 core::SchedulerContext PyOperation::scheduler_context() {
-    return {batcher_, context_};
+    return {batcher_, batcher_->scheduler_owner()};
 }
 
 core::Buffer PyOperation::allocate_read_buffer(std::size_t size) {

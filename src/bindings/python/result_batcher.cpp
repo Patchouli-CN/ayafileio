@@ -14,8 +14,12 @@ ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
     m_current_threshold.store(threshold, std::memory_order_relaxed);
     m_current_idle_ms.store(idle_timeout_ms, std::memory_order_relaxed);
 
+    nb::object on_loop_collected = nb::cpp_function([this](nb::handle) {
+        std::lock_guard<std::mutex> lock(m_scheduler_mtx);
+        m_scheduler_lifetime.reset();
+    });
     // 弱引用：batcher 不能把事件循环对象钉住（见头文件里的说明）
-    m_loop_ref = PyWeakref_NewRef(loop, nullptr);
+    m_loop_ref = PyWeakref_NewRef(loop, on_loop_collected.ptr());
     if (!m_loop_ref) {
         throw std::runtime_error("Failed to create weakref to the event loop");
     }

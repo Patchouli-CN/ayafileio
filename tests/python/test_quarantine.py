@@ -95,19 +95,21 @@ async def test_quarantine_drain_is_amortised() -> None:
 
 @WIN_ONLY
 async def test_quarantine_releases_after_window() -> None:
-    """过了保留期再有一次 I/O，旧请求就会被真正释放（live 下降）。"""
+    """过了保留期再有一次 I/O，旧请求就会被真正释放（释放计数增加）。"""
     with tempfile.TemporaryDirectory(prefix="quarantine_window_") as root:
         root_path = Path(root)
         await _requires_quarantine_path(root_path)
 
         path = root_path / "window.log"
         await _burst(path, 2_000)
-        held = _stats()["live"]
+        before = _stats()
+        held = before["live"]
         assert held > 0, "burst should leave requests quarantined"
 
         await asyncio.sleep(1.5)  # > QUARANTINE_MS
         await _burst(path, 1_000)
-        assert _stats()["live"] < held, "expired requests were not released"
+        released = _stats()["scanned"] - before["scanned"]
+        assert released >= held, f"only {released}/{held} expired requests were released"
 
 
 async def test_configure_hot_updates_live_batcher() -> None:
