@@ -112,6 +112,30 @@ jobs:
       run: |
         ulimit -c unlimited
         set +e
+        python -u - <<'PY'
+        import asyncio
+        import faulthandler
+        import tempfile
+        from pathlib import Path
+        import ayafileio
+
+        async def main():
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "aopen.bin"
+                path.write_bytes(b"x")
+                print("before aopen", flush=True)
+                file = await ayafileio.aopen(path, "rb")
+                print("after aopen", flush=True)
+                assert await file.read() == b"x"
+                print("after read", flush=True)
+                await file.close()
+                print("after close", flush=True)
+
+        faulthandler.dump_traceback_later(30, repeat=True)
+        asyncio.run(main())
+        PY
+        SMOKE_EXIT=$?
+        if [ $SMOKE_EXIT -ne 0 ]; then exit $SMOKE_EXIT; fi
         python -u -m pytest -vv --capture=no
         EXIT_CODE=$?
         set -e
