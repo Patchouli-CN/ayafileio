@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "tools" / "check_cpp_dependencies.py"
 spec = importlib.util.spec_from_file_location("aya_cpp_dependency_check", CHECKER)
 checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
 spec.loader.exec_module(checker)
 
 
