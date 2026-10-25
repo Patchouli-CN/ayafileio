@@ -112,7 +112,7 @@ jobs:
       run: |
         ulimit -c unlimited
         set +e
-        python -m pytest -q
+        python -u -m pytest -vv --capture=no
         EXIT_CODE=$?
         set -e
         echo "pytest exit code: $EXIT_CODE"
