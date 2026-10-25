@@ -136,7 +136,7 @@ jobs:
         PY
         SMOKE_EXIT=$?
         if [ $SMOKE_EXIT -ne 0 ]; then exit $SMOKE_EXIT; fi
-        python -u -m pytest -vv --capture=no
+        python -u -m pytest -vv --capture=no -o faulthandler_timeout=30
         EXIT_CODE=$?
         set -e
         echo "pytest exit code: $EXIT_CODE"
