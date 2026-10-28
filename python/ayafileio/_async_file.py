@@ -623,7 +623,16 @@ class AsyncFile(Generic[T]):
         文本模式：字节偏移。纯 \\n 行尾内容字节精确；\\r\\n 密集内容每处
         可能漂移 1 字节（换行压缩 \\r\\n→\\n 的固有问题——CPython 同样无法
         给出简单字节偏移，它返回不透明 cookie）。二进制模式始终字节精确。
+
+        Raises:
+            ValueError: 文件已关闭（与内置 ``open()`` 及其余所有入口一致）。
         """
+        if self._closed:
+            # 这个守卫曾经漏了：其余 13 个入口都判 self._closed，只有 tell()
+            # 把「关后报错」寄望于后端失败。IOCP 上后端的 unavailable() 恰好会
+            # 抛 ValueError，线程池后端则安静返回 0 —— 同一行代码在两个后端上
+            # 行为不同，且都不符合 CPython 语义。
+            raise ValueError("I/O operation on closed file.")
         return await self._impl.tell() - self._pending_bytes()
 
     def _pending_bytes(self) -> int:
