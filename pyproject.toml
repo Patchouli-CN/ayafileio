@@ -40,8 +40,8 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/Patchouli-CN/ayafileio"
-Repository = "https://github.com/Patchouli-CN/ayafileio.git"
+Homepage = "https://github.com/SatoriKomeij/ayafileio"
+Repository = "https://github.com/SatoriKomeij/ayafileio.git"
 
 [tool.scikit-build]
 cmake.version = ">=3.15"

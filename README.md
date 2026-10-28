@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue.svg)]()
 [![PyPI](https://img.shields.io/pypi/v/ayafileio.svg)](https://pypi.org/project/ayafileio/)
 
-**English** | [简体中文](https://github.com/Patchouli-CN/ayafileio/blob/main/README_CN.md)
+**English** | [简体中文](https://github.com/SatoriKomeij/ayafileio/blob/main/README_CN.md)
 
 > "The fastest file I/O in Gensokyo, swift as the Wind God Maiden."
 > — Aya Shameimaru
@@ -20,10 +20,10 @@ Async file I/O on real kernel backends: IOCP on Windows, io_uring on Linux
 
 ## Changelog
 
-See [CHANGES.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/CHANGES.md).
-For the 2.0 architecture and dependency rules, see [architecture.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/architecture.md).
-For the full usage guide, see [USAGE.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/USAGE.md).
-Using ayafileio in an interesting way? See [STORY.md](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/STORY.md).
+See [CHANGES.md](https://github.com/SatoriKomeij/ayafileio/blob/main/docs/CHANGES.md).
+For the 2.0 architecture and dependency rules, see [architecture.md](https://github.com/SatoriKomeij/ayafileio/blob/main/docs/architecture.md).
+For the full usage guide, see [USAGE.md](https://github.com/SatoriKomeij/ayafileio/blob/main/docs/USAGE.md).
+Using ayafileio in an interesting way? See [STORY.md](https://github.com/SatoriKomeij/ayafileio/blob/main/docs/STORY.md).
 
 ## Backends
 

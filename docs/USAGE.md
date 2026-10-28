@@ -1,11 +1,11 @@
 # ayafileio Usage Guide
 
-[简体中文](https://github.com/Patchouli-CN/ayafileio/blob/main/docs/zh_CN/USAGE_CN.md)
+[简体中文](https://github.com/SatoriKomeij/ayafileio/blob/main/docs/zh_CN/USAGE_CN.md)
 
 This guide covers day-to-day use of ayafileio: opening files, the read/write
 APIs, positioned I/O, batch operations, configuration, and migration notes.
 For benchmarks and the backend architecture, see the
-[README](https://github.com/Patchouli-CN/ayafileio/blob/main/README.md).
+[README](https://github.com/SatoriKomeij/ayafileio/blob/main/README.md).
 
 ## Contents
 
