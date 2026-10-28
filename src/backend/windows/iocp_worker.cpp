@@ -65,14 +65,6 @@ DWORD quarantine_timeout() {
     return static_cast<DWORD>(remaining + 1);
 }
 
-core::Completion success(IocpRequest* request, DWORD bytes) {
-    auto result = core::Completion::success(request->type, bytes);
-    result.return_count = request->isReadinto;
-    if (request->type == core::ReqType::Read && !request->isReadinto) {
-        result.buffer = std::move(request->buffer);
-    }
-    return result;
-}
 
 } // namespace
 
@@ -149,7 +141,7 @@ void IOCPContext::process_one(uint64_t id, IocpRequest* request, DWORD bytes, DW
 
     session->complete_request();
     if (error == 0) {
-        request->operation->complete(success(request, bytes));
+        request->operation->complete(core::make_io_completion(request, bytes));
     } else {
         request->operation->complete(core::Completion::failure(
             request->type,

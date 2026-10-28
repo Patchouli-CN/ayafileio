@@ -11,6 +11,24 @@ namespace ayafileio::core {
 
 using OperationPtr = std::shared_ptr<Operation>;
 
+// 读 / 写 / readinto 的成功结果构造。
+//
+// 这段逻辑有三个副本（IOBackendBase::complete_ok、iocp_submit.cpp、iocp_worker.cpp），
+// 而它并不平凡：read 要把 Buffer 的所有权从 request 搬进 Completion（零拷贝交给
+// Python），readinto 要改成回传计数而不是数据，write 只回计数。任何一个副本写错，
+// 表现都是"数据看起来对但生命周期错了"，或者"偶尔拿不到 buffer"。
+//
+// 所以只留一份——而且刻意留在头文件里内联：它在每次 I/O 完成的路径上，跨 TU
+// 调用会白丢一次内联机会。去重不该以热路径为代价。
+inline Completion make_io_completion(IORequest* request, std::size_t bytes) {
+    Completion result = Completion::success(request->type, bytes);
+    result.return_count = request->isReadinto;
+    if (request->type == ReqType::Read && !request->isReadinto) {
+        result.buffer = std::move(request->buffer);
+    }
+    return result;
+}
+
 class IOBackendBase {
 public:
     IOBackendBase() = default;

@@ -3,6 +3,7 @@
 #include "io_uring_backend.hpp"
 #include "native_open.hpp"
 #include "../../core/config.hpp"
+#include "../../core/file_lifecycle.hpp"
 #include "../../core/file_mode.hpp"
 
 #include <algorithm>
@@ -254,18 +255,8 @@ void IOUringBackend::write(core::Buffer view, int64_t position, core::OperationP
 }
 
 void IOUringBackend::seek(int64_t offset, int whence, core::OperationPtr operation) {
-    if (whence < 0 || whence > 2) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("Invalid whence value")));
-        return;
-    }
-    const auto position = state_.seek(offset, whence, [&] { return refresh_size(); });
-    if (!position) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("negative seek position")));
-        return;
-    }
-    operation->complete_inline(core::Completion::counted(core::ReqType::Other, *position));
+    operation->complete_inline(core::seek_completion(
+        state_, offset, whence, [&] { return refresh_size(); }));
 }
 
 void IOUringBackend::flush(core::OperationPtr operation) {
@@ -286,23 +277,19 @@ void IOUringBackend::close(core::OperationPtr operation) {
 }
 
 void IOUringBackend::tell(core::OperationPtr operation) {
-    operation->complete_inline(core::Completion::counted(core::ReqType::Other, state_.tell()));
+    operation->complete_inline(core::tell_completion(state_));
 }
 
 void IOUringBackend::truncate(int64_t size, core::OperationPtr operation) {
-    if (size < 0) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("negative size not allowed")));
+    if (auto rejected = core::truncate_guard(size)) {
+        operation->complete_inline(std::move(*rejected));
         return;
     }
     if (ftruncate(fd_, static_cast<off_t>(size)) != 0) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::native(
-                static_cast<uint32_t>(errno), "truncate failed")));
+        operation->complete_inline(core::truncate_failed(static_cast<uint32_t>(errno)));
         return;
     }
-    state_.apply_truncate(static_cast<uint64_t>(size));
-    operation->complete_inline(core::Completion::success(core::ReqType::Other));
+    operation->complete_inline(core::truncate_done(state_, size));
 }
 
 void IOUringBackend::readinto(core::Buffer buffer, core::OperationPtr operation) {

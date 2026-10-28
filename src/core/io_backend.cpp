@@ -3,23 +3,11 @@
 #include <utility>
 
 namespace ayafileio::core {
-namespace {
-
-Completion make_success(IORequest* request, std::size_t bytes) {
-    Completion result = Completion::success(request->type, bytes);
-    result.return_count = request->isReadinto;
-    if (request->type == ReqType::Read && !request->isReadinto) {
-        result.buffer = std::move(request->buffer);
-    }
-    return result;
-}
-
-} // namespace
 
 void IOBackendBase::complete_ok(IORequest* request, std::size_t bytes) {
     m_pending.fetch_sub(1, std::memory_order_release);
     m_close_wake.release();
-    request->operation->complete(make_success(request, bytes));
+    request->operation->complete(make_io_completion(request, bytes));
     REQ_FREE(request);
 }
 
@@ -34,7 +22,8 @@ void IOBackendBase::complete_inline(IORequest* request, int64_t result) {
     m_pending.fetch_sub(1, std::memory_order_release);
     m_close_wake.release();
     if (result >= 0) {
-        request->operation->complete_inline(make_success(request, static_cast<std::size_t>(result)));
+        request->operation->complete_inline(
+            make_io_completion(request, static_cast<std::size_t>(result)));
     } else {
         request->operation->complete_inline(
             Completion::failure(request->type, IoError::native(

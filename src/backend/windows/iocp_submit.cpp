@@ -1,6 +1,7 @@
 #include "iocp_context.hpp"
 
 #include "../../core/config.hpp"
+#include "../../core/file_lifecycle.hpp"
 #include "../../core/global_thread_pool.hpp"
 
 #include <utility>
@@ -40,15 +41,6 @@ IocpRequest* make_readinto_request(core::Buffer view, std::size_t size, core::Op
     request->isReadinto = true;
     request->buffer = std::move(view);
     return request;
-}
-
-core::Completion success(IocpRequest* request, std::size_t bytes) {
-    auto result = core::Completion::success(request->type, bytes);
-    result.return_count = request->isReadinto;
-    if (request->type == core::ReqType::Read && !request->isReadinto) {
-        result.buffer = std::move(request->buffer);
-    }
-    return result;
 }
 
 core::Completion failure(core::ReqType type, DWORD error, const char* message) {
@@ -106,10 +98,10 @@ void start_read(
         request->inline_completed = true;
         if (session->skipCPOnSuccess) {
             session->complete_request();
-            request->operation->complete_inline(success(request, got));
+            request->operation->complete_inline(core::make_io_completion(request, got));
             IOCP_REQ_FREE(request);
         } else {
-            request->operation->complete_inline(success(request, got));
+            request->operation->complete_inline(core::make_io_completion(request, got));
         }
         return;
     }
@@ -147,10 +139,10 @@ void start_write(
         request->inline_completed = true;
         if (session->skipCPOnSuccess) {
             session->complete_request();
-            request->operation->complete_inline(success(request, wrote));
+            request->operation->complete_inline(core::make_io_completion(request, wrote));
             IOCP_REQ_FREE(request);
         } else {
-            request->operation->complete_inline(success(request, wrote));
+            request->operation->complete_inline(core::make_io_completion(request, wrote));
         }
         return;
     }
@@ -253,27 +245,14 @@ void IOCPContext::submit_seek(
     core::OperationPtr operation) {
     auto session = get_session(id);
     if (unavailable(session, operation, core::ReqType::Other)) return;
-    if (whence < 0 || whence > 2) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("Invalid whence value")));
-        return;
-    }
-    const auto position = session->state.seek(offset, whence, [&] {
-        return refresh_session_size(*session);
-    });
-    if (!position) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("negative seek position")));
-        return;
-    }
-    operation->complete_inline(core::Completion::counted(core::ReqType::Other, *position));
+    operation->complete_inline(core::seek_completion(
+        session->state, offset, whence, [&] { return refresh_session_size(*session); }));
 }
 
 void IOCPContext::submit_tell(uint64_t id, core::OperationPtr operation) {
     auto session = get_session(id);
     if (unavailable(session, operation, core::ReqType::Other)) return;
-    operation->complete_inline(core::Completion::counted(
-        core::ReqType::Other, session->state.tell()));
+    operation->complete_inline(core::tell_completion(session->state));
 }
 
 void IOCPContext::submit_truncate(
@@ -282,9 +261,8 @@ void IOCPContext::submit_truncate(
     core::OperationPtr operation) {
     auto session = get_session(id);
     if (unavailable(session, operation, core::ReqType::Other)) return;
-    if (size < 0) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("negative size not allowed")));
+    if (auto rejected = core::truncate_guard(size)) {
+        operation->complete_inline(std::move(*rejected));
         return;
     }
 
@@ -309,8 +287,7 @@ void IOCPContext::submit_truncate(
         return;
     }
     SetFilePointerEx(session->handle, previous, nullptr, FILE_BEGIN);
-    session->state.apply_truncate(static_cast<uint64_t>(size));
-    operation->complete_inline(core::Completion::success(core::ReqType::Other));
+    operation->complete_inline(core::truncate_done(session->state, size));
 }
 
 void IOCPContext::submit_flush(uint64_t id, core::OperationPtr operation) {

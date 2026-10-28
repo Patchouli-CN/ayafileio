@@ -7,6 +7,8 @@
 #include <memory>
 #include <optional>
 
+void run_file_state_tests();
+
 int main() {
     using namespace ayafileio::core;
 
@@ -51,6 +53,8 @@ int main() {
     assert(BufferPool::instance().total_buffers() > 0);
     pool_clear();
     assert(BufferPool::instance().total_buffers() == 0);
+
+    run_file_state_tests();
 
     std::cout << "core tests passed\n";
     return 0;

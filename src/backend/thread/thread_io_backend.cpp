@@ -1,6 +1,7 @@
 #include "thread_io_backend.hpp"
 
 #include "../../core/config.hpp"
+#include "../../core/file_lifecycle.hpp"
 #include "../../core/file_mode.hpp"
 #include "../../core/global_thread_pool.hpp"
 
@@ -211,18 +212,8 @@ void ThreadIOBackend::write(core::Buffer view, int64_t position, core::Operation
 }
 
 void ThreadIOBackend::seek(int64_t offset, int whence, core::OperationPtr operation) {
-    if (whence < 0 || whence > 2) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("Invalid whence value")));
-        return;
-    }
-    const auto position = state_.seek(offset, whence, [&] { return refresh_size(); });
-    if (!position) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("negative seek position")));
-        return;
-    }
-    operation->complete_inline(core::Completion::counted(core::ReqType::Other, *position));
+    operation->complete_inline(core::seek_completion(
+        state_, offset, whence, [&] { return refresh_size(); }));
 }
 
 void ThreadIOBackend::flush(core::OperationPtr operation) {
@@ -247,24 +238,19 @@ void ThreadIOBackend::close(core::OperationPtr operation) {
 }
 
 void ThreadIOBackend::tell(core::OperationPtr operation) {
-    operation->complete_inline(core::Completion::counted(core::ReqType::Other, state_.tell()));
+    operation->complete_inline(core::tell_completion(state_));
 }
 
 void ThreadIOBackend::truncate(int64_t size, core::OperationPtr operation) {
-    if (size < 0) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other, core::IoError::value("negative size not allowed")));
+    if (auto rejected = core::truncate_guard(size)) {
+        operation->complete_inline(std::move(*rejected));
         return;
     }
     if (platform::file_truncate(fd_, static_cast<unsigned long long>(size)) != 0) {
-        operation->complete_inline(core::Completion::failure(
-            core::ReqType::Other,
-            core::IoError::native(
-                static_cast<uint32_t>(platform::native_file_last_error()), "truncate failed")));
+        operation->complete_inline(core::truncate_failed(static_cast<uint32_t>(platform::native_file_last_error())));
         return;
     }
-    state_.apply_truncate(static_cast<uint64_t>(size));
-    operation->complete_inline(core::Completion::success(core::ReqType::Other));
+    operation->complete_inline(core::truncate_done(state_, size));
 }
 
 void ThreadIOBackend::readinto(core::Buffer buffer, core::OperationPtr operation) {

@@ -354,7 +354,10 @@ message(STATUS "Installation target: ayafileio/")
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(aya_core_tests tests/core/test_main.cpp)
+    add_executable(aya_core_tests
+        tests/core/test_main.cpp
+        tests/core/test_file_state.cpp
+    )
     target_include_directories(aya_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
     target_link_libraries(aya_core_tests PRIVATE aya_core)
     if(NOT WIN32)
