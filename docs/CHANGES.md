@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> **Versioning policy**: **PATCH**. No public signature is added or removed, and no documented
+> behavior changes except one method that had been behaving differently on different backends —
+> restoring CPython semantics there is a fix, not a break. Private C++ files, classes and
+> namespaces remain a non-stable ABI.
+
+### Changed
+- **File-lifecycle policy moved into `core`; backends keep only system-call primitives.**
+  `seek` / `tell` / `truncate` policy — whence validation, negative-position rejection,
+  truncate pre-checks, the ordering of `apply_truncate` relative to the success completion,
+  and the error messages and native-code mapping — had been duplicated byte-for-byte across the
+  four backends. It now lives once in `core/file_lifecycle.hpp`; the POSIX `seek`
+  implementation went from 18 lines to 4. Behavior is unchanged. The point is to remove a class
+  of bug rather than lines: previously, one backend forgetting a step meant the same documented
+  API behaved differently per platform, and nothing in the tree could detect it.
+- **`make_io_completion` deduplicated** (three copies → one). It is not trivial logic — a read
+  moves the buffer's ownership into the completion for zero-copy handoff, while `readinto`
+  reports a count instead. It is kept header-inline because it sits on every I/O completion and
+  a cross-translation-unit call would give up inlining on the hot path.
+
+### Fixed
+- **`tell()` on a closed file now raises `ValueError` on every backend.** It was the only entry
+  point without the `self._closed` guard — the other fourteen had it — so whether you got an
+  error depended on the backend doing it for you: on IOCP the backend's own "file not open"
+  check raised `ValueError`, while the thread-pool backend silently returned `0`. CPython raises
+  `ValueError("I/O operation on closed file.")` here, and so does this now. Found by the new
+  backend conformance suite below, not by an end-to-end test.
+
+### Tests
+- **New backend conformance suite** (`tests/python/test_backend_conformance.py`): 21 invariants
+  run against every available backend, parameterized over real backend availability so an
+  unavailable backend skips instead of passing vacuously, with the backend name embedded in
+  every assertion message. Between them the CI matrix covers all four backends. Coverage is
+  aimed at the semantics that historically drifted and were fixed per backend one at a time —
+  size-cache refresh after external growth, EOF planning, seek rejection without position
+  drift, append semantics, truncate clamping and zero-fill, close idempotence and post-close
+  behavior, `fileno()` stability, and read-ahead versus positioned reads.
+- **New native unit tests** (`tests/core/test_file_state.cpp`): 9 groups over `FileState` and
+  the policy layer. The most useful one pins *when* the size cache is refreshed — it must not
+  stat before EOF — which is an internal timing property that end-to-end tests cannot observe,
+  and which had been the subject of repeated fixes.
+
+### Compatibility
+- No public API change. Error types, messages for existing paths, and the write path are
+  untouched.
+- `tell()` on a closed file changes from "depends on the backend" to `ValueError`; this matches
+  Python's builtin `open()` and the rest of this library's entry points.
+
 ## [2.0.1] - 2026-10-28
 
 > **Versioning policy**: **PATCH**. No public API, signature or documented behavior changed — the
