@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-10-28
+
+> **Versioning policy**: **PATCH**. No public API, signature or documented behavior changed — the
+> two entries below are an internal implementation swap and a performance-defect fix. Private C++
+> files, classes and namespaces remain a non-stable ABI.
+
+### Changed
+- **`read_many()` submits the whole batch natively.** It used to be
+  `asyncio.gather(_impl.read_at(...) for ...)` — one Future, one `set_result` and one callback
+  dispatch per span. A batch now shares a single aggregate Future and an order-preserving slot
+  table, and the result list is delivered once, with no per-span Future or Task. Observable
+  semantics are unchanged: order-preserving, `[]` for an empty batch, `size < 0` reads to EOF,
+  already-submitted requests are drained before an error is raised, and cancelling the await does
+  not undo submitted system I/O. Measured on Windows IOCP, 64 × 4 KiB: 60.4K ops/s versus 44.6K
+  for the `gather` shape (1.35×).
+
+### Fixed
+- **Free-threaded builds no longer pay a per-I/O `PyGILState_Ensure` penalty (3.14t / 3.15t).**
+  Backend worker threads are not created by CPython, so every completion built a thread state and
+  destroyed it again; on free-threaded builds that cost ~1.76 µs against ~0.38 µs on GIL builds.
+  The IOCP read path has a single worker thread and absorbed the cost 1:1 — `read_many` measured
+  2.5K ops/s on 3.15t against 60.4K on 3.15 (23.8×), while `asyncio.gather` over `read_at` degraded
+  identically (24×), so the batch path itself was never the problem. The thread-pool backend has 16
+  workers and averaged the cost away, which is why the regression only surfaced on IOCP. Worker
+  threads now anchor their Python thread state once at startup through a `core`-level hook pair
+  (`set_worker_thread_hooks`, implemented in the binding layer so the layering guard still holds).
+  Per-op cost drops to ~41 ns; 3.15t now measures 73.2K ops/s (28.9×) and edges past the GIL build,
+  with per-completion cycles falling from 1.39M to 15.9K. Applied to the IOCP workers, the global
+  thread-pool workers and the io_uring reaper thread. macOS Dispatch I/O completion callbacks run
+  on GCD-owned threads, which this mechanism cannot reach — 3.14t / 3.15t on macOS keeps that cost.
+- `aya_core_tests` and `aya_diagnostics_tests` now link the threads library explicitly instead of
+  relying on the Python module to pull it in transitively.
+
+### Compatibility
+- No public API change: `read_many()`, `write_many()` and every other signature are untouched.
+- No new required dependency, no behavior change in error types or in the write path.
+
 ## [2.0.0] - 2026-10-25
 
 > **Versioning policy**: strict semver starts at `2.0.0`. Public Python behavior is documented in

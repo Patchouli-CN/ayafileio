@@ -254,10 +254,11 @@ nonnegative, offset plus length must fit a signed 64-bit integer, and each buffe
 is limited to 4 GiB minus 1 byte. As with `write()`, callers must check for short
 writes.
 
-Batch operations gather native Futures directly, avoiding a Python Task per item;
-`read_many()` uses the same optimization. Submitted requests are drained before
-reporting submission or I/O errors, but batches are not atomic: some writes may
-have succeeded when an error is raised. Concurrent overlapping writes have
+`read_many()` submits the whole batch through the native backend and hands back one
+aggregate Future, so a batch costs a single Python round-trip regardless of span count;
+`write_many()` gathers native Futures directly, avoiding a Python Task per item. Submitted
+requests are drained before reporting submission or I/O errors, but batches are not atomic: some
+writes may have succeeded when an error is raised. Concurrent overlapping writes have
 unspecified ordering; await each `write_at(...)` separately when ordering matters.
 Cancelling the wait does not undo already submitted system I/O.
 

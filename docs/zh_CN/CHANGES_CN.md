@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [2.0.1] - 2026-10-28
+
+> **版本策略**：**PATCH**。没有改动任何公开 API、签名或已文档化的行为——下面两条分别是
+> 内部实现替换与性能缺陷修复。私有 C++ 文件、类与 namespace 仍不构成稳定 ABI。
+
+### 变更
+- **`read_many()` 改走原生批量提交。** 此前是 `asyncio.gather(_impl.read_at(...) for ...)`，
+  每个 span 一个 Future、一次 `set_result`、一次回调投递。现在一批读共享一个聚合 Future 与
+  一份保序槽位表，结果列表一次交付，不再为每个 span 建 Future 或 Task。可观察语义完全不变：
+  保序、空批次返回 `[]`、`size < 0` 读到 EOF、报错前先排空已提交请求、取消等待不撤销已提交的
+  系统 I/O。Windows IOCP 实测（64 × 4 KiB）：60.4K ops/s，`gather` 形态 44.6K（1.35×）。
+
+### 修复
+- **free-threading 构建（3.14t / 3.15t）不再为每次 I/O 付 `PyGILState_Ensure` 的代价。**
+  后端 worker 不是 CPython 创建的线程，于是每次完成都要新建一个 thread state 再销毁它；
+  这一步在 free-threading 上约 1.76 µs，GIL 版只要约 0.38 µs。IOCP 的读路径只有一条 worker
+  线程，1:1 吃满这笔开销——`read_many` 在 3.15t 上测得 2.5K ops/s，而 3.15 是 60.4K（23.8×）；
+  同时 `asyncio.gather` 包 `read_at` 也掉了同样的 24×，说明问题从来不在批量路径本身。线程池
+  后端有 16 条 worker，把这笔开销摊掉了，所以只有 IOCP 上测得出来。现在 worker 线程在启动时
+  通过一对 `core` 层钩子（`set_worker_thread_hooks`，实现装在绑定层，分层守卫照旧成立）锚定
+  一次 Python thread state，per-op 成本降到约 41 ns；3.15t 现在测得 73.2K ops/s（28.9×），
+  反超 GIL 版，每完成 cycles 从 1.39M 降到 15.9K。已接入 IOCP worker、全局线程池 worker 与
+  io_uring 的 reaper 线程。macOS Dispatch I/O 的完成回调跑在 GCD 自己的线程上，这套机制够不到
+  ——3.14t / 3.15t + macOS 仍有那部分开销。
+- `aya_core_tests` 与 `aya_diagnostics_tests` 显式链接 threads 库，不再依赖 Python 模块把它
+  传递进来。
+
+### 兼容性
+- 无公开 API 变化：`read_many()`、`write_many()` 及所有其它签名保持不变。
+- 不新增必需依赖；错误类型与写入路径的行为均无变化。
+
 ## [2.0.0] - 2026-10-25
 
 > **版本策略**：从 `2.0.0` 起严格执行 semver。公开 Python 行为见 `docs/zh_CN/migration-2.0_CN.md`；
