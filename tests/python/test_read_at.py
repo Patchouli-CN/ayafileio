@@ -264,6 +264,22 @@ async def test_read_many_empty_spans():
         path.unlink(missing_ok=True)
 
 
+async def test_read_many_error_drains_submitted_reads():
+    """批量中某项失败时，已提交请求结束后仍可使用文件"""
+    path = get_temp_path(".bin")
+    try:
+        path.write_bytes(make_content(64))
+        async with ayafileio.open(path, "rb") as f:
+            try:
+                await f.read_many([(0, 4), (-1, 4), (8, 4)])
+                assert False, "负 offset 应抛 ValueError"
+            except ValueError:
+                pass
+            assert await f.read_at(8, 4) == make_content(64)[8:12]
+    finally:
+        path.unlink(missing_ok=True)
+
+
 async def test_read_at_text_mode_raises():
     """文本模式下 read_at / read_many 抛 ValueError"""
     path = get_temp_path(".txt")

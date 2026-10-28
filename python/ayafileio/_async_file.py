@@ -381,15 +381,13 @@ class AsyncFile(Generic[T]):
     async def read_many(self, spans: Iterable[tuple[int, int]]) -> list[bytes]:
         """批量位置读：一次提交多个 ``(offset, size)`` 读请求。
 
-        返回与 *spans* 同序的 ``bytes`` 列表（``asyncio.gather`` 保序）。
-        每个 span 的语义同 :meth:`read_at`；``size < 0`` 表示读到 EOF。
+        返回与 *spans* 同序的 ``bytes`` 列表。每个 span 的语义同
+        :meth:`read_at`；``size < 0`` 表示读到 EOF。
 
-        设计意图：对标模型权重流式加载的按层批量读场景。``gather`` 让所有
-        I/O 在首个挂起点之前全部提交给后端，共享同一个事件循环周期；C++ 层
-        的 ResultBatcher 会把一批完成通知聚合成少量
-        ``loop.call_soon_threadsafe`` 回调，比逐个 ``await read_at(...)``
-        少 N-1 次协程往返。直接聚合底层 Future，避免为每个 span 创建 Task。
-        提交失败或 I/O 报错时，等待已提交的请求完成后再抛出异常。
+        设计意图：对标模型权重流式加载的按层批量读场景。绑定层在首个
+        挂起点之前提交全部请求，各请求共享一个聚合 Future；完成后一次
+        交付保序结果，不为每个 span 创建独立 Future 或 Task。提交失败或
+        I/O 报错时，等待已提交的请求完成后再抛出异常。
 
         Raises:
             ValueError: 文本模式、文件已关闭、或任一 ``offset < 0``。
@@ -400,7 +398,10 @@ class AsyncFile(Generic[T]):
             raise io.UnsupportedOperation("read")
         if self._is_text:
             raise ValueError("read_many() only supports binary mode")
-        return await _gather_io(self._impl.read_at(o, s) for o, s in spans)
+        native_read_many = getattr(self._impl, "read_many", None)
+        if native_read_many is None:
+            return await _gather_io(self._impl.read_at(o, s) for o, s in spans)
+        return await native_read_many(spans)
 
     async def readinto(self, buf: bytearray | memoryview) -> int:
         """零拷贝读取到预分配缓冲区，返回读取字节数。"""

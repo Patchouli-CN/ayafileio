@@ -19,6 +19,7 @@ public:
 
     nb::object read(int64_t size = -1);
     nb::object read_at(int64_t offset, int64_t size = -1);
+    nb::object read_many(nb::iterable spans);
     nb::object write(nb::object data);
     nb::object write_at(int64_t offset, nb::object data);
     nb::object seek(int64_t offset, int whence = 0);

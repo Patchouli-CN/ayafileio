@@ -14,6 +14,7 @@ NB_MODULE(_ayafileio, module) {
         .def(nb::init<int, const char*, bool>(), nb::arg("fd"), nb::arg("mode") = "rb", nb::arg("owns_fd") = false)
         .def("read", &python::PyAsyncFile::read, nb::arg("size") = -1)
         .def("read_at", &python::PyAsyncFile::read_at, nb::arg("offset"), nb::arg("size") = -1)
+        .def("read_many", &python::PyAsyncFile::read_many, nb::arg("spans"))
         .def("write", &python::PyAsyncFile::write)
         .def("write_at", &python::PyAsyncFile::write_at, nb::arg("offset"), nb::arg("data"))
         .def("seek", &python::PyAsyncFile::seek, nb::arg("offset"), nb::arg("whence") = 0)

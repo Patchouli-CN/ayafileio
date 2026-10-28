@@ -3,6 +3,8 @@
 #include "py_buffer.hpp"
 #include "py_error.hpp"
 
+#include <nanobind/stl/pair.h>
+
 namespace ayafileio::python {
 namespace {
 
@@ -58,6 +60,28 @@ nb::object PyAsyncFile::read_at(int64_t offset, int64_t size) {
     return invoke(core::ReqType::Read, [&](core::OperationPtr op) {
         handle_->read_at(offset, size, std::move(op));
     });
+}
+
+nb::object PyAsyncFile::read_many(nb::iterable spans) {
+    std::vector<std::pair<int64_t, int64_t>> requests;
+    for (auto span : spans) {
+        requests.push_back(nb::cast<std::pair<int64_t, int64_t>>(span));
+    }
+
+    auto state = std::make_shared<PyBatchState>(loop(), requests.size());
+    std::size_t index = 0;
+    try {
+        for (const auto& [offset, size] : requests) {
+            auto operation = std::make_shared<PyBatchOperation>(state, index);
+            handle_->read_at(offset, size, std::move(operation));
+            ++index;
+        }
+    } catch (...) {
+        PyObject* exception = fetch_current_exc();
+        state->fail_from(index, exception);
+        Py_DECREF(exception);
+    }
+    return state->future_object();
 }
 
 nb::object PyAsyncFile::write(nb::object data) {
