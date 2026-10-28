@@ -39,6 +39,17 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
 
+# 连续推送时让被覆盖的旧 run 立刻让位。
+#
+# 触发原因很具体：同一小时内连推 3 次，三次都在抢同一批 macOS runner，其中一次的
+# macOS 3.11 整轮排队没拿到机器，把整个 run 拖成 failure。旧 run 不释放，新 run
+# 就只能等——这条把它变成"新的取代旧的"。
+#
+# 只作用于同 ref：main 上的新 push 取消旧 push，但不会跨 PR 互相踩。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   architecture:
     name: "C++ architecture dependencies"
@@ -270,7 +281,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
+        # macOS 刻意只跑 3 个版本，不是漏配。
+        #
+        # macOS 的平台代码（Dispatch I/O、#ifdef __APPLE__）**不随解释器版本变化**，
+        # 而 Python C-API 的版本差异已经由 Linux × 8 与 Windows × 8 覆盖了两遍。
+        # 这里的 8 条格子重复验证同一件平台无关的事，代价却是三者里最贵、最紧张的
+        # runner —— 实测出现过 macOS 3.11 整轮排队拿不到机器、把整轮 run 拖成
+        # failure；而 failure 会让 build_wheel_ci 的 workflow_run 条件不成立，
+        # 一次纯排队就足以卡住发版。
+        #
+        # 保留的三条各覆盖一个不可替代的面：
+        #   3.10  —— 最老的 C-API + 老 AppleClang/SDK 组合
+        #   3.14t —— 上一代 free-threading ABI
+        #   3.15t —— 最新 + free-threading（macOS 上残余的 thread-state 开销在这里量）
+        python-version: ["3.10", "3.14t", "3.15t"]
     env:
       CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2

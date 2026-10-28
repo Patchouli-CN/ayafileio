@@ -22,6 +22,17 @@ on:
           - riscv64
         default: all
 
+# 发布流水线刻意**不**用 cancel-in-progress。
+#
+# test.yml 那边是 cancel-in-progress: true（旧 push 让位，省钱也让 runner 不排队），
+# 但这里相反：正在往 PyPI 上传的 run 被取消意味着半个版本的产物已落盘、另一半没有，
+# 是比"多跑一轮"严重得多的状态。所以这里只做串行化——后来的排队等前者跑完。
+#
+# 多出来的那轮通常也活不过 check-version：版本号已在 PyPI 就直接 skipped。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   check-version:
     # 版本守护：workflow_run 触发（即 main 上的普通代码推送）时，若
