@@ -84,4 +84,23 @@ public:
 void set_completion_scheduler(CompletionScheduler* scheduler);
 CompletionScheduler* completion_scheduler();
 
+// ── 工作线程与宿主运行时的挂接点 ────────────────────────────────────────────
+// 后端的 worker 线程不是宿主（CPython）创建的线程。若只在每次完成时
+// PyGILState_Ensure，free-threading 构建会为每个 op 创建并销毁一次 thread state
+// （实测 1.3M cycles/op）。宿主在 worker 启动/退出时各挂接一次，per-op 就只剩
+// 抢一次 GIL（实测 ~40 ns）。core 不认识 CPython，只提供钩子；实现由 bindings 装。
+using WorkerThreadHook = void (*)();
+void set_worker_thread_hooks(WorkerThreadHook attach, WorkerThreadHook detach);
+void worker_thread_attach();
+void worker_thread_detach();
+
+// RAII：在后端 worker 循环入口放一个，线程退出时自动解挂。
+class WorkerThreadAnchor {
+public:
+    WorkerThreadAnchor() { worker_thread_attach(); }
+    ~WorkerThreadAnchor() { worker_thread_detach(); }
+    WorkerThreadAnchor(const WorkerThreadAnchor&) = delete;
+    WorkerThreadAnchor& operator=(const WorkerThreadAnchor&) = delete;
+};
+
 } // namespace ayafileio::core

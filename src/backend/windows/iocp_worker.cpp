@@ -87,6 +87,7 @@ QuarantineStats quarantine_stats() {
 }
 
 void IOCPContext::worker_proc(HANDLE iocp) {
+    core::WorkerThreadAnchor thread_anchor;   // 锚定宿主线程状态（见 completion.hpp）
     auto batch_cap = core::config().iocp_batch_size();
     if (batch_cap < 1) batch_cap = 1;
     if (batch_cap > 256) batch_cap = 256;
@@ -158,3 +159,4 @@ void IOCPContext::process_one(uint64_t id, IocpRequest* request, DWORD bytes, DW
 }
 
 } // namespace ayafileio::backend::windows
+

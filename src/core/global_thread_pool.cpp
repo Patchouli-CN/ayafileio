@@ -1,5 +1,6 @@
 // global_thread_pool.cpp — 跨平台全局共享线程池实现
 #include "global_thread_pool.hpp"
+#include "completion.hpp"
 
 #ifdef AYAFILEIO_VERBOSE_LOGGING
 #include <cstdio>
@@ -107,6 +108,7 @@ void GlobalThreadPool::shutdown() {
 
 #ifdef AYAFILEIO_HAS_JTHREAD
 void GlobalThreadPool::worker_loop(std::stop_token st) {
+    WorkerThreadAnchor thread_anchor;
     while (!st.stop_requested()) {
         if (worker_retire_due()) return;
         std::function<void()> task;
@@ -128,6 +130,7 @@ void GlobalThreadPool::worker_loop(std::stop_token st) {
 }
 #else
 void GlobalThreadPool::worker_loop() {
+    WorkerThreadAnchor thread_anchor;
     while (!m_stop.load(std::memory_order_acquire)) {
         if (worker_retire_due()) return;
         std::function<void()> task;
@@ -170,3 +173,4 @@ void GlobalThreadPool::worker_mark_exit() {
 }
 
 } // namespace ayafileio::core
+

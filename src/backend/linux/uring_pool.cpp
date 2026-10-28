@@ -2,6 +2,8 @@
 
 #include "uring_pool.hpp"
 
+#include "../../core/completion.hpp"
+
 #include <cerrno>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -61,7 +63,13 @@ std::shared_ptr<UringInstance> UringManager::acquire(
 void UringManager::start_reaper(const std::shared_ptr<UringInstance>& instance) {
     std::lock_guard lock(instance->start_mutex);
     if (instance->reaper_started.exchange(true)) return;
-    instance->reaper_thread = std::thread(instance->reaper_func, instance.get());
+    // reaper 线程会调用 operation->complete()（宿主侧据此 PyGILState_Ensure），
+    // 它同样不是宿主创建的线程 —— 和 IOCP worker 一样需要在入口锚定一次，
+    // 否则 free-threading 构建上每个完成都要建销一次 thread state。
+    instance->reaper_thread = std::thread([instance] {
+        core::WorkerThreadAnchor thread_anchor;   // 见 core/completion.hpp
+        instance->reaper_func(instance.get());
+    });
 }
 
 void UringManager::cleanup_all() {
