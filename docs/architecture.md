@@ -82,9 +82,28 @@ Run the same check locally, in CTest and in CI:
 python tools/check_cpp_dependencies.py
 ```
 
+Policy and data live in `tools/architecture-rules.json`: the layer list, the
+allowed-dependency matrix, the namespace exemptions, which layers may take
+platform headers, and the symbol blacklist. Mechanism stays in the checker —
+comment stripping, the fail-closed header classifier and cycle detection are not
+switchable off from a data file.
+
+The rules file is validated strictly. An unknown layer name, a dependency target
+that is not a declared layer, a missing rule for a declared layer, or a wrong
+value type is a hard error (exit code 2), never a silently dropped rule.
+
+`immutable_propositions` in that file names the propositions the architecture
+actually rests on: `core` stays platform-neutral and takes no platform headers,
+nothing depends on `bindings/python`, `diagnostics` never reaches upward,
+`discovery` does not know concrete backends, and no backend includes another
+backend's internals. `tests/python/test_architecture.py` re-reads the JSON and
+asserts every one of them, so a rule edit that loosens the architecture fails CI
+even though the JSON still parses.
+
 The checker resolves repository includes and enforces:
 
 - CPython/nanobind only in `bindings/python`;
+- platform headers only in the layers listed in the rules file;
 - allowed layer dependencies and no backend-to-Python or backend-to-discovery shortcuts;
 - no file or component dependency cycles;
 - directory/namespace consistency;
