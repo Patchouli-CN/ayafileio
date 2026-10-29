@@ -117,16 +117,21 @@ void IOCPContext::worker_proc(HANDLE iocp) {
 }
 
 void IOCPContext::process_one(uint64_t id, IocpRequest* request, DWORD bytes, DWORD error) {
+    // 走到这里的请求一律由**本函数**收尾：交付结果、减 pending、归还内存都在这条
+    // 路径上，只有一套逻辑。
+    //
+    // 这里不再有"提交线程是否已经交付过"的判断分支。早先它依赖一个普通 bool
+    // （inline_completed）：提交线程写、worker 读，既没有原子性也没有 release/
+    // acquire，是实打实的数据竞争；而一旦 worker 读到 false，同一个 I/O 就会被
+    // 交付两次 —— 第二次 make_io_completion 从已被搬走的 buffer 里取数据，只会
+    // 造出一块未初始化的 PyBytes，再对已完成的 Future set_result 一次。
+    //
+    // 现在分工由内核模式唯一决定：FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 生效时，
+    // 同步成功根本不投包，请求由提交线程就地收尾、当场释放；不生效时必然投包，
+    // 那就只由这里收尾。不需要跨线程协商，也就没有窗口。
     auto expected = core::IOState::PENDING;
     if (!request->state.compare_exchange_strong(expected, core::IOState::RESOLVED)) return;
     if (!core::request_access_valid(request, __FILE__, __LINE__, __FUNCTION__)) return;
-
-    if (request->inline_completed) {
-        if (auto session = get_session(id)) session->complete_request();
-        request->operation->finished();
-        quarantine_push(request);
-        return;
-    }
 
     auto session = get_session(id);
     if (!session) {

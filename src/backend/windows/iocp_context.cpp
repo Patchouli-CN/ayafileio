@@ -4,6 +4,7 @@
 #include "../../core/result.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 
 namespace ayafileio::backend::windows {
@@ -79,7 +80,16 @@ uint64_t IOCPContext::create_session(
         throw core::IoException(core::IoError::native(
             static_cast<uint32_t>(GetLastError()), "Failed to associate handle with IOCP"));
     }
-    session->skipCPOnSuccess = SetFileCompletionNotificationModes(
+    // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 让「同步成功」的 I/O 不再投递完成包，
+    // 于是提交线程就地交付结果、worker 永远看不到它。缓存命中的小读写几乎全走这条
+    // 快路径，但它在**别的机器上可能失效**（过滤驱动 / AV / 网络重定向都可能让
+    // SetFileCompletionNotificationModes 失败）。失效之后同一段代码会走另一条完全
+    // 不同的交付路径，而如果两条路径各自只在各自的环境里被测过，这个差异就一直藏着。
+    //
+    // AYAFILEIO_NO_SKIP_CP=1 强制关掉该模式，让每个同步成功也照常投递完成包 ——
+    // 这样「提交线程 vs worker」这条路径在任意机器上都测得到。
+    static const bool skip_disabled = std::getenv("AYAFILEIO_NO_SKIP_CP") != nullptr;
+    session->skipCPOnSuccess = !skip_disabled && SetFileCompletionNotificationModes(
         handle, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) != 0;
 
     if (append_mode) {

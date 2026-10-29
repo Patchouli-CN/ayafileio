@@ -358,6 +358,49 @@ jobs:
         fi
         exit $EXIT_CODE
 
+  # ── IOCP「完成包」交付路径（Windows 专有）────────────────────────────────
+  # 一次 I/O 的收尾有两条互斥路径，由 FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 决定：
+  #
+  #   生效   —— 同步成功不投完成包，请求由**提交线程**就地交付、当场释放
+  #   不生效 —— 内核必然补投一个完成包，请求由 **worker** 交付、延迟释放
+  #
+  # 默认机器上该模式都生效，所以 CI 里第 2 条路径**从来没被跑过**。但它恰恰是
+  # 用户机器上的常见状态：过滤驱动、杀软、网络重定向都可能让
+  # SetFileCompletionNotificationModes 失败。两条路径若各自只在各自的环境里被测，
+  # 差异就会一直藏着 —— 早先那里还有一个跨线程 bool 造成的双重交付与数据竞争。
+  #
+  # AYAFILEIO_NO_SKIP_CP=1 强制关掉该模式，让第 2 条路径在 CI 里被真正执行。
+  test-iocp-packet-path:
+    name: "Windows IOCP completion-packet path (py3.15)"
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      AYAFILEIO_NO_SKIP_CP: "1"
+      CMAKE_BUILD_TYPE: Release
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.15"
+        allow-prereleases: true
+    - name: Build ayafileio (Release mode)
+      timeout-minutes: 5
+      run: |
+        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
+        pip install -e ".[dev]" -v
+    - name: Confirm the packet path is actually forced
+      # 开关必须被读到，否则这一整轮就是在默认路径上假绿 —— 和切后端那轮同一个道理。
+      run: |
+        python -c "import os; assert os.environ.get('AYAFILEIO_NO_SKIP_CP') == '1', 'env not set'"
+        python -m pytest tests/python/test_backend_conformance.py tests/python/test_quarantine.py -q
+    - name: Run the full suite through the completion-packet path
+      timeout-minutes: 5
+      run: python -m pytest -q
+
   # ── 回退后端（线程池）覆盖 ──────────────────────────────────────────────
   # ThreadIOBackend 是「io_uring / GCD / IOCP 都不可用」时的唯一路径，可以在
   # 正常 CI 里一行都跑不到（Linux 装了 liburing 就走 io_uring、macOS 走 GCD、

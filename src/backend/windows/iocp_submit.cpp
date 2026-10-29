@@ -95,13 +95,26 @@ void start_read(
         if (static_cast<std::size_t>(got) < plan.size) {
             refresh_session_size_after_short_io(*session);
         }
-        request->inline_completed = true;
+        // 同步成功有两条完全不同的收尾路径，**只能走其中一条**：
+        //
+        //   skipCPOnSuccess == true  —— FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 生效，
+        //       内核承诺不为这次成功投递完成包。那就只能在这里交付、在这里释放。
+        //
+        //   skipCPOnSuccess == false —— 内核仍会为这个 OVERLAPPED 补投一个完成包。
+        //       交付与释放都交给 process_one，与异步路径共用同一套收尾逻辑。
+        //
+        // 早先的实现是两条都交付，再用一个非原子 bool（inline_completed）告诉 worker
+        // "提交线程已经交付过了"。那既是数据竞争（提交线程写、worker 读，无
+        // release/acquire），也是真实的双重交付：worker 若读到 false，就会再调一次
+        // make_io_completion —— 而它已经把 request->buffer 搬走了，第二次只能拿到空
+        // buffer，回退成 PyBytes_FromStringAndSize(nullptr, n) 造一块未初始化的
+        // bytes，再对已完成的 Future set_result 一次。
+        //
+        // 现在不需要那个标志：谁负责收尾由内核模式唯一决定，不必跨线程协商。
         if (session->skipCPOnSuccess) {
             session->complete_request();
             request->operation->complete_inline(core::make_io_completion(request, got));
             IOCP_REQ_FREE(request);
-        } else {
-            request->operation->complete_inline(core::make_io_completion(request, got));
         }
         return;
     }
@@ -136,13 +149,12 @@ void start_write(
         if (static_cast<std::size_t>(wrote) != size) {
             refresh_session_size_after_short_io(*session);
         }
-        request->inline_completed = true;
+        // 同 start_read：有完成包保证时（!skipCPOnSuccess）一律交给 process_one 收尾，
+        // 提交线程只负责那條"内核承诺不投包"的分支。
         if (session->skipCPOnSuccess) {
             session->complete_request();
             request->operation->complete_inline(core::make_io_completion(request, wrote));
             IOCP_REQ_FREE(request);
-        } else {
-            request->operation->complete_inline(core::make_io_completion(request, wrote));
         }
         return;
     }

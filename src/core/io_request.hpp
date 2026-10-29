@@ -35,7 +35,6 @@ struct IORequest {
     std::atomic<IOState> state{IOState::PENDING};
     bool isReadinto{false};
     bool holdsWriteBuf{false};
-    bool inline_completed{false};
 
     char* buf() noexcept { return buffer.data(); }
     const char* buf() const noexcept { return buffer.data(); }
