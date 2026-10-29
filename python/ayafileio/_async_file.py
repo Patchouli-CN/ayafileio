@@ -140,10 +140,15 @@ class AsyncFile(Generic[T]):
         return self
 
     async def __aexit__(self, *_) -> None:
-        if self._auto_flush:
-            await self.flush() # 如果要确保数据真的在硬盘了
-            
-        await self.close()
+        # close() 必须在 finally 里。auto_flush 的语义是"退出时先 flush 再 close"，
+        # 但 flush 会失败（磁盘满、EIO、句柄已被外部关掉）。早先写成顺序执行，flush
+        # 一抛异常就跳过 close，句柄要等 GC 才回收 —— 进程里同时开着很多文件时，
+        # 这不是"晚一点关"，而是真的耗尽。
+        try:
+            if self._auto_flush:
+                await self.flush()  # 如果要确保数据真的在硬盘了
+        finally:
+            await self.close()
 
     # ── async iterator ────────────────────────────────────────────────────────
 

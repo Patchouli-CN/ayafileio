@@ -72,6 +72,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check raised `ValueError`, while the thread-pool backend silently returned `0`. CPython raises
   `ValueError("I/O operation on closed file.")` here, and so does this now. Found by the new
   backend conformance suite below, not by an end-to-end test.
+- **`async with` no longer skips `close()` when `flush()` fails.** `__aexit__` ran `flush()` and
+  then `close()` in sequence, so a `flush()` that raised — full disk, EIO, a handle closed
+  underneath — meant the OS handle was only released when the object was collected. With
+  `auto_flush=True` and many files open at once that is not "closed a bit later", it is genuine
+  exhaustion. `close()` now runs from a `finally`; the `flush()` exception still propagates.
+- **`configure()` rejects unknown keys instead of silently ignoring them.**
+  `configure({"buffer_pool_maxx": 1024})` used to return normally, change nothing, and leave the
+  only feedback as the caller manually diffing `get_config()`. Keys are now validated against the
+  documented set before any state is touched, so a batch cannot half-apply.
+- **`configure()` reports `TypeError` for wrong value types, and `ValueError` naming the key for
+  bad values.** nanobind translates a failed cast into `std::runtime_error`, so
+  `configure({"io_worker_count": "8"})` used to raise `RuntimeError: bad cast` — which
+  `except TypeError` does not catch, and which conflates a coding error with bad input data.
+  Size fields are additionally range-checked so `buffer_size=-1` reports
+  `ValueError: buffer_size must be positive`.
+- **`set_io_worker_count()` / `set_iocp_worker_count()` now actually work.** Both 1.x-era entry
+  points wrote a global that nothing read, so they were silent no-ops in 2.x: the worker count
+  reported by `get_config()` never moved, and every "sweep the worker count" experiment ran on
+  the same configuration. They now go through the same path as
+  `configure({"io_worker_count": n})`, including resizing an already-started pool.
 
 ### Tests
 - **New backend conformance suite** (`tests/python/test_backend_conformance.py`): 21 invariants
@@ -100,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched.
 - `tell()` on a closed file changes from "depends on the backend" to `ValueError`; this matches
   Python's builtin `open()` and the rest of this library's entry points.
+- `configure()` now raises on input it used to accept silently: unknown keys, wrong value types,
+  and non-positive sizes. Code that passed such keys was not getting the setting applied, so the
+  only programs affected are ones already running with a configuration they did not have.
 - `AYAFILEIO_NO_SKIP_CP` is a testing knob, not public API; it is read once per session and
   unset in normal use.
 

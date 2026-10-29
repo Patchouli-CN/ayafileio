@@ -3,6 +3,7 @@
 #include "batcher_registry.hpp"
 #include "../../backend/builtin.hpp"
 #include "../../core/completion.hpp"
+#include "../../core/config.hpp"
 #include "../../core/global_thread_pool.hpp"
 #include "../../diagnostics/yuyuko.hpp"
 
@@ -98,11 +99,22 @@ void py_cleanup() {
 }
 
 void set_worker_count(unsigned count) {
-    if (count == 0 || (count >= 1 && count <= 128)) {
-        g_worker_count.store(count);
-    } else {
+    if (!(count == 0 || (count >= 1 && count <= 128))) {
         throw nb::value_error("worker count must be 0 (auto) or 1-128");
     }
+    // 走与 configure({"io_worker_count": n}) 完全相同的路径。
+    //
+    // 早先这里只写一个全仓没人读的 g_worker_count：于是 1.x 留下来的
+    // set_io_worker_count() / set_iocp_worker_count() 在 2.x 里是**静默空操作** ——
+    // 用户设了 worker 数，get_config() 纹丝不动，唯一能发现的方式是自己去比对。
+    // 而 worker 数恰好是 IOCP/线程池最关键的调优旋钮之一，失效期间所有"扫 worker 数"
+    // 的实验其实都在同一份配置上跑。
+    auto cfg = core::config().get();
+    cfg.io_worker_count = count;
+    core::config().update(cfg);
+    // 池若已启动，立即按新值调容量；未启动则等到首次启动时用配置值。
+    core::GlobalThreadPool::instance().target_workers(core::effective_io_worker_count());
+    g_worker_count.store(count);
 }
 
 } // namespace ayafileio::python

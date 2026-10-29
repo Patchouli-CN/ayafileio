@@ -60,6 +60,22 @@
   "文件未打开"检查会抛 `ValueError`，线程池后端则静默返回 `0`。CPython 在这里抛的是
   `ValueError("I/O operation on closed file.")`，现在这里也是。这一条是下面新增的后端一致性
   套件发现的，端到端测试测不到。
+- **`async with` 不再因为 `flush()` 失败而跳过 `close()`。** `__aexit__` 里是顺序执行
+  `flush()` 再 `close()`，所以一旦 `flush()` 抛异常（磁盘满、EIO、句柄被外部关掉），OS 句柄
+  只能等对象被回收时才释放。`auto_flush=True` 且同时打开很多文件时，这不是"晚一点关"，
+  而是真的耗尽。`close()` 现在放在 `finally` 里；`flush()` 的异常照旧向外传播。
+- **`configure()` 拒绝未知 key，而不是静默忽略。** `configure({"buffer_pool_maxx": 1024})`
+  以前会正常返回、什么也不改，唯一的反馈是调用方自己去比对 `get_config()`。现在会在改动任何
+  状态**之前**按文档化的 key 集合校验，因此一批里不会出现"一半生效"。
+- **`configure()` 对类型错误报 `TypeError`，对非法值报 `ValueError` 并在消息里点名该 key。**
+  nanobind 把 cast 失败翻成 `std::runtime_error`，于是
+  `configure({"io_worker_count": "8"})` 以前抛的是 `RuntimeError: bad cast` ——
+  `except TypeError` 兜不住，而且把"编码错误"和"输入数据不对"混成一种。尺寸类字段额外做了
+  范围校验，`buffer_size=-1` 现在报 `ValueError: buffer_size must be positive`。
+- **`set_io_worker_count()` / `set_iocp_worker_count()` 现在真正生效。** 这两个 1.x 时代的
+  入口只往一个没人读的全局变量里写，因此在 2.x 里是静默空操作：`get_config()` 报的 worker
+  数纹丝不动，所有"扫 worker 数"的实验其实都跑在同一份配置上。现在它们与
+  `configure({"io_worker_count": n})` 走同一条路径，包括对已启动的池做容量调整。
 
 ### 测试
 - **新增后端一致性套件**（`tests/python/test_backend_conformance.py`）：21 条不变量，逐个
@@ -83,6 +99,8 @@
 - 无公开 API 变化。错误类型、既有路径的错误文案、写入路径均未改动。
 - 关闭后的 `tell()` 从"取决于后端"变为抛 `ValueError`；这与 Python 内置 `open()` 以及本库
   其余入口一致。
+- `configure()` 现在对以前被静默接受的输入报错：未知 key、错误类型、非正尺寸。传这些值的
+  代码本来就没能让设置生效，所以受影响的只有那些一直在跑"并非自己所写的配置"的程序。
 - `AYAFILEIO_NO_SKIP_CP` 是测试开关，不属于公开 API；每个会话读一次，正常使用不会设置。
 
 ## [2.0.1] - 2026-10-28
