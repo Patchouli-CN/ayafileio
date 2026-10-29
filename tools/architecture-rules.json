@@ -59,9 +59,25 @@
     }
   },
 
+  "$comment_namespace_exemptions": [
+    "Every entry is {path, reason}. A bare path is rejected: an exemption whose",
+    "reason is not written down becomes an unreviewable precedent, and the next",
+    "contributor has no way to judge whether their case is the same.",
+    "",
+    "An exemption states that the CHECKER cannot express the rule for this file --",
+    "not that the architecture may bend here. A file that needs an exemption because",
+    "it genuinely lives outside the layering is a broken design; fix the design, not",
+    "this list."
+  ],
   "namespace_exemptions": [
-    "src/bindings/python/module.cpp",
-    "src/diagnostics/debug_log.hpp"
+    {
+      "path": "src/bindings/python/module.cpp",
+      "reason": "NB_MODULE() is nanobind's module bootstrap and must expand at global scope; the binding generator does not allow wrapping it in a namespace."
+    },
+    {
+      "path": "src/diagnostics/debug_log.hpp",
+      "reason": "The header contains only preprocessor macros (UR_LOG and friends) and declares no entities, so the 'file declares a namespace' rule does not apply."
+    }
   ],
 
   "$comment_dependencies": [

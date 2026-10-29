@@ -52,7 +52,7 @@ class Rules:
 
     layers: dict[str, str]                 # component name -> expected namespace
     dependencies: dict[str, set[str]]       # component -> components it may include
-    namespace_exemptions: frozenset[str]
+    namespace_exemptions: dict[str, str]    # repo-relative path -> why it is exempt
     platform_headers_allowed: frozenset[str]
     python_headers_allowed: frozenset[str]
     forbidden_symbols: dict[str, frozenset[str]]
@@ -131,10 +131,29 @@ def load_rules(path: Path) -> Rules:
     if missing:
         raise RulesError(f"{path}: no dependency rule for {sorted(missing)}")
 
-    exemptions = raw["namespace_exemptions"]
-    for item in exemptions:
-        if not isinstance(item, str):
-            raise RulesError(f"{path}: 'namespace_exemptions' must contain strings")
+    exemptions_raw = raw["namespace_exemptions"]
+    exemptions: dict[str, str] = {}
+    for item in exemptions_raw:
+        if not isinstance(item, dict):
+            raise RulesError(
+                f"{path}: 'namespace_exemptions' entries must be objects "
+                f"{{'path': ..., 'reason': ...}}; a bare path is an unreviewable exemption"
+            )
+        missing_keys = {"path", "reason"} - set(item)
+        if missing_keys:
+            raise RulesError(
+                f"{path}: namespace exemption {item!r} is missing {sorted(missing_keys)}"
+            )
+        if not isinstance(item["path"], str) or not isinstance(item["reason"], str):
+            raise RulesError(f"{path}: namespace exemption {item!r} needs string path and reason")
+        # An exemption without a reason is exactly the "it's just this once"
+        # case that erodes an architecture checker. Require it, and require it
+        # to be a sentence rather than a placeholder.
+        if len(item["reason"].strip()) < 20:
+            raise RulesError(
+                f"{path}: exemption for '{item['path']}' needs a real reason, got {item['reason']!r}"
+            )
+        exemptions[item["path"]] = item["reason"]
 
     platform_raw = raw["platform_headers_allowed_in"]
     for key, value in platform_raw.items():
@@ -168,7 +187,7 @@ def load_rules(path: Path) -> Rules:
     return Rules(
         layers=layers,
         dependencies=dependencies,
-        namespace_exemptions=frozenset(exemptions),
+        namespace_exemptions=exemptions,
         platform_headers_allowed=frozenset(k for k, v in platform_raw.items() if v),
         python_headers_allowed=frozenset(python_allowed),
         forbidden_symbols=forbidden,

@@ -448,3 +448,33 @@ def test_cli_reports_rules_error_with_exit_code_2(tmp_path):
     assert "invalid JSON" in result.stderr
 
 
+def test_every_exemption_states_a_reason():
+    """An exemption without a written reason is an unreviewable precedent."""
+    for entry in RULES_JSON["namespace_exemptions"]:
+        assert isinstance(entry, dict), f"exemption must be {{path, reason}}: {entry!r}"
+        assert entry.get("reason", "").strip(), f"exemption for {entry.get('path')} has no reason"
+        assert len(entry["reason"].strip()) >= 20, (
+            f"exemption for {entry['path']} needs a real reason, got {entry['reason']!r}"
+        )
+
+
+def test_exemption_list_stays_small():
+    """A growing exemption list means exceptions are replacing design fixes.
+
+    This threshold is not the point. The point is that crossing it forces a
+    conversation: is the architecture bending, or is the checker blind here?
+    """
+    exemptions = RULES_JSON["namespace_exemptions"]
+    assert len(exemptions) <= 4, (
+        f"{len(exemptions)} namespace exemptions. Before adding another, check whether the "
+        f"real problem is a design that does not fit the layering:\n  "
+        + "\n  ".join(f"- {e['path']}" for e in exemptions)
+    )
+
+
+def test_forbidden_symbol_lists_stay_focused():
+    """A symbol list padded with non-types stops being about architecture."""
+    total = sum(len(group) for group in RULES_JSON["native_symbols_forbidden_in"].values())
+    assert total <= 40, f"{total} forbidden symbols; is this still describing layer violations?"
+
+
