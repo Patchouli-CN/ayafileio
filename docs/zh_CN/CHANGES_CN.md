@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [2.0.3] - 2026-10-29
+## [未发布]
 
 > **版本策略**：**PATCH**。只改了一个内部常量；公开签名、行为、磁盘格式均未变化。
 
