@@ -233,38 +233,169 @@ def expected_namespace(path: Path, rules: Rules) -> str | None:
 
 
 def code_lines(text: str):
+    """Yield ``(line_number, code)`` with comments removed.
+
+    This is a lexer, not a regex: scanning a line for ``//`` and ``/*`` without
+    tracking string state is wrong in both directions. A URL literal
+    (``"http://x"``) hides the rest of the line, and a line comment ending in a
+    backslash swallows the *next* line -- which is how a comment could smuggle
+    a fake ``#include`` past the checker.
+
+    States handled: block comment, line comment (including backslash
+    continuation), ordinary string literal, character literal (both with
+    escape sequences), and C++11 raw string literals with a custom delimiter.
+    Preprocessing beyond that (macro splicing of adjacent literals, ``#if 0``)
+    is deliberately out of scope: this tool guards includes and layer usage,
+    and byte-for-byte C++ preprocessing belongs to the compiler.
+    """
     in_block_comment = False
+    in_line_comment = False      # carried across lines only via backslash
+    in_string = False
+    in_char = False
+    raw_delim: str | None = None  # set while inside R"delim( ... )delim"
+
     for number, line in enumerate(text.splitlines(), 1):
         output: list[str] = []
         index = 0
-        while index < len(line):
+        length = len(line)
+
+        # A line comment that ended in a backslash continues onto this line:
+        # the whole line belongs to the comment, so nothing here is code.
+        if in_line_comment:
+            in_line_comment = line.endswith("\\") and not line.endswith("\\\\")
+            yield number, ""
+            continue
+
+        while index < length:
             if in_block_comment:
                 end = line.find("*/", index)
                 if end < 0:
-                    index = len(line)
+                    index = length
                     continue
                 in_block_comment = False
                 index = end + 2
                 continue
-            start = line.find("/*", index)
-            line_comment = line.find("//", index)
-            if line_comment >= 0 and (start < 0 or line_comment < start):
-                output.append(line[index:line_comment])
-                index = len(line)
+
+            if raw_delim is not None:
+                terminator = ")" + raw_delim + '"'
+                end = line.find(terminator, index)
+                if end < 0:
+                    index = length
+                    continue
+                raw_delim = None
+                index = end + len(terminator)
                 continue
-            if start < 0:
-                output.append(line[index:])
-                index = len(line)
+
+            char = line[index]
+
+            if in_string or in_char:
+                quote = '"' if in_string else "'"
+                if char == "\\":
+                    # Keep the escape pair so a later token is not misread.
+                    output.append(line[index:index + 2])
+                    index += 2
+                    continue
+                output.append(char)
+                index += 1
+                if char == quote:
+                    in_string = False
+                    in_char = False
                 continue
-            output.append(line[index:start])
-            in_block_comment = True
-            index = start + 2
+
+            if char == "/" and index + 1 < length:
+                nxt = line[index + 1]
+                if nxt == "/":
+                    in_line_comment = line.endswith("\\") and not line.endswith("\\\\")
+                    index = length
+                    continue
+                if nxt == "*":
+                    in_block_comment = True
+                    index += 2
+                    continue
+
+            # Raw string: R"delim( ... )delim" -- the delimiter may be empty.
+            if char == "R" and index + 1 < length and line[index + 1] == '"':
+                if index == 0 or not (line[index - 1].isalnum() or line[index - 1] == "_"):
+                    open_paren = line.find("(", index + 2)
+                    if open_paren >= 0:
+                        candidate = line[index + 2:open_paren]
+                        if len(candidate) <= 16 and " " not in candidate and "\\" not in candidate:
+                            raw_delim = candidate
+                            index = open_paren + 1
+                            continue
+
+            if char == '"':
+                in_string = True
+                output.append(char)
+                index += 1
+                continue
+
+            if char == "'":
+                in_char = True
+                output.append(char)
+                index += 1
+                continue
+
+            output.append(char)
+            index += 1
+
         yield number, "".join(output)
 
 
 def code_only(text: str) -> str:
     """Comment-stripped source, for checks that must not be fooled by prose."""
     return "\n".join(line for _, line in code_lines(text))
+
+
+def strip_dead_branches(text: str) -> str:
+    """Blank out ``#if 0`` regions.
+
+    Code inside ``#if 0`` is never compiled, so it cannot violate a layer
+    boundary: reporting it would be a false positive that teaches contributors
+    to distrust the checker. Only the literal ``#if 0`` form is handled. Any
+    other condition -- including ``#if 1``, macro conditions and ``#ifdef`` --
+    is left alone, because deciding whether it is dead would require evaluating
+    the preprocessor, and guessing wrong in that direction means silently
+    skipping real code.
+
+    ``#else`` and ``#elif`` reopen the region: their branch is live.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    depth = 0          # nesting inside a dead region
+    dead = False
+    for line in lines:
+        stripped = line.strip()
+
+        if not dead:
+            if stripped == "#if 0" or re.fullmatch(r"#\s*if\s+0\s*", stripped):
+                dead = True
+                depth = 1
+                out.append("")
+                continue
+            out.append(line)
+            continue
+
+        # Inside a dead region.
+        if stripped.startswith("#if"):
+            depth += 1
+            out.append("")
+            continue
+        if stripped.startswith(("#endif",)):
+            depth -= 1
+            if depth <= 0:
+                dead = False
+                depth = 0
+            out.append("")
+            continue
+        if stripped.startswith(("#else", "#elif")) and depth == 1:
+            # The alternate branch is live.
+            dead = False
+            depth = 0
+            out.append("")
+            continue
+        out.append("")
+    return "\n".join(out)
 
 
 def is_platform_header(target: str) -> bool:
@@ -299,9 +430,18 @@ def resolve_include(root: Path, source: Path, target: str) -> Path | None:
 
 
 def parse_file(root: Path, path: Path) -> tuple[list[Include], str]:
+    """Extract quoted/angle includes and return the raw source.
+
+    Dead ``#if 0`` regions are blanked before scanning, so an include that is
+    never compiled cannot trigger a layer violation. Note the deliberate gap:
+    an include whose path is assembled by the preprocessor (``#include HDR``)
+    cannot be resolved without running cpp, so it is not checked. That is a
+    known blind spot, not an oversight -- see docs/architecture.md.
+    """
     text = (root / path).read_text(encoding="utf-8", errors="replace")
+    live = strip_dead_branches(text)
     includes: list[Include] = []
-    for number, line in code_lines(text):
+    for number, line in code_lines(live):
         match = INCLUDE_RE.match(line)
         if not match:
             continue

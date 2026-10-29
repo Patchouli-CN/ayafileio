@@ -109,6 +109,29 @@ The checker resolves repository includes and enforces:
 - directory/namespace consistency;
 - no unresolved project-relative includes.
 
+### What the scanner understands, and what it does not
+
+The include scanner is a small lexer rather than a line scan, because the
+difference matters in both directions: a `"http://..."` literal would otherwise
+truncate the rest of the line, and a line comment ending in `\` continues onto
+the next line, which is enough to smuggle an include past a naive reader. It
+handles block comments, line comments including backslash continuation, string
+and character literals with escapes, and raw string literals with custom
+delimiters. Ordinary `.hpp` files are checked exactly like `.cpp` files — many
+headers in this tree carry inline implementations, so a header is not assumed to
+be declaration-only.
+
+Two deliberate gaps, both documented as tests so a future change has to notice
+them:
+
+- **Macro-generated includes** (`#define HDR "..."` then `#include HDR`) cannot
+  be resolved without running the preprocessor, so they are not checked.
+- **`#if 0` regions are blanked** before scanning, since dead code cannot
+  violate a layer boundary and reporting it is a false positive. Only the
+  literal `#if 0` form is treated as dead; `#if 1`, `#ifdef` and macro
+  conditions stay in scope, because guessing in that direction would mean
+  silently skipping live code.
+
 `tests/python/test_architecture.py` contains valid and deliberately invalid synthetic trees, so a broken checker cannot silently pass. `architecture_dependencies` is also a CTest test and a dedicated GitHub Actions job.
 
 ## Validation

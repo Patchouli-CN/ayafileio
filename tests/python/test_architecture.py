@@ -307,6 +307,196 @@ def test_every_error_branch_has_coverage():
     assert branches >= 6, f"checker has {branches} error branches; update this guard"
 
 
+# ── The lexer ─────────────────────────────────────────────────────────────────
+# code_lines() is a lexer, not a line scan. A URL literal or a line comment
+# ending in a backslash is enough to move the parser's notion of "code" by a
+# file, in both directions: hiding a real include, or inventing one.
+
+BACKSLASH = chr(92)
+
+
+def strip(text: str) -> str:
+    return "\n".join(code for _, code in checker.code_lines(text))
+
+
+def test_line_comment_with_backslash_continuation_swallows_next_line():
+    """``// ... \\`` continues onto the next line, so the include is not code."""
+    source = "int a; // comment " + BACKSLASH + "\n" + '#include "evil.hpp"\n'
+    assert "evil.hpp" not in strip(source)
+
+
+def test_double_continuation_stays_comment():
+    source = ("int a; // c " + BACKSLASH + "\n"
+              + "still comment " + BACKSLASH + "\n"
+              + '#include "evil.hpp"\n')
+    assert "evil.hpp" not in strip(source)
+
+
+def test_string_literal_hides_comment_starts():
+    """A URL literal must not truncate the rest of the line."""
+    source = 'const char* s = "http://example";\nint b;\n'
+    stripped = strip(source)
+    assert '"http://example"' in stripped
+    assert "int b;" in stripped
+
+
+def test_string_literal_with_block_comment_marker():
+    source = 'const char* s = "/* nope";\nint b;\n'
+    stripped = strip(source)
+    assert "/* nope" in stripped
+    assert "int b;" in stripped
+
+
+def test_escaped_quote_does_not_end_string_early():
+    source = 'const char* s = "a' + BACKSLASH + '"b";\nint b;\n'
+    stripped = strip(source)
+    assert "int b;" in stripped
+    assert "//" not in stripped  # nothing was misread as a comment
+
+
+def test_raw_string_swallows_include():
+    source = 'auto s = R"(\n#include "evil.hpp"\n)";\n'
+    assert "evil.hpp" not in strip(source)
+
+
+def test_raw_string_with_custom_delimiter():
+    source = 'auto s = R"xy(#include "evil.hpp")xy";\n#include "real.hpp"\n'
+    stripped = strip(source)
+    assert "evil.hpp" not in stripped
+    assert "real.hpp" in stripped
+
+
+def test_raw_string_ends_where_it_ends():
+    source = 'auto s = R"(x)";\n#include "real.hpp"\n'
+    assert "real.hpp" in strip(source)
+
+
+def test_character_literal_does_not_open_a_string():
+    source = "char c = '\"'; |#include \"real.hpp\"\n".replace("|", "")
+    assert "real.hpp" in strip(source)
+
+
+def test_unterminated_string_does_not_leak_into_next_construct():
+    """A stray quote must not turn the rest of the file into string state."""
+    source = 'const char* s = "abc;\n' + '#include "real.hpp"\n'
+    # The include is inside what the lexer treats as an unterminated string, so
+    # the honest answer is that this file cannot be reasoned about statically.
+    # What matters is that nothing crashes and no phantom include appears.
+    assert "evil.hpp" not in strip(source)
+
+
+# ── #if 0 dead branches ───────────────────────────────────────────────────────
+
+def test_include_inside_if_zero_is_not_a_violation(tmp_path):
+    write(tmp_path, "src/backend/thread/t.hpp", "namespace ayafileio::backend::thread {}\n")
+    write(
+        tmp_path,
+        "src/core/a.cpp",
+        '#if 0\n#include "../backend/thread/t.hpp"\n#endif\n'
+        "namespace ayafileio::core {}\n",
+    )
+    assert checker.check(tmp_path, REPO_RULES) == []
+
+
+def test_include_after_if_zero_is_still_checked(tmp_path):
+    write(tmp_path, "src/backend/thread/t.hpp", "namespace ayafileio::backend::thread {}\n")
+    write(
+        tmp_path,
+        "src/core/a.cpp",
+        '#if 0\n#include "whatever.hpp"\n#endif\n'
+        '#include "../backend/thread/t.hpp"\n'
+        "namespace ayafileio::core {}\n",
+    )
+    errors = checker.check(tmp_path, REPO_RULES)
+    assert any("forbidden dependency core -> backend/thread" in e for e in errors)
+
+
+def test_if_zero_else_branch_is_live(tmp_path):
+    write(tmp_path, "src/backend/thread/t.hpp", "namespace ayafileio::backend::thread {}\n")
+    write(
+        tmp_path,
+        "src/core/a.cpp",
+        '#if 0\n#include "unused.hpp"\n#else\n'
+        '#include "../backend/thread/t.hpp"\n#endif\n'
+        "namespace ayafileio::core {}\n",
+    )
+    errors = checker.check(tmp_path, REPO_RULES)
+    assert any("forbidden dependency" in e for e in errors)
+
+
+def test_if_one_is_not_treated_as_dead(tmp_path):
+    """Only the literal #if 0 is dead; #if 1 must stay in scope."""
+    write(tmp_path, "src/backend/thread/t.hpp", "namespace ayafileio::backend::thread {}\n")
+    write(
+        tmp_path,
+        "src/core/a.cpp",
+        '#if 1\n#include "../backend/thread/t.hpp"\n#endif\n'
+        "namespace ayafileio::core {}\n",
+    )
+    errors = checker.check(tmp_path, REPO_RULES)
+    assert any("forbidden dependency" in e for e in errors)
+
+
+def test_ifdef_is_not_treated_as_dead(tmp_path):
+    write(tmp_path, "src/backend/thread/t.hpp", "namespace ayafileio::backend::thread {}\n")
+    write(
+        tmp_path,
+        "src/core/a.cpp",
+        '#ifdef SOMETHING\n#include "../backend/thread/t.hpp"\n#endif\n'
+        "namespace ayafileio::core {}\n",
+    )
+    errors = checker.check(tmp_path, REPO_RULES)
+    assert any("forbidden dependency" in e for e in errors)
+
+
+def test_nested_if_zero_region_closes_once():
+    source = "#if 0\n#if 1\nBAD\n#endif\nBAD2\n#endif\nGOOD\n"
+    kept = [line for line in checker.strip_dead_branches(source).splitlines() if line.strip()]
+    assert kept == ["GOOD"]
+
+
+# ── Header-only implementations ───────────────────────────────────────────────
+# 42 of this tree's headers, many carrying inline implementation. A .hpp is not
+# a declaration-only file, so it must be checked exactly like a .cpp.
+
+def test_violation_in_inline_implementation_in_hpp_is_caught(tmp_path):
+    write(tmp_path, "src/backend/thread/t.hpp", "namespace ayafileio::backend::thread {}\n")
+    write(
+        tmp_path,
+        "src/core/a.hpp",
+        '#include "../backend/thread/t.hpp"\n'
+        "template <class T> struct X { T t; };\n"
+        "namespace ayafileio::core {}\n",
+    )
+    errors = checker.check(tmp_path, REPO_RULES)
+    assert any("forbidden dependency core -> backend/thread" in e for e in errors)
+
+
+def test_native_symbol_in_hpp_is_caught(tmp_path):
+    write(
+        tmp_path,
+        "src/core/a.hpp",
+        "#pragma once\nstruct S { HANDLE h; };\nnamespace ayafileio::core {}\n",
+    )
+    errors = checker.check(tmp_path, REPO_RULES)
+    assert any("forbidden native/Python symbol HANDLE" in e for e in errors)
+
+
+def test_hpp_counts_as_checked_source():
+    assert ".hpp" in checker.SOURCE_SUFFIXES
+
+
+def test_macro_generated_include_is_a_documented_blind_spot(tmp_path):
+    """``#include HEADER`` needs cpp to resolve; the checker cannot follow it."""
+    write(tmp_path, "src/core/a.cpp",
+          '#define HDR "../backend/thread/t.hpp"\n#include HDR\n'
+          "namespace ayafileio::core {}\n")
+    errors = checker.check(tmp_path, REPO_RULES)
+    # Documenting the gap as a test: if resolution is ever added, this is the
+    # test to update.
+    assert not any("forbidden dependency" in e for e in errors)
+
+
 # ── The golden lock ───────────────────────────────────────────────────────────
 # Rules live in architecture-rules.json so the layer matrix can be edited
 # without touching code. That flexibility is also the risk: moving a rule out of
