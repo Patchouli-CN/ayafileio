@@ -80,6 +80,7 @@ void start_read(
     auto* request = readinto
         ? make_readinto_request(std::move(user_buffer), plan.size, operation)
         : make_read_request(plan.size, operation);
+    request->session_id = session->id;
     request->ov.Offset = static_cast<DWORD>(plan.offset & 0xFFFFFFFFull);
     request->ov.OffsetHigh = static_cast<DWORD>(plan.offset >> 32);
 
@@ -138,6 +139,7 @@ void start_write(
     core::OperationPtr operation) {
     const auto size = view.size();
     auto* request = make_write_request(std::move(view), operation);
+    request->session_id = session->id;
     request->ov.Offset = static_cast<DWORD>(offset & 0xFFFFFFFFull);
     request->ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
 

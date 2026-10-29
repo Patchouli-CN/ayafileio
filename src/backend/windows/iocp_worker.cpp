@@ -16,23 +16,8 @@ namespace {
 #endif
 
 constexpr unsigned quarantine_ms = 1000;
-// 积压上限：延迟释放必须和吞吐解耦，否则固定的 1 秒窗口在 60K ops/s 下会滞留六万个
-// 请求，freelist 长期为空、每次分配都落到 operator new 上。超过上限就按 FIFO 强制
-// 回收，于是高吞吐时的实际窗口退化为「上限 / 吞吐」。
-//
-// 上限取多大，取决于**真正要防的是什么**。这里要防的不是"第一个完成包的投递延迟"
-// （那是微秒级），而是 1.4.2 记下的那个形态：同一个 OVERLAPPED 的重复完成包
-// **跨批次到达，相隔 10–15 ms**。所以下限应当以它为基准。
-//
-//   32768 次操作对应的时间：73K ops/s 约 450 ms（30 倍余量）
-//                             1M ops/s 约 33 ms（2.2 倍余量）
-//
-// 而且这个界是**按操作数**的：无论吞吐怎么涨，一个地址被复用前至少还要经过
-// 32768 次回收，窗口不会像纯时间窗口那样被吞吐压缩。
-//
-// 代价：32768 个 deque 条目（指针 + 时间戳）约 512 KB / 线程。实测把上限从 4096
-// 压到 512 对吞吐没有任何影响（55.9K vs 56.5K），所以放大它不花性能。
-constexpr std::size_t quarantine_max_backlog = 32768;
+// 注意：这里**不再有**积压上限。原因见下方 quarantine_drain 的注释：
+// 任何按数量强制回收都会把 1 秒的时间保证压缩成「上限 / 吞吐」。
 struct QuarantineEntry {
     IocpRequest* request;
     std::chrono::steady_clock::time_point when;
@@ -59,24 +44,26 @@ void note_push() {
     while (live > peak && !q_peak.compare_exchange_weak(peak, live, std::memory_order_relaxed)) {}
 }
 
-// force=false：只回收已到期（>= quarantine_ms）的；
-// force=true ：忽略年龄，把积压排掉一半（仅在上限被突破时使用）。
-void quarantine_drain(bool force) {
-    const auto now = std::chrono::steady_clock::now();
+// 唯一规则：**只回收已满 quarantine_ms 的条目，任何情况下都不越过它。**
+//
+// 这里原本还有一条"积压达到上限就按 FIFO 强制回收、忽略年龄"的分支，用来把内存钳住。
+// 那是错的：它把 1 秒的时间保证改写成了「上限 / 吞吐」，而 1.4.2 记下的重复完成包形态
+// 是**跨批次、相隔 10–15 ms**。该分支一旦把窗口压到毫秒级，重复包就会落在已释放的
+// 内存上 —— 实测抓到的 `[Yuyuko] USE-AFTER-FREE ... process_one()` 就是它
+// （约 12 次全套里出现 2 次）。
+//
+// 内存上界因此改由吞吐决定（稳态深度 ≈ 吞吐 × 1 s）。这是**安全**的失败模式：
+// 最坏是多占几 MB，而不是踩到已释放的内存。
+void quarantine_drain(std::chrono::steady_clock::time_point now) {
     uint64_t expired = 0;
-    while (!quarantine.empty()) {
-        const bool aged =
-            now - quarantine.front().when >= std::chrono::milliseconds(quarantine_ms);
-        if (!aged && !force) break;
+    while (!quarantine.empty() &&
+           now - quarantine.front().when >= std::chrono::milliseconds(quarantine_ms)) {
         // 归还之前不动它：~IocpRequest 会析构 Buffer 与 shared_ptr，其中可能进
         // CPython 拿 GIL。
         IOCP_REQ_FREE(quarantine.front().request);
         quarantine.pop_front();
         q_live.fetch_sub(1, std::memory_order_relaxed);
         ++expired;
-        // 强制排空时只排掉 1/8 容量（4096 个），而不是一半 —— 摊销性质不变，
-        // 但单次析构的尖峰有界（~4096 个 Buffer/shared_ptr 的析构而不是 16384 个）。
-        if (force && quarantine.size() <= quarantine_max_backlog - quarantine_max_backlog / 8) break;
     }
     q_scanned.fetch_add(expired, std::memory_order_relaxed);
     q_drains.fetch_add(1, std::memory_order_relaxed);
@@ -86,13 +73,9 @@ void quarantine_push(IocpRequest* request) {
     const auto now = std::chrono::steady_clock::now();
     quarantine.push_back({request, now});
     note_push();
-    if (quarantine.size() >= quarantine_max_backlog) {
-        quarantine_drain(true);
-    } else if (now - quarantine.front().when >= std::chrono::milliseconds(quarantine_ms)) {
-        // 提交线程没有 worker 那种周期性唤醒，所以"到期"必须挂在 push 上，
-        // 否则低吞吐下队首会一直不走。这里只多一次时间戳比较，不引入任何锁。
-        quarantine_drain(false);
-    }
+    // 提交线程没有 worker 那种周期性唤醒，所以"到期"必须挂在 push 上，否则低吞吐下
+    // 队首会一直不走。这里**不看积压量** —— 年龄是唯一条件。
+    quarantine_drain(now);
 }
 
 DWORD quarantine_timeout() {
@@ -150,7 +133,7 @@ void IOCPContext::worker_proc(HANDLE iocp) {
         const BOOL ok = GetQueuedCompletionStatusEx(
             iocp, batch.data(), static_cast<ULONG>(batch.size()), &count, timeout, FALSE);
         if (count == 0) {
-            quarantine_drain(false);
+            quarantine_drain(std::chrono::steady_clock::now());
             if (auto* scheduler = core::completion_scheduler()) scheduler->flush_idle();
             if (!ok && !running()) break;
             continue;
@@ -166,7 +149,7 @@ void IOCPContext::worker_proc(HANDLE iocp) {
                 entry.dwNumberOfBytesTransferred,
                 entry.Internal == 0 ? 0 : static_cast<DWORD>(entry.Internal));
         }
-        quarantine_drain(false);
+        quarantine_drain(std::chrono::steady_clock::now());
         if (auto* scheduler = core::completion_scheduler()) scheduler->flush_idle();
     }
 }
@@ -181,6 +164,22 @@ void IOCPContext::process_one(uint64_t id, IocpRequest* request, DWORD bytes, DW
     //                绝不能再交付一次，也不能立刻释放 —— 交给 release_request，
     //                它与提交线程那边的调用由 reaped 的 exchange 互斥，
     //                谁先谁负责，且都是延迟释放。
+    // 陈旧包识别。完成包只携带 completion key（= 会话 id），本身不带身份；而这个
+    // OVERLAPPED 可能已经属于**另一个会话**的新请求（地址被复用）。若照常往下走，
+    // `get_session(id)` 会因为旧会话已关闭而返回空，于是把
+    // "I/O operation completed after the file was closed"（Errno 995）投给这个
+    // **好的新请求** —— 实测的偶发失败正是它（test_many_and_buffers 里那次写被凭空判死）。
+    //
+    // 两点刻意为之：
+    //   1) **放在 CAS 之前**，且**只读不写**。这里面对的可能是已释放的内存，写一个字
+    //      就可能污染堆（早先在此处 store(PENDING) 换来过 0xC0000005）。
+    //   2) 不恢复 state。跨会话不匹配意味着这个请求属于别人，它真正的包还没来；
+    //      我们什么都没改，它就仍能被正常交付。
+    if (request->session_id != id) {
+        g_packets_stale_session.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     auto expected = core::IOState::PENDING;
     if (!request->state.compare_exchange_strong(expected, core::IOState::RESOLVED)) {
         release_request(request);

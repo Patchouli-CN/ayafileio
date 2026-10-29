@@ -7,25 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **Versioning policy**: **PATCH**. One internal constant changes; no public signature, behavior
-> or on-disk format changes.
+> **Versioning policy**: **PATCH**. No public signature, behavior or on-disk format changes.
 
 ### Fixed
-- **Windows IOCP: the deferred-free window could shrink below the duplicate-completion window it
-  exists to defend against.** The quarantine bounds memory with a backlog cap, and above the cap
-  entries are recycled by count rather than by age — so the *effective* window becomes
-  `cap / throughput`. That cap was 4096, which at the measured 60–73K ops/s gives roughly 56–68 ms.
-  The relevant threat is not the first completion packet (microseconds) but the duplicate one:
-  the 1.4.2 entry in this file records duplicates arriving **across separate batch calls, 10–15 ms
-  apart** — leaving only a 4–5x margin, and the margin shrinks further as throughput rises
-  (200K ops/s would put it at 20 ms).
+- **Windows IOCP: a completion packet from a closed file could be delivered to an unrelated,
+  live request.** Completion packets carry only `OVERLAPPED*` plus the completion key, nothing
+  else; when a request object was released and its address reused by another file's request, a
+  late packet belonging to the *previous* file landed on the new request, `get_session()` failed
+  for the now-dead session id, and the resulting
+  `OSError(995, "I/O operation completed after the file was closed")` was raised on a write that
+  had done nothing wrong. Reproduced as an intermittent failure of
+  `test_write_at.py::test_many_and_buffers` (2 of 15 full-suite runs). Requests now record the
+  session they were submitted for, and `process_one` drops any packet whose completion key does
+  not match that session. The check is read-only and runs *before* the state CAS, because the
+  request it inspects may already be freed memory — an earlier version that wrote the state back
+  there produced access violations (2 of 15 runs, `0xC0000005`).
+- **Windows IOCP: the deferred-free quarantine could recycle a request younger than its own
+  window.** The backlog cap was enforced by draining by count while ignoring age, which silently
+  rewrote the 1 s guarantee as `cap / throughput`. Duplicate completion packets have been
+  measured arriving far later than the 10–15 ms recorded in 1.4.2 — 84 ms in the reproduction
+  above — so no count-based cap may shorten the window: entries are now recycled strictly by age
+  and the cap is gone. Memory is bounded by `throughput × 1 s` instead, which is the safe
+  failure mode (a few MB) rather than touching released memory.
 
-  The cap is now 32768, which gives a bound expressed in **operations rather than time**: an
-  address waits at least 32768 recycles before reuse, i.e. ~450 ms at 73K ops/s and still ~33 ms
-  at 1M ops/s. It cannot be compressed by throughput the way a pure time window can. Cost is a
-  ~512 KB per-thread deque. Raising it is free: compressing the cap from 4096 to 512 was measured
-  earlier at 55.9K vs 56.5K ops/s, i.e. no effect. The forced-drain batch was narrowed to 1/8 of
-  capacity so a single drain frees ~4096 objects instead of half the ring.
 ## [2.0.2] - 2026-10-29
 
 > **Versioning policy**: **PATCH**. No public signature is added or removed. The IOCP entries
