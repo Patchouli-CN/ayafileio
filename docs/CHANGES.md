@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-10-29
+
+> **Versioning policy**: **PATCH**. One internal constant changes; no public signature, behavior
+> or on-disk format changes.
+
+### Fixed
+- **Windows IOCP: the deferred-free window could shrink below the duplicate-completion window it
+  exists to defend against.** The quarantine bounds memory with a backlog cap, and above the cap
+  entries are recycled by count rather than by age — so the *effective* window becomes
+  `cap / throughput`. That cap was 4096, which at the measured 60–73K ops/s gives roughly 56–68 ms.
+  The relevant threat is not the first completion packet (microseconds) but the duplicate one:
+  the 1.4.2 entry in this file records duplicates arriving **across separate batch calls, 10–15 ms
+  apart** — leaving only a 4–5x margin, and the margin shrinks further as throughput rises
+  (200K ops/s would put it at 20 ms).
+
+  The cap is now 32768, which gives a bound expressed in **operations rather than time**: an
+  address waits at least 32768 recycles before reuse, i.e. ~450 ms at 73K ops/s and still ~33 ms
+  at 1M ops/s. It cannot be compressed by throughput the way a pure time window can. Cost is a
+  ~512 KB per-thread deque. Raising it is free: compressing the cap from 4096 to 512 was measured
+  earlier at 55.9K vs 56.5K ops/s, i.e. no effect. The forced-drain batch was narrowed to 1/8 of
+  capacity so a single drain frees ~4096 objects instead of half the ring.
 ## [2.0.2] - 2026-10-29
 
 > **Versioning policy**: **PATCH**. No public signature is added or removed. The IOCP entries

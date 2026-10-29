@@ -16,11 +16,23 @@ namespace {
 #endif
 
 constexpr unsigned quarantine_ms = 1000;
-// 积压上限：延迟释放必须和吞吐解耦。固定的 1 秒窗口在 60K ops/s 下会滞留六万个
-// 请求，freelist 因此长期为空、每次分配都落到 operator new 上 —— 实测掉 15%。
-// 超过上限就按 FIFO 强制回收，于是高吞吐时的实际窗口退化成「上限 / 吞吐」
-// （60K ops/s 约 68 ms）。这仍是完成包投递延迟的十万倍量级，而内存与分配抖动被钳住。
-constexpr std::size_t quarantine_max_backlog = 4096;
+// 积压上限：延迟释放必须和吞吐解耦，否则固定的 1 秒窗口在 60K ops/s 下会滞留六万个
+// 请求，freelist 长期为空、每次分配都落到 operator new 上。超过上限就按 FIFO 强制
+// 回收，于是高吞吐时的实际窗口退化为「上限 / 吞吐」。
+//
+// 上限取多大，取决于**真正要防的是什么**。这里要防的不是"第一个完成包的投递延迟"
+// （那是微秒级），而是 1.4.2 记下的那个形态：同一个 OVERLAPPED 的重复完成包
+// **跨批次到达，相隔 10–15 ms**。所以下限应当以它为基准。
+//
+//   32768 次操作对应的时间：73K ops/s 约 450 ms（30 倍余量）
+//                             1M ops/s 约 33 ms（2.2 倍余量）
+//
+// 而且这个界是**按操作数**的：无论吞吐怎么涨，一个地址被复用前至少还要经过
+// 32768 次回收，窗口不会像纯时间窗口那样被吞吐压缩。
+//
+// 代价：32768 个 deque 条目（指针 + 时间戳）约 512 KB / 线程。实测把上限从 4096
+// 压到 512 对吞吐没有任何影响（55.9K vs 56.5K），所以放大它不花性能。
+constexpr std::size_t quarantine_max_backlog = 32768;
 struct QuarantineEntry {
     IocpRequest* request;
     std::chrono::steady_clock::time_point when;
@@ -62,7 +74,9 @@ void quarantine_drain(bool force) {
         quarantine.pop_front();
         q_live.fetch_sub(1, std::memory_order_relaxed);
         ++expired;
-        if (force && quarantine.size() <= quarantine_max_backlog / 2) break;
+        // 强制排空时只排掉 1/8 容量（4096 个），而不是一半 —— 摊销性质不变，
+        // 但单次析构的尖峰有界（~4096 个 Buffer/shared_ptr 的析构而不是 16384 个）。
+        if (force && quarantine.size() <= quarantine_max_backlog - quarantine_max_backlog / 8) break;
     }
     q_scanned.fetch_add(expired, std::memory_order_relaxed);
     q_drains.fetch_add(1, std::memory_order_relaxed);
