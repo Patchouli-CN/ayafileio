@@ -1,0 +1,191 @@
+{
+  "$comment": [
+    "Architecture rules for tools/check_cpp_dependencies.py.",
+    "",
+    "This file holds POLICY (which layer may depend on which) and DATA (lists of",
+    "headers and symbols). It deliberately does not hold MECHANISM: comment",
+    "stripping, the fail-closed header classifier and cycle detection stay in the",
+    "checker so that no edit to this file can switch them off.",
+    "",
+    "Editing rules here is a reviewed change, and tests/python/test_architecture.py",
+    "re-reads this file to assert the non-negotiable architecture propositions",
+    "(see 'immutable_propositions' below). A rule edit that violates them fails CI.",
+    "",
+    "Layer names are top-level directories under src/, except that a layer with",
+    "sub-directories (backend, bindings) also gets one entry per sub-directory, so",
+    "'backend/linux' is a component distinct from 'backend'."
+  ],
+
+  "layers": {
+    "core": {
+      "namespace": "ayafileio::core",
+      "reason": "Platform-neutral native types. Must not know about any OS or the Python runtime."
+    },
+    "platform": {
+      "namespace": "ayafileio::platform",
+      "reason": "Thin native file and error primitives shared by every backend."
+    },
+    "backend": {
+      "namespace": "ayafileio::backend",
+      "reason": "Backend dispatch: registration and the public entry points."
+    },
+    "backend/linux": {
+      "namespace": "ayafileio::backend::linux",
+      "reason": "io_uring implementation."
+    },
+    "backend/macos": {
+      "namespace": "ayafileio::backend::macos",
+      "reason": "Dispatch I/O implementation."
+    },
+    "backend/thread": {
+      "namespace": "ayafileio::backend::thread",
+      "reason": "Portable thread-pool fallback."
+    },
+    "backend/windows": {
+      "namespace": "ayafileio::backend::windows",
+      "reason": "IOCP implementation."
+    },
+    "bindings/python": {
+      "namespace": "ayafileio::python",
+      "reason": "The only component allowed to include Python.h or nanobind. Composition root."
+    },
+    "discover": {
+      "namespace": "ayafileio::discovery",
+      "reason": "Runtime probing. Reports capability values upward; does not select backends."
+    },
+    "diagnostics": {
+      "namespace": "ayafileio::diagnostics",
+      "reason": "Logging, integrity checking and allocation tracking."
+    }
+  },
+
+  "namespace_exemptions": [
+    "src/bindings/python/module.cpp",
+    "src/diagnostics/debug_log.hpp"
+  ],
+
+  "$comment_dependencies": [
+    "Each entry lists the components its key may include. '_self' expands to every",
+    "component in the same top-level layer (backend/linux may include backend/macos's",
+    "public headers but the reverse coupling is what gets caught).",
+    "",
+    "Every component must appear as a key: a typo in a layer name fails the run",
+    "instead of silently dropping a rule."
+  ],
+  "dependencies": {
+    "core": {
+      "allow": ["core", "diagnostics"],
+      "reason": "core is the bottom of the stack; anything above it would invert the layers."
+    },
+    "platform": {
+      "allow": ["core", "platform"],
+      "reason": "Platform primitives wrap OS calls and store them opaquely; they may not reach upward."
+    },
+    "backend": {
+      "allow": ["_self", "core", "platform", "discover", "diagnostics"],
+      "reason": "Dispatch layer may see everything below it plus its own implementations."
+    },
+    "backend/linux": {
+      "allow": ["core", "platform", "diagnostics"],
+      "reason": "One OS implementation; sees the shared core, never another backend's internals."
+    },
+    "backend/macos": {
+      "allow": ["core", "platform", "diagnostics"],
+      "reason": "One OS implementation; sees the shared core, never another backend's internals."
+    },
+    "backend/thread": {
+      "allow": ["core", "platform", "diagnostics"],
+      "reason": "Portable implementation; sees the shared core and platform primitives."
+    },
+    "backend/windows": {
+      "allow": ["core", "platform", "diagnostics"],
+      "reason": "One OS implementation; sees the shared core, never another backend's internals."
+    },
+    "bindings/python": {
+      "allow": ["*"],
+      "reason": "Composition root. It surfaces backend-specific knobs (set_iocp_worker_count, quarantine_stats) to Python. That it must not grow dispatch logic is a semantic rule no include graph can decide, so review covers it."
+    },
+    "discover": {
+      "allow": ["core", "discover", "platform", "diagnostics"],
+      "reason": "Probing reports capability values upward. Backend selection belongs to core::BackendRegistry (docs/architecture.md), so discovery must not know concrete backends -- which would also form a cycle with backend -> discover."
+    },
+    "diagnostics": {
+      "allow": ["core", "diagnostics"],
+      "reason": "Diagnostics depends on core; never the other way around."
+    }
+  },
+
+  "$comment_platform_headers": [
+    "One entry per top-level layer. Sub-directories inherit their parent's entry.",
+    "Any header the classifier judges non-standard is rejected in a layer absent here."
+  ],
+  "platform_headers_allowed_in": {
+    "platform": true,
+    "backend": true,
+    "discover": true,
+    "diagnostics": true,
+    "bindings": true
+  },
+
+  "python_headers_allowed_in": ["bindings/python"],
+
+  "native_symbols_forbidden_in": {
+    "core": [
+      "PyObject", "Py_buffer", "PyBytes", "PyUnicode", "PyErr_SetString",
+      "OVERLAPPED", "HANDLE", "DWORD", "LPVOID", "HINSTANCE", "SOCKET",
+      "io_uring_sqe", "io_uring_cqe", "io_uring_params", "IORING_SETUP_SQPOLL",
+      "dispatch_queue_t", "dispatch_group_t", "dispatch_data",
+      "pthread_t", "pthread_mutex_t"
+    ]
+  },
+  "$comment_native_symbols": [
+    "Only TYPES belong here. 'io_uring' is intentionally absent: it appears in core",
+    "as a backend-name string and as config fields (io_uring_queue_depth), both of",
+    "which are platform-neutral. Restricting the list to types keeps the check about",
+    "architecture rather than about work the compiler already does."
+  ],
+
+  "$comment_immutable": [
+    "Non-negotiable propositions. tests/python/test_architecture.py reads this file",
+    "and asserts every one of them still holds, so a rule edit cannot quietly loosen",
+    "the architecture. Add to this list deliberately; do not remove entries."
+  ],
+  "immutable_propositions": [
+    {
+      "id": "core_is_platform_neutral",
+      "description": "core may not depend on platform, any backend, discover, or bindings.",
+      "forbidden_targets_from": "core",
+      "forbid": ["platform", "backend", "backend/linux", "backend/macos", "backend/thread",
+                 "backend/windows", "discover", "bindings/python"]
+    },
+    {
+      "id": "core_takes_no_platform_headers",
+      "description": "core may not include any non-standard header.",
+      "forbidden_header_layer": "core"
+    },
+    {
+      "id": "nothing_depends_on_bindings",
+      "description": "bindings/python is the top of the stack; no layer may include it.",
+      "forbidden_target": "bindings/python",
+      "forbidden_for_every_layer_except": "bindings/python"
+    },
+    {
+      "id": "diagnostics_never_reaches_up",
+      "description": "diagnostics may only depend on core and itself.",
+      "forbidden_targets_from": "diagnostics",
+      "forbid": ["platform", "backend", "backend/linux", "backend/macos", "backend/thread",
+                 "backend/windows", "discover", "bindings/python"]
+    },
+    {
+      "id": "discover_does_not_select_backends",
+      "description": "discovery must not know concrete backends.",
+      "forbidden_targets_from": "discover",
+      "forbid": ["backend", "backend/linux", "backend/macos", "backend/thread", "backend/windows"]
+    },
+    {
+      "id": "no_backend_knows_another_backend_internals",
+      "description": "One OS implementation must not include another's private headers.",
+      "forbidden_cross_backend": true
+    }
+  ]
+}
