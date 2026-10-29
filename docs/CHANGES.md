@@ -5,13 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.2] - 2026-10-29
 
-> **Versioning policy**: **PATCH**. No public signature is added or removed, and no documented
-> behavior changes except one method that had been behaving differently on different backends —
-> restoring CPython semantics there is a fix, not a break. The IOCP entries under "Fixed" are a
-> native crash and a silent data-corruption bug: the most severe thing a PATCH can carry, and
-> still not an API break. Private C++ files, classes and namespaces remain a non-stable ABI.
+> **Versioning policy**: **PATCH**. No public signature is added or removed. The IOCP entries
+> under "Fixed" are a native crash and a silent data-corruption bug — the most severe thing a
+> PATCH can carry, and still not an API break. The one behavior change that a caller could
+> notice is `configure()` now rejecting input it used to swallow. Private C++ files, classes and
+> namespaces remain a non-stable ABI.
 
 ### Changed
 - **File-lifecycle policy moved into `core`; backends keep only system-call primitives.**
