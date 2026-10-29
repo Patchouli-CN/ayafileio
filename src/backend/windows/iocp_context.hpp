@@ -77,4 +77,8 @@ private:
 
 QuarantineStats quarantine_stats();
 
+// 请求收尾：每个请求恰好被释放一次，且一律延迟 quarantine_ms 之后再归还内存。
+// 迟到的完成包因此在内存仍有效的窗口内到达，靠 state/reaped 两步判断安全走开。
+void release_request(IocpRequest* request);
+
 } // namespace ayafileio::backend::windows

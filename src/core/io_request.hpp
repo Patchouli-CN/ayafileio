@@ -33,6 +33,9 @@ struct IORequest {
     std::size_t reqSize{0};
     ReqType type{ReqType::Other};
     std::atomic<IOState> state{IOState::PENDING};
+    // 「已经收尾过」的原子标志：请求内存只允许被释放一次，无论是提交线程（同步完成）
+    // 还是 worker（完成包）先到。见 iocp_worker.cpp 的 release_request。
+    std::atomic<bool> reaped{false};
     bool isReadinto{false};
     bool holdsWriteBuf{false};
 

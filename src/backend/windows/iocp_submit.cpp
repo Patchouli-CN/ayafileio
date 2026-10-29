@@ -113,8 +113,12 @@ void start_read(
         // 现在不需要那个标志：谁负责收尾由内核模式唯一决定，不必跨线程协商。
         if (session->skipCPOnSuccess) {
             session->complete_request();
+            // 先落 state 再交付：万一本该被这个模式抑制掉的完成包仍然到了
+            // （实测发生过 —— 见 io_request::reaped 的注释），worker 的 CAS 会失败，
+            // 它只做收尾，绝不会按 IORequest 去解引用一块正在被别处使用的内存。
+            request->state.store(core::IOState::RESOLVED, std::memory_order_relaxed);
             request->operation->complete_inline(core::make_io_completion(request, got));
-            IOCP_REQ_FREE(request);
+            release_request(request);
         }
         return;
     }
@@ -124,7 +128,7 @@ void start_read(
     session->complete_request();
     request->state.store(core::IOState::REJECTED, std::memory_order_relaxed);
     request->operation->complete_inline(failure(request->type, error, "ReadFile failed"));
-    IOCP_REQ_FREE(request);
+    release_request(request);
 }
 
 void start_write(
@@ -153,8 +157,9 @@ void start_write(
         // 提交线程只负责那條"内核承诺不投包"的分支。
         if (session->skipCPOnSuccess) {
             session->complete_request();
+            request->state.store(core::IOState::RESOLVED, std::memory_order_relaxed);
             request->operation->complete_inline(core::make_io_completion(request, wrote));
-            IOCP_REQ_FREE(request);
+            release_request(request);
         }
         return;
     }
@@ -165,7 +170,7 @@ void start_write(
     session->complete_request();
     request->state.store(core::IOState::REJECTED, std::memory_order_relaxed);
     request->operation->complete_inline(failure(request->type, error, "WriteFile failed"));
-    IOCP_REQ_FREE(request);
+    release_request(request);
 }
 
 } // namespace
