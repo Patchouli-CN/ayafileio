@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Versioning policy**: **PATCH**. No public signature is added or removed, and no documented
 > behavior changes except one method that had been behaving differently on different backends —
-> restoring CPython semantics there is a fix, not a break. Private C++ files, classes and
-> namespaces remain a non-stable ABI.
+> restoring CPython semantics there is a fix, not a break. The IOCP entries under "Fixed" are a
+> native crash and a silent data-corruption bug: the most severe thing a PATCH can carry, and
+> still not an API break. Private C++ files, classes and namespaces remain a non-stable ABI.
 
 ### Changed
 - **File-lifecycle policy moved into `core`; backends keep only system-call primitives.**
@@ -27,6 +28,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a cross-translation-unit call would give up inlining on the hot path.
 
 ### Fixed
+- **Windows IOCP: native access violation from a completion packet arriving after its request
+  memory had been released and reused.** One I/O path freed its `IocpRequest` immediately — the
+  synchronous-success path taken when `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` is in effect — on
+  the assumption that the kernel then never queues a completion packet for it. That assumption
+  is a kernel *promise*, not a guarantee, and when a packet did arrive it landed on freed memory
+  that had since been recycled by a Python string. The crash signature was a register holding
+  UTF-16 text (`...mov rax,qword ptr [rcx]  rcx = 0x006f006800740079`) while dereferencing
+  `request->operation`. Every other release path in the backend already ran through a 1000 ms
+  quarantine; this one had no buffer at all.
+
+  Request reclamation now goes through a single `release_request()`: an atomic `reaped` flag
+  guarantees each request is released exactly once no matter which thread gets there first
+  (a double release pushed the same address into the free list twice, aliasing two in-flight
+  requests), and *every* release is deferred, so a late packet finds memory that is still valid
+  and whose `state` has already been rewritten — its CAS fails and it retires quietly instead of
+  being interpreted as a live `IORequest`. The reclamation queue is per-thread for both the
+  submitter and the worker (the submitter has no periodic wake-up, so expiry is checked on push),
+  which keeps it lock-free; a backlog cap of 4096 bounds the window at roughly `4096 /
+  throughput` — about 68 ms at 60K ops/s, still orders of magnitude beyond completion-packet
+  delivery latency — instead of pinning sixty thousand requests for a full second.
+
+  This is the only sound shape: a completion packet carries just `OVERLAPPED*` and the completion
+  key, no sequence number, so *no* per-request tag (a generation counter, `OVERLAPPED::hEvent`,
+  a registry keyed by address) can distinguish a stale packet from a valid one — reading a tag
+  requires reading the very memory that may have been reused. Time separation is the defence.
+
+  No measurable cost: a back-to-back A/B (`read_many`, 64 × 4 KiB, Windows IOCP) measured
+  59.2K ops/s median after the fix against 55.3K before.
+- **Windows IOCP: a single I/O could be delivered twice, with the second delivery reading a
+  buffer that had already been moved.** The synchronous-success path that expects a completion
+  packet delivered the result *and* let the worker deliver it too, arbitrated by a plain `bool`
+  written by the submitting thread and read by the worker — a data race by the C++ memory model.
+  When the worker lost that race it called `make_io_completion` a second time on an
+  already-moved-from `Buffer`, producing an uninitialized `bytes` object from
+  `PyBytes_FromStringAndSize(nullptr, n)` and resolving an already-resolved Future (the
+  `InvalidStateError` was swallowed, so it looked healthy). Delivery is now decided solely by the
+  kernel mode: when a packet is guaranteed, the submitter neither delivers nor releases, and the
+  worker handles it exactly like an asynchronous completion. The flag is gone.
 - **`tell()` on a closed file now raises `ValueError` on every backend.** It was the only entry
   point without the `self._closed` guard — the other fourteen had it — so whether you got an
   error depended on the backend doing it for you: on IOCP the backend's own "file not open"
@@ -47,12 +86,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the policy layer. The most useful one pins *when* the size cache is refreshed — it must not
   stat before EOF — which is an internal timing property that end-to-end tests cannot observe,
   and which had been the subject of repeated fixes.
+- **The IOCP completion-packet delivery path is now exercised in CI.** On most machines
+  `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` succeeds and every synchronous completion is therefore
+  delivered inline — measured here as 4000/4000 small reads never touching the completion port —
+  so the *other* path had never run in CI even though it is the common state on user machines
+  (filter drivers, AV, network redirectors can all make `SetFileCompletionNotificationModes`
+  fail). Setting `AYAFILEIO_NO_SKIP_CP=1` forces that path, and the new
+  `test-iocp-packet-path` CI job runs the full suite through it, first asserting the variable is
+  actually seen so the job cannot pass vacuously.
 
 ### Compatibility
 - No public API change. Error types, messages for existing paths, and the write path are
   untouched.
 - `tell()` on a closed file changes from "depends on the backend" to `ValueError`; this matches
   Python's builtin `open()` and the rest of this library's entry points.
+- `AYAFILEIO_NO_SKIP_CP` is a testing knob, not public API; it is read once per session and
+  unset in normal use.
 
 ## [2.0.1] - 2026-10-28
 
