@@ -44,7 +44,6 @@ jobs:
       CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       ITERATIONS: ${{ github.event.inputs.iterations || '100' }}
-      DUMP_DIR: ${{ runner.temp }}/crash_dumps
     steps:
     - uses: actions/checkout@v6.0.2
 
@@ -79,19 +78,19 @@ jobs:
         if (-not (Test-Path $exe)) { throw "procdump64.exe not found after extract" }
         & $exe -accepteula -? | Select-Object -First 3
         echo "PROCDUMP=$exe" >> $env:GITHUB_ENV
-        New-Item -ItemType Directory -Force -Path "$env:DUMP_DIR" | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "crash_dumps") | Out-Null
 
     - name: Enable core dumps (Linux)
       if: runner.os == 'Linux'
       run: |
         ulimit -c unlimited || true
         sudo sysctl -w kernel.core_pattern='core.%p' || true
-        mkdir -p "$DUMP_DIR"
+        mkdir -p "$RUNNER_TEMP/crash_dumps"
 
     - name: Note crash report dir (macOS)
       if: runner.os == 'macOS'
       run: |
-        mkdir -p "$DUMP_DIR"
+        mkdir -p "$RUNNER_TEMP/crash_dumps"
         ls -la ~/Library/Logs/DiagnosticReports 2>/dev/null | tail -5 || true
 
     # ── 主循环：第一次红灯立刻停 ─────────────────────────────────────────
@@ -105,6 +104,7 @@ jobs:
       shell: bash
       timeout-minutes: 150
       run: |
+        DUMP_DIR="$RUNNER_TEMP/crash_dumps"
         mkdir -p soak "$DUMP_DIR"
         for i in $(seq 1 "$ITERATIONS"); do
           before=$(ls "$DUMP_DIR"/*.dmp 2>/dev/null | wc -l)
@@ -156,7 +156,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: soak-dumps-${{ matrix.os }}-py${{ matrix.python-version }}-iter${{ steps.soak.outputs.failed_iteration }}
-        path: ${{ env.DUMP_DIR }}/*.dmp
+        path: ${{ runner.temp }}/crash_dumps/*.dmp
         if-no-files-found: ignore
         retention-days: 14
 
