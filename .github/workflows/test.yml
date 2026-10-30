@@ -182,7 +182,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     env:
-      CMAKE_BUILD_TYPE: Release
+      # 带调试信息：失败的 Windows job 需要 PDB 才能把 dump 还原成函数名。
+      CMAKE_BUILD_TYPE: RelWithDebInfo
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
     - uses: actions/checkout@v6.0.2
@@ -200,7 +201,7 @@ jobs:
     - name: Build ayafileio (Release mode)
       timeout-minutes: 5
       run: |
-        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
+        $env:CMAKE_ARGS = "-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
         # dev 依赖只有一处真源：pyproject 的 [project.optional-dependencies].dev；
         # 构建期依赖（scikit-build-core / nanobind）由 build-system 的隔离环境安装。
         pip install -e ".[dev]" -v

@@ -41,7 +41,14 @@ jobs:
       # 让 CPython 自己先把出错线程的 Python 栈打出来。
       PYTHONFAULTHANDLER: "1"
       PYTHONUNBUFFERED: "1"
-      CMAKE_BUILD_TYPE: Release
+      # 必须是带调试信息的构建：RelWithDebInfo = -O2 /Zi + 链接 /DEBUG，
+      # 才会产出 .pdb。Release 配置下 MSVC 不生成 PDB，dump 里就只剩
+      # `PyInit__ayafileio+0x1752` 这种近似符号 —— 等于知道崩在 worker 线程
+      # 的某把 mutex 上，却不知道是哪一行。soak 不测性能，这点开销可以忽略。
+      CMAKE_BUILD_TYPE: RelWithDebInfo
+      # scikit-build-core 只认 CMAKE_ARGS；只给 CMAKE_BUILD_TYPE 环境变量不会
+      # 进 CMake 缓存，构建仍是默认的 Release（= 没有 PDB）。
+      CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       ITERATIONS: ${{ github.event.inputs.iterations || '100' }}
     steps:
@@ -53,7 +60,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
         allow-prereleases: true
 
-    - name: Build ayafileio (Release)
+    - name: Build ayafileio (RelWithDebInfo)
       timeout-minutes: 10
       run: |
         python -m pip install -U pip
