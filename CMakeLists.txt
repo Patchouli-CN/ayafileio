@@ -113,6 +113,7 @@ set(PYTHON_SOURCES
     src/bindings/python/py_globals.cpp
     src/bindings/python/result_batcher.cpp
     src/bindings/python/batcher_registry.cpp
+    src/bindings/python/py_whole.cpp
     src/bindings/python/py_error.cpp
     src/bindings/python/py_future.cpp
     src/bindings/python/py_buffer.cpp

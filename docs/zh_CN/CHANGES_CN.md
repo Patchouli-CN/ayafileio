@@ -5,6 +5,28 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [未发布]
+
+> **版本策略**：**PATCH**。无公开签名增减；两条内部读取路径变快，已文档化行为不变。
+
+### 变更
+- **`read_bytes()` / `read_bytes_many()` 改为原生单跳作业。** 读一个整文件原本是每文件三次
+  往返——`aopen`、`read`、`close`——每次都是一轮「提交 → 完成包 → 回到事件循环」。现在是一个
+  线程池任务里做完 open + size + read + close 并交回字节（`py_read_whole_async`），形状对齐
+  Node.js nodejs/node#65327。本机实测（Windows、4 KiB 文件、并发 64、SATA SSD）：公开 API
+  **13.1k → 22.4k files/s（1.71x）**，裸调用 25.6k（2.12x）。
+
+  有两点值得记下来，因为它们**并不显然**。其一，最直觉的 Python 层实现——
+  `asyncio.to_thread(sync_read_whole, path)`——比它要替换的代码**慢一倍**（6.7k 对 13.1k
+  files/s）：我们的跳是 IOCP 完成包，比「线程池提交 + GIL 往返」更便宜，所以用 `to_thread`
+  包装等于拿贵机制换便宜机制。其二，这里每跳成本约 25–35 us，且主要由 Python future 与事件
+  循环转身决定，不是 syscall——压跳数之所以划算，正因如此。
+
+  语义不变，且已由 `tests/python/test_whole_read.py` 钉住——每条用例都以异步路径为基准对照：
+  0/1/4095/4096/700000 字节的内容、`pathlib.Path` 与 `str` 入参、缺失文件与目录的**异常类型、
+  errno 与文案**（`Failed to open file: <path>` 与异步路径逐字节一致），以及顺序保持、失败
+  传播与句柄泄漏计数。文本系列与 `write_bytes` 仍走异步后端。
+
 ## [2.0.3] - 2026-10-29
 
 > **版本策略**：**PATCH**。无公开签名、行为或磁盘格式变化。

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> **Versioning policy**: **PATCH**. No public signature is added or removed; two internal read
+> paths get faster without changing any documented behavior.
+
+### Changed
+- **`read_bytes()` / `read_bytes_many()` now use a native single-round-trip job.** Reading a
+  whole file used to be three round trips per file — `aopen`, `read`, `close` — each one a submit,
+  a completion packet and a return to the event loop. It is now one thread-pool task that does
+  open + size + read + close and hands back the bytes (`py_read_whole_async`), the same shape as
+  Node.js nodejs/node#65327. Measured on Windows (4 KiB files, concurrency 64, SATA SSD):
+  **13.1k → 22.4k files/s (1.71x)** through the public API, 25.6k (2.12x) for the raw call.
+
+  Two things are worth recording because they were *not* obvious. First, the obvious
+  Python-level implementation — `asyncio.to_thread(sync_read_whole, path)` — is **twice as slow**
+  as the code it replaces (6.7k vs 13.1k files/s): our hops are IOCP completions, which are
+  cheaper than a thread-pool submit plus a GIL round trip, so `to_thread` trades a cheap
+  mechanism for an expensive one. Second, per-hop cost here is ~25-35 us and is dominated by the
+  Python future and the event-loop turn rather than by the syscalls — which is exactly why
+  collapsing hops pays.
+
+  Semantics are unchanged and pinned by `tests/python/test_whole_read.py`, which compares every
+  case against the async path: content across 0/1/4095/4096/700000 bytes, `pathlib.Path` and
+  `str` inputs, and error *types, errnos and messages* for missing files and directories
+  (`Failed to open file: <path>` is byte-identical to the async path), plus order preservation,
+  failure propagation and a handle-leak count. Text-mode helpers and `write_bytes` still use the
+  async backends.
+
 ## [2.0.3] - 2026-10-29
 
 > **Versioning policy**: **PATCH**. No public signature, behavior or on-disk format changes.

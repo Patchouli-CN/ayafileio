@@ -5,6 +5,9 @@
 namespace ayafileio::python {
 
 nb::object py_open_async(const char* path, const char* mode);
+
+// 整文件读取作为一个池任务（open+size+read+close），一跳完成。
+nb::object py_read_whole_async(const char* path);
 uint64_t native_aopen_submission_count();
 
 void py_configure(nb::dict options);

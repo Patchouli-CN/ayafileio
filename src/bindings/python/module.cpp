@@ -28,6 +28,7 @@ NB_MODULE(_ayafileio, module) {
 
     module.def("cleanup", &python::py_cleanup);
     module.def("open_async", &python::py_open_async, nb::arg("path"), nb::arg("mode") = "rb");
+    module.def("read_whole_async", &python::py_read_whole_async, nb::arg("path"));
     module.def("debug_batcher_outstanding", &python::py_debug_batcher_outstanding);
 #ifdef _WIN32
     module.def("debug_quarantine_stats", &python::py_debug_quarantine_stats);
