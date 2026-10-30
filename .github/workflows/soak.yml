@@ -161,10 +161,15 @@ jobs:
         if (-not $cdb) { Write-Host "cdb not found — dump artifacts are still uploaded"; exit 0 }
         Write-Host "cdb: $cdb"
         # 符号：微软公共符号 + 工作区（我们的 .pyd/.pdb）
-        $sym = "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;$PWD"
+        # 符号路径必须包含**构建输出目录**：pyd 与它的 pdb 都躺在 build/.../Release/，
+        # 只指向仓库根是找不到的，栈上就只剩 PyInit__ayafileio+0x... 这种近似符号。
+        $pdbDirs = @(Get-ChildItem -Path build -Recurse -Filter "*.pdb" -ErrorAction SilentlyContinue |
+          Select-Object -ExpandProperty DirectoryName -Unique)
+        $sym = "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;" + (($pdbDirs + $PWD.Path) -join ";")
+        Write-Host "symbol path: $sym"
         Get-ChildItem "$env:RUNNER_TEMP\crash_dumps" -Filter *.dmp -ErrorAction SilentlyContinue | ForEach-Object {
           Write-Host "================ dump: $($_.Name) ================"
-          & $cdb -z $_.FullName -y $sym -c ".ecxr; !analyze -v; ~*kb 40; q" 2>&1
+          & $cdb -z $_.FullName -y $sym -c ".reload /f; .ecxr; !analyze -v; ~*kb 40; q" 2>&1
         }
 
     - name: Upload per-iteration logs
