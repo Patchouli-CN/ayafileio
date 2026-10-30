@@ -213,92 +213,75 @@ jobs:
       timeout-minutes: 1
       run: |
         python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
-    - name: Install procdump and arm it (Windows)
+    - name: Install procdump (Windows)
       timeout-minutes: 2
       shell: pwsh
       run: |
-        # 不用 WER LocalDumps：hosted runner 上 HKLM（有管理员）与 HKCU 都试过，
-        # 崩溃后目录始终为空。改用 procdump 后台等待 python.exe，未处理异常即落盘。
+        # 不用 WER LocalDumps：hosted runner 上 HKLM（管理员可写）与 HKCU 都试过，
+        # 崩溃后目录始终为空。procdump 不依赖任何系统级配置。
         $zip = Join-Path $env:RUNNER_TEMP "procdump.zip"
         $dir = Join-Path $env:RUNNER_TEMP "procdump"
         Invoke-WebRequest -Uri "https://download.sysinternals.com/files/Procdump.zip" -OutFile $zip
         Expand-Archive -Path $zip -DestinationPath $dir -Force
         $exe = Join-Path $dir "procdump64.exe"
         if (-not (Test-Path $exe)) { throw "procdump64.exe not found after extract" }
-        $dumpDir = "${{ runner.temp }}\crash_dumps"
+        $dumpDir = Join-Path $env:RUNNER_TEMP "crash_dumps"
         New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
-        # -w 等 python.exe 起来；-n 5 允许连续抓多次；-ma 全内存。
-        # 用 Start-Process 放后台，这样 pytest 的退出码不受影响。
-        Start-Process -FilePath $exe -ArgumentList @(
-          "-accepteula", "-ma", "-e", "-n", "5", "-x", $dumpDir, "-w", "python.exe"
-        ) -NoNewWindow
-        Write-Host "procdump armed: $dumpDir"
+        echo "PROCDUMP=$exe" >> $env:GITHUB_ENV
         echo "dump_dir=$dumpDir" >> $env:GITHUB_ENV
-    - name: Run tests
-      timeout-minutes: 3
+        Write-Host "procdump installed: $exe"
+
+    - name: Run tests (Windows)
+      timeout-minutes: 5
       id: run_tests_windows
-      run: |
-        python -m pytest -q
-        $EXIT_CODE = $LASTEXITCODE
-        Write-Host "pytest exit code: $EXIT_CODE"
-        echo "EXIT_CODE=$EXIT_CODE" >> $env:GITHUB_ENV
-        if ($EXIT_CODE -ne 0) { exit $EXIT_CODE }
-    - name: Wait for the dump to be flushed (Windows)
-      if: always() && steps.run_tests_windows.outcome != 'success'
       shell: pwsh
       run: |
-        # WerFault 在进程退出后才落盘，立刻去读必然读到空目录 —— 这正是此前
-        # 「No crash dumps found」的原因之一。轮询到出现文件为止，上限 30 秒。
-        $dumpDir = "$env:dump_dir"
-        for ($i = 1; $i -le 30; $i++) {
-          $found = Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue
-          if ($found) { Write-Host "dump appeared after ${i}s: $($found[0].Name)"; break }
-          Start-Sleep -Seconds 1
+        # procdump 作为启动器包住 pytest：进程因未处理异常终止时自己写全内存 dump。
+        # 因此不能再靠 pytest 的退出码，改看日志与 dump 目录。
+        $log = Join-Path $env:RUNNER_TEMP "pytest.log"
+        & $env:PROCDUMP -accepteula -ma -e -x $env:dump_dir python -m pytest -q 2>&1 |
+          Tee-Object -FilePath $log
+        $dumps = @(Get-ChildItem $env:dump_dir -Filter "*.dmp" -ErrorAction SilentlyContinue).Count
+        $hasPassed = Select-String -Path $log -Pattern "\d+ passed" -Quiet
+        $hasFailed = Select-String -Path $log -Pattern "\d+ failed" -Quiet
+        Write-Host "dumps=$dumps  passed_line=$hasPassed  failed_line=$hasFailed"
+        if ($dumps -gt 0 -or -not $hasPassed -or $hasFailed) {
+          echo "EXIT_CODE=1" >> $env:GITHUB_ENV
+          Write-Host "::error::test run did not complete cleanly (dumps=$dumps)"
+          exit 1
         }
-    - name: Collect and analyze crash dumps (Windows)
+        echo "EXIT_CODE=0" >> $env:GITHUB_ENV
+
+    - name: Symbolize the dump with cdb (Windows)
       if: always() && steps.run_tests_windows.outcome != 'success'
-      timeout-minutes: 3
+      timeout-minutes: 15
       shell: pwsh
       run: |
-        $dumpDir = "$env:dump_dir"
-        Write-Host "Searching for crash dumps in: $dumpDir"
-        Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object {
-          $dmp = $_.FullName
-          Write-Host "========================================"
-          Write-Host "Analyzing dump: $dmp ($($_.LastWriteTime))"
-          Write-Host "========================================"
-          $cdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
-          if (Test-Path $cdb) {
-            & $cdb -z $dmp -c ".ecxr; !analyze -v; ~*kv; q" 2>&1
-          } else {
-            Write-Host "cdb not found, trying WinDbg..."
-            $windbg = "C:\Program Files\WindowsApps\Microsoft.WinDbg_*\amd64\dbgeng.dll"
-            Write-Host "Dump file available at: $dmp (size: $($_.Length) bytes)"
-            Write-Host "Install WinDbg from Microsoft Store for interactive analysis"
-          }
+        $dumps = @(Get-ChildItem $env:dump_dir -Filter "*.dmp" -ErrorAction SilentlyContinue)
+        if ($dumps.Count -eq 0) { Write-Host "no dump to symbolize"; exit 0 }
+        # cdb 由 choco 的 windbg 包提供；装不上也不影响 dump 本身被上传。
+        choco install -y --no-progress --limit-output windbg | Out-Null
+        $cdb = (Get-ChildItem "C:\Program Files*\Windows Kits\*\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue |
+          Select-Object -First 1).FullName
+        if (-not $cdb) { Write-Host "cdb not found — dump artifacts are still uploaded"; exit 0 }
+        Write-Host "cdb: $cdb"
+        # 符号：微软公共符号 + 工作区（我们的 .pyd/.pdb 就在这里）
+        $sym = "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;$PWD"
+        foreach ($dmp in $dumps) {
+          Write-Host "================ dump: $($dmp.Name) ================"
+          & $cdb -z $dmp.FullName -y $sym -c ".ecxr; !analyze -v; ~*kb 40; q" 2>&1
         }
-        if (-not (Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue)) {
-          Write-Host "No crash dumps found in $dumpDir"
-          Write-Host "Checking default CrashDumps folder..."
-          Get-ChildItem -Path "$env:LOCALAPPDATA\CrashDumps" -Filter "*python*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object {
-            Write-Host "Found: $($_.FullName) ($($_.LastWriteTime))"
-            if (Test-Path $cdb) {
-              & $cdb -z $_.FullName -c ".ecxr; !analyze -v; ~*kv; q" 2>&1
-            }
-          }
-        }
-        Write-Host ""
-        Write-Host "--- Application Error Events ---"
-        Get-EventLog -LogName Application -Source "Application Error" -Newest 5 -ErrorAction SilentlyContinue | Format-List
-    - name: Upload crash dumps (Windows)
+
+    - name: Upload crash dumps and PDB (Windows)
       if: always() && steps.run_tests_windows.outcome != 'success'
       uses: actions/upload-artifact@v4
       with:
         name: crash-dumps-py${{ matrix.python-version }}
         path: |
           ${{ runner.temp }}/crash_dumps/*.dmp
+          build/**/*.pdb
         if-no-files-found: ignore
-        retention-days: 7
+        retention-days: 14
 
   test-macos:
     name: "macOS (Python ${{ matrix.python-version }})"
@@ -547,33 +530,45 @@ jobs:
     - name: Check backend info
       run: |
         python -c "import ayafileio, json; print(ayafileio.get_backend_info()); print(json.dumps(ayafileio.get_capabilities(), indent=2, default=str))"
-    - name: Configure crash dumps (Windows)
+    - name: Install procdump (Windows)
       if: runner.os == 'Windows'
-      timeout-minutes: 1
+      timeout-minutes: 2
       shell: pwsh
       run: |
-        $dumpDir = "${{ runner.temp }}\crash_dumps"
+        # WER LocalDumps 在 hosted runner 上不生效（HKLM/HKCU 都试过，目录始终为空）。
+        $zip = Join-Path $env:RUNNER_TEMP "procdump.zip"
+        $dir = Join-Path $env:RUNNER_TEMP "procdump"
+        Invoke-WebRequest -Uri "https://download.sysinternals.com/files/Procdump.zip" -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath $dir -Force
+        $exe = Join-Path $dir "procdump64.exe"
+        if (-not (Test-Path $exe)) { throw "procdump64.exe not found after extract" }
+        $dumpDir = Join-Path $env:RUNNER_TEMP "crash_dumps"
         New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
-        try {
-          New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
-          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
-          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
-          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
-          Write-Host "WER LocalDumps configured: $dumpDir"
-        } catch {
-          Write-Host "WER config failed (may lack admin): $_"
-        }
+        echo "PROCDUMP=$exe" >> $env:GITHUB_ENV
         echo "dump_dir=$dumpDir" >> $env:GITHUB_ENV
+        Write-Host "procdump installed: $exe"
+
     - name: Run speed benchmark
       id: benchmark
       timeout-minutes: 8
       shell: bash
       run: |
         set +e
-        python benchmarks/t_compare.py
-        COMPARE_EXIT=$?
-        python tests/python/test_loguru.py
-        LOGURU_EXIT=$?
+        # Windows 上把两次运行都包进 procdump：崩了才有 dump。procdump 只是启动器，
+        # 不注入、不停顿，对吞吐计量的影响在噪声内。
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          procdump_posix=$(cygpath -u "$PROCDUMP")
+          dumpdir_win=$(cygpath -w "$dump_dir")
+          "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python benchmarks/t_compare.py
+          COMPARE_EXIT=$?
+          "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python tests/python/test_loguru.py
+          LOGURU_EXIT=$?
+        else
+          python benchmarks/t_compare.py
+          COMPARE_EXIT=$?
+          python tests/python/test_loguru.py
+          LOGURU_EXIT=$?
+        fi
         set -e
 
         echo "Benchmark exit codes: t_compare=$COMPARE_EXIT test_loguru=$LOGURU_EXIT"
@@ -602,44 +597,25 @@ jobs:
         fi
 
         exit $((COMPARE_EXIT || LOGURU_EXIT))
-    - name: Analyze crash dumps (Windows CDB)
+    - name: Symbolize dumps with cdb (Windows)
       if: always() && runner.os == 'Windows'
-      timeout-minutes: 5
+      timeout-minutes: 15
       shell: pwsh
       run: |
-        $dumpDir = "$env:dump_dir"
-        $cdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
-        Write-Host "=== Searching for crash dumps in: $dumpDir ==="
-        $dumps = @(Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
-        if ($dumps.Count -eq 0) {
-          Write-Host "No crash dumps found in $dumpDir"
-          Write-Host "Checking default CrashDumps folder..."
-          $dumps = @(Get-ChildItem -Path "$env:LOCALAPPDATA\CrashDumps" -Filter "*python*.dmp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
-        }
-        if ($dumps.Count -eq 0) {
-          Write-Host "No crash dumps found anywhere."
-          exit 0
-        }
-        $PYTHON_EXE = (Get-Command python).Source
-        Write-Host "Python executable: $PYTHON_EXE"
+        $dumps = @(Get-ChildItem $env:dump_dir -Filter "*.dmp" -ErrorAction SilentlyContinue)
+        if ($dumps.Count -eq 0) { Write-Host "no dump produced"; exit 0 }
+        # cdb 由 choco 的 windbg 包提供；装不上也不影响 dump 被上传。
+        choco install -y --no-progress --limit-output windbg | Out-Null
+        $cdb = (Get-ChildItem "C:\Program Files*\Windows Kits\*\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue |
+          Select-Object -First 1).FullName
+        if (-not $cdb) { Write-Host "cdb not found — dump artifacts are still uploaded"; exit 0 }
+        Write-Host "cdb: $cdb"
+        $sym = "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;$PWD"
         foreach ($dmp in $dumps) {
-          Write-Host "========================================"
-          Write-Host "Analyzing dump: $($dmp.FullName) ($($dmp.LastWriteTime)) size=$($dmp.Length)"
-          Write-Host "========================================"
-          if (Test-Path $cdb) {
-            Write-Host "--- CDB Stack Trace (all threads) ---"
-            & $cdb -z $dmp.FullName -c ".ecxr; !analyze -v; ~*kv; q" 2>&1 | Select-Object -First 500
-          } else {
-            Write-Host "CDB not found at $cdb, trying alternative paths..."
-            $altCdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
-            if (Test-Path $altCdb) {
-              & $altCdb -z $dmp.FullName -c ".ecxr; !analyze -v; ~*kv; q" 2>&1 | Select-Object -First 500
-            } else {
-              Write-Host "CDB not available. Dump file at: $($dmp.FullName)"
-              Write-Host "Install Windows SDK Debugging Tools for analysis."
-            }
-          }
+          Write-Host "================ dump: $($dmp.Name) ================"
+          & $cdb -z $dmp.FullName -y $sym -c ".ecxr; !analyze -v; ~*kb 40; q" 2>&1
         }
+
     - name: Upload core dumps from benchmark
       if: always() && steps.benchmark.outcome != 'success'
       uses: actions/upload-artifact@v4
@@ -650,6 +626,7 @@ jobs:
           *.core
           /tmp/core.*
           **/*.dmp
+          build/**/*.pdb
         if-no-files-found: ignore
         retention-days: 7
     - name: Upload benchmark results
