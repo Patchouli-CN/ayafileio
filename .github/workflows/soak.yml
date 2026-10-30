@@ -148,6 +148,25 @@ jobs:
         echo "all $ITERATIONS iterations passed"
 
     # ── 失败时把现场全部传上来 ───────────────────────────────────────────
+    # dump 里栈是"地址"，要有符号才能变成函数名。PDB 就在工作区（CI 刚构建完），
+    # 所以分析必须在 CI 里做；cdb 由 choco 的 windbg 包提供，属于尽力而为：
+    # 装不上也不影响 dump 本身被上传。
+    - name: Symbolize the dump with cdb (Windows)
+      if: always() && runner.os == 'Windows' && env.SOAK_FAILED == '1'
+      timeout-minutes: 15
+      shell: pwsh
+      run: |
+        choco install -y --no-progress --limit-output windbg | Out-Null
+        $cdb = (Get-ChildItem "C:\Program Files*\Windows Kits\*\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+        if (-not $cdb) { Write-Host "cdb not found — dump artifacts are still uploaded"; exit 0 }
+        Write-Host "cdb: $cdb"
+        # 符号：微软公共符号 + 工作区（我们的 .pyd/.pdb）
+        $sym = "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;$PWD"
+        Get-ChildItem "$env:RUNNER_TEMP\crash_dumps" -Filter *.dmp -ErrorAction SilentlyContinue | ForEach-Object {
+          Write-Host "================ dump: $($_.Name) ================"
+          & $cdb -z $_.FullName -y $sym -c ".ecxr; !analyze -v; ~*kb 40; q" 2>&1
+        }
+
     - name: Upload per-iteration logs
       if: always() && env.SOAK_FAILED == '1'
       uses: actions/upload-artifact@v4
@@ -162,7 +181,10 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: soak-dumps-${{ matrix.os }}-py${{ matrix.python-version }}-iter${{ steps.soak.outputs.failed_iteration }}
-        path: ${{ runner.temp }}/crash_dumps/*.dmp
+        # PDB 一起带走：万一 CI 里 cdb 装不上，事后在任何机器上都能把地址还原成函数名。
+        path: |
+          ${{ runner.temp }}/crash_dumps/*.dmp
+          build/**/*.pdb
         if-no-files-found: ignore
         retention-days: 14
 
