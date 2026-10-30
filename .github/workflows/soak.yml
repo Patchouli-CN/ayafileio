@@ -41,6 +41,9 @@ jobs:
       # 让 CPython 自己先把出错线程的 Python 栈打出来。
       PYTHONFAULTHANDLER: "1"
       PYTHONUNBUFFERED: "1"
+      # 打开 Yuyuko 的数据断点监视：任何线程写 ResultBatcher 的 m_mtx
+      # 都会打印 WATCH-HIT（写入者模块+偏移+线程）。Linux/macOS 上是 no-op。
+      AYAFILEIO_WATCH_BATCHER: "1"
       # 必须是带调试信息的构建：RelWithDebInfo = -O2 /Zi + 链接 /DEBUG，
       # 才会产出 .pdb。Release 配置下 MSVC 不生成 PDB，dump 里就只剩
       # `PyInit__ayafileio+0x1752` 这种近似符号 —— 等于知道崩在 worker 线程

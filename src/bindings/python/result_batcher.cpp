@@ -1,5 +1,7 @@
 #include "result_batcher.hpp"
 #include "../../core/config.hpp"
+#include "../../diagnostics/yuyuko/mem_watch.hpp"
+#include <cstdlib>
 #include <nanobind/nanobind.h>
 #include <cmath>
 #include <memory>
@@ -13,6 +15,18 @@ ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
 
     m_current_threshold.store(threshold, std::memory_order_relaxed);
     m_current_idle_ms.store(idle_timeout_ms, std::memory_order_relaxed);
+
+    // ── 可选：用 x64 数据断点监视这把 mutex 的写入者 ──────────────────────
+    // 崩溃现场（msvcp140!_Mtx_lock，rcx=0x70）指向 get_timeout_ms() 锁 m_mtx 时
+    // 该字段已是垃圾值，说明它被**别处写坏**了。CRC 类工具只能事后发现"内容变了"，
+    // 数据断点能在写入指令执行后当场报告"谁写的"（模块+偏移+线程）。
+    //
+    // 默认关闭；设 AYAFILEIO_WATCH_BATCHER=1 才装，因为硬件最多 4 个断点、
+    // 且命中后会摘除该槽。
+    static const bool watch_batcher = std::getenv("AYAFILEIO_WATCH_BATCHER") != nullptr;
+    if (watch_batcher) {
+        diagnostics::yuyuko::mem_watch(&m_mtx, sizeof(void*), "ResultBatcher::m_mtx");
+    }
 
     nb::object on_loop_collected = nb::cpp_function([this](nb::handle) {
         std::lock_guard<std::mutex> lock(m_scheduler_mtx);

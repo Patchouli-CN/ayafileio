@@ -189,7 +189,9 @@ target_include_directories(aya_backend PRIVATE
 )
 target_link_libraries(aya_backend PRIVATE aya_core aya_platform)
 
-add_library(aya_diagnostics OBJECT src/diagnostics/yuyuko.cpp)
+add_library(aya_diagnostics OBJECT
+    src/diagnostics/yuyuko.cpp
+    src/diagnostics/yuyuko/mem_watch.cpp)
 target_include_directories(aya_diagnostics PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/diagnostics
