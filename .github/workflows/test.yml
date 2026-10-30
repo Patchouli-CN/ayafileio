@@ -220,10 +220,10 @@ jobs:
         $dumpDir = "${{ runner.temp }}\crash_dumps"
         New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
         try {
-          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
+          New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
           Write-Host "WER LocalDumps configured: $dumpDir"
         } catch {
           Write-Host "WER config failed (may lack admin): $_"
@@ -238,6 +238,18 @@ jobs:
         Write-Host "pytest exit code: $EXIT_CODE"
         echo "EXIT_CODE=$EXIT_CODE" >> $env:GITHUB_ENV
         if ($EXIT_CODE -ne 0) { exit $EXIT_CODE }
+    - name: Wait for WER to finish writing dumps (Windows)
+      if: always() && steps.run_tests_windows.outcome != 'success'
+      shell: pwsh
+      run: |
+        # WerFault 在进程退出后才落盘，立刻去读必然读到空目录 —— 这正是此前
+        # 「No crash dumps found」的原因之一。轮询到出现文件为止，上限 30 秒。
+        $dumpDir = "$env:dump_dir"
+        for ($i = 1; $i -le 30; $i++) {
+          $found = Get-ChildItem -Path $dumpDir -Filter "*.dmp" -ErrorAction SilentlyContinue
+          if ($found) { Write-Host "dump appeared after ${i}s: $($found[0].Name)"; break }
+          Start-Sleep -Seconds 1
+        }
     - name: Collect and analyze crash dumps (Windows)
       if: always() && steps.run_tests_windows.outcome != 'success'
       timeout-minutes: 3
@@ -273,6 +285,15 @@ jobs:
         Write-Host ""
         Write-Host "--- Application Error Events ---"
         Get-EventLog -LogName Application -Source "Application Error" -Newest 5 -ErrorAction SilentlyContinue | Format-List
+    - name: Upload crash dumps (Windows)
+      if: always() && steps.run_tests_windows.outcome != 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: crash-dumps-py${{ matrix.python-version }}
+        path: |
+          ${{ runner.temp }}/crash_dumps/*.dmp
+        if-no-files-found: ignore
+        retention-days: 7
 
   test-macos:
     name: "macOS (Python ${{ matrix.python-version }})"
@@ -529,10 +550,10 @@ jobs:
         $dumpDir = "${{ runner.temp }}\crash_dumps"
         New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
         try {
-          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
+          New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 10 -Type DWord -Force
           Write-Host "WER LocalDumps configured: $dumpDir"
         } catch {
           Write-Host "WER config failed (may lack admin): $_"
