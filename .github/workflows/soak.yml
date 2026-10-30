@@ -104,10 +104,16 @@ jobs:
       shell: bash
       timeout-minutes: 150
       run: |
+        # GitHub 的 bash 步骤默认带 -e -o pipefail：任何"预期内会失败"的命令（比如
+        # 对空目录做 ls）都会直接中止整步。这里成败由下面的判定逻辑决定，关掉它们。
+        set +eo pipefail
         DUMP_DIR="$RUNNER_TEMP/crash_dumps"
         mkdir -p soak "$DUMP_DIR"
+
+        # 数 dump 个数：用 find 而不是 ls，空目录下也返回 0。
+        count_dumps() { find "$DUMP_DIR" -maxdepth 1 -name "*.dmp" 2>/dev/null | wc -l; }
         for i in $(seq 1 "$ITERATIONS"); do
-          before=$(ls "$DUMP_DIR"/*.dmp 2>/dev/null | wc -l)
+          before=$(count_dumps)
 
           if [ "$RUNNER_OS" = "Windows" ]; then
             # procdump 需要 Windows 形式的路径；它自己拉起 python 并在崩溃时落盘。
@@ -120,13 +126,13 @@ jobs:
           fi
           rc=$?
 
-          after=$(ls "$DUMP_DIR"/*.dmp 2>/dev/null | wc -l)
+          after=$(count_dumps)
           new_dumps=$((after - before))
 
           crashed=0
-          [ "$rc" -ne 0 ] && crashed=1
-          [ "$new_dumps" -gt 0 ] && crashed=1
-          grep -qE "[0-9]+ passed" "soak/run-$i.log" || crashed=1
+          if [ "$rc" -ne 0 ]; then crashed=1; fi
+          if [ "$new_dumps" -gt 0 ]; then crashed=1; fi
+          if ! grep -qE "[0-9]+ passed" "soak/run-$i.log"; then crashed=1; fi
 
           if [ "$crashed" -ne 0 ]; then
             echo "failed_iteration=$i" >> "$GITHUB_OUTPUT"
