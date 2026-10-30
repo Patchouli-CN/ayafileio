@@ -1,17 +1,14 @@
 # 浸泡测试（soak）：把偶发从"大部分时间都过"里逼出来
 #
-# 偶发 bug 的定义就是"大多数运行通过"。单跑一次 CI 绿了，说明不了任何事 ——
-# 这一轮 Windows 3.15t 以 0xC0000005 崩过一次、重跑又绿了，正是这个处境。
+# 偶发 bug 的定义就是"大多数运行通过"。单跑一次 CI 绿了说明不了任何事。
 #
-# 所以这个工作流只做一件事：**同一份代码，三平台各跑 N 次全套，第一次非零退出就
-# 停下，并把当场的一切（dump / core / 日志）传上来。**
+# 这个工作流只做一件事：**同一份代码，三平台各跑 N 次全套，第一次非零退出就停下，
+# 并把当场的一切（dump / core / 日志）传上来。**
 #
-# 为什么是 free-threaded 3.15t：今天的崩溃只出现在无 GIL 构建上，线程交错最凶。
+# 为什么是 free-threaded 3.15t：崩溃只出现在无 GIL 构建上，线程交错最凶。
 #
-# 触发方式：
-#   * 手动：workflow_dispatch（可指定次数，默认 100）
-#   * 定时：每天一次
-#   * **不挂在 push 上** —— 100 次 × 3 平台的代价不该由每次提交承担。
+# 触发方式：手动（可指定次数，默认 100）/ 每天一次。**不挂 push** —— 100 次 × 3 平台
+# 的代价不该由每次提交承担。
 name: soak
 
 on:
@@ -32,7 +29,6 @@ jobs:
   soak:
     name: "Soak ${{ matrix.os }} (py${{ matrix.python-version }})"
     runs-on: ${{ matrix.os }}
-    # 100 次 × 约 15 s ≈ 25 min，加上构建与 dump 收集，留足余量。
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -42,13 +38,13 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
-      # 崩溃时让 CPython 自己把出错线程的栈打出来（free-threaded 下 C 栈拿不到，
-      # 但 Python 栈仍是最直接的线索）。
+      # 让 CPython 自己先把出错线程的 Python 栈打出来。
       PYTHONFAULTHANDLER: "1"
       PYTHONUNBUFFERED: "1"
       CMAKE_BUILD_TYPE: Release
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       ITERATIONS: ${{ github.event.inputs.iterations || '100' }}
+      DUMP_DIR: ${{ runner.temp }}/crash_dumps
     steps:
     - uses: actions/checkout@v6.0.2
 
@@ -64,74 +60,88 @@ jobs:
         python -m pip install -U pip
         pip install -e ".[dev]" -v
 
-    # ── 崩溃现场的准备：三平台各一套 ─────────────────────────────────────
-    - name: Configure crash dumps (Windows)
+    # ── 崩溃现场准备 ────────────────────────────────────────────────────
+    #
+    # Windows 上**不用 WER LocalDumps**：hosted runner 上两种配置都试过——
+    #   * HKLM（runner 以管理员运行，写入成功）→ 崩溃后目录仍然为空
+    #   * HKCU（不需要提权）                    → 同样为空
+    # 所以换 procdump：它作为启动器包住 pytest，进程因未处理异常终止时自己写
+    # 全内存 dump（-ma），不依赖任何系统级配置。
+    - name: Install procdump (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        # HKCU 不需要管理员权限；HKLM 在 hosted runner 上通常写不进去，
-        # 写不进去就等于没配 —— 这正是此前一直 "No crash dumps found" 的原因。
-        $dumpDir = "${{ runner.temp }}\crash_dumps"
-        New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
-        try {
-          New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Force | Out-Null
-          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpFolder" -Value $dumpDir -Type String -Force
-          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpType" -Value 2 -Type DWord -Force
-          Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" -Name "DumpCount" -Value 20 -Type DWord -Force
-          Write-Host "WER LocalDumps (HKCU) configured: $dumpDir"
-        } catch {
-          Write-Host "WER config failed: $_"
-        }
-        echo "dump_dir=$dumpDir" >> $env:GITHUB_ENV
+        $zip = Join-Path $env:RUNNER_TEMP "procdump.zip"
+        $dir = Join-Path $env:RUNNER_TEMP "procdump"
+        Invoke-WebRequest -Uri "https://download.sysinternals.com/files/Procdump.zip" -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath $dir -Force
+        $exe = Join-Path $dir "procdump64.exe"
+        if (-not (Test-Path $exe)) { throw "procdump64.exe not found after extract" }
+        & $exe -accepteula -? | Select-Object -First 3
+        echo "PROCDUMP=$exe" >> $env:GITHUB_ENV
+        New-Item -ItemType Directory -Force -Path "$env:DUMP_DIR" | Out-Null
 
     - name: Enable core dumps (Linux)
       if: runner.os == 'Linux'
       run: |
         ulimit -c unlimited || true
-        # 让 core 落在工作目录里，便于上传。
         sudo sysctl -w kernel.core_pattern='core.%p' || true
-    - name: Enable crash reports (macOS)
+        mkdir -p "$DUMP_DIR"
+
+    - name: Note crash report dir (macOS)
       if: runner.os == 'macOS'
       run: |
-        # macOS 的崩溃报告由系统写入 ~/Library/Logs/DiagnosticReports（.ips）。
+        mkdir -p "$DUMP_DIR"
         ls -la ~/Library/Logs/DiagnosticReports 2>/dev/null | tail -5 || true
 
     # ── 主循环：第一次红灯立刻停 ─────────────────────────────────────────
+    #
+    # 判定"红了"用三个信号，任一成立即失败（不依赖 procdump 的退出码语义）：
+    #   1) 退出码非零
+    #   2) 本轮新出现了 dump 文件  ← 原生崩溃
+    #   3) 日志里没有 "N passed"    ← 进程中途死掉（faulthandler 只留下一行 AV）
     - name: Soak ${{ env.ITERATIONS }} iterations
       id: soak
       shell: bash
       timeout-minutes: 150
       run: |
-        mkdir -p soak
-        failed=0
+        mkdir -p soak "$DUMP_DIR"
         for i in $(seq 1 "$ITERATIONS"); do
-          echo "=== iteration $i / $ITERATIONS ==="
-          if python -m pytest -q > "soak/run-$i.log" 2>&1; then
-            tail -n 1 "soak/run-$i.log"
+          before=$(ls "$DUMP_DIR"/*.dmp 2>/dev/null | wc -l)
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # procdump 需要 Windows 形式的路径；它自己拉起 python 并在崩溃时落盘。
+            procdump_posix=$(cygpath -u "$PROCDUMP")
+            dumpdir_win=$(cygpath -w "$DUMP_DIR")
+            "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python -m pytest -q \
+              > "soak/run-$i.log" 2>&1
           else
-            failed=1
+            python -m pytest -q > "soak/run-$i.log" 2>&1
+          fi
+          rc=$?
+
+          after=$(ls "$DUMP_DIR"/*.dmp 2>/dev/null | wc -l)
+          new_dumps=$((after - before))
+
+          crashed=0
+          [ "$rc" -ne 0 ] && crashed=1
+          [ "$new_dumps" -gt 0 ] && crashed=1
+          grep -qE "[0-9]+ passed" "soak/run-$i.log" || crashed=1
+
+          if [ "$crashed" -ne 0 ]; then
             echo "failed_iteration=$i" >> "$GITHUB_OUTPUT"
             echo "SOAK_FAILED=1" >> "$GITHUB_ENV"
-            echo "::error::iteration $i of $ITERATIONS failed — stopping here"
+            echo "::error::iteration $i of $ITERATIONS failed (rc=$rc, new_dumps=$new_dumps) — stopping here"
             echo "----- tail of soak/run-$i.log -----"
             tail -n 200 "soak/run-$i.log"
             exit 1
           fi
+
+          echo "iteration $i ok: $(tail -n 1 "soak/run-$i.log")"
         done
         echo "all $ITERATIONS iterations passed"
 
     # ── 失败时把现场全部传上来 ───────────────────────────────────────────
-    - name: Wait for WER to finish writing dumps (Windows)
-      if: always() && runner.os == 'Windows' && env.SOAK_FAILED == '1'
-      shell: pwsh
-      run: |
-        # WerFault 在进程退出后才落盘，立刻去读必然是空目录。
-        for ($i = 1; $i -le 30; $i++) {
-          $found = Get-ChildItem -Path "$env:dump_dir" -Filter "*.dmp" -ErrorAction SilentlyContinue
-          if ($found) { Write-Host "dump appeared after ${i}s: $($found[0].Name)"; break }
-          Start-Sleep -Seconds 1
-        }
-
     - name: Upload per-iteration logs
       if: always() && env.SOAK_FAILED == '1'
       uses: actions/upload-artifact@v4
@@ -146,7 +156,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: soak-dumps-${{ matrix.os }}-py${{ matrix.python-version }}-iter${{ steps.soak.outputs.failed_iteration }}
-        path: ${{ runner.temp }}/crash_dumps/*.dmp
+        path: ${{ env.DUMP_DIR }}/*.dmp
         if-no-files-found: ignore
         retention-days: 14
 
