@@ -5,7 +5,7 @@
 # 这个工作流只做一件事：**同一份代码，三平台各跑 N 次全套，第一次非零退出就停下，
 # 并把当场的一切（dump / core / 日志）传上来。**
 #
-# 为什么是 free-threaded 3.15t：崩溃只出现在无 GIL 构建上，线程交错最凶。
+# 默认用 free-threaded 3.15t 放大线程交错；同类竞态在 GIL 构建上也可能发生。
 #
 # 触发方式：手动（可指定次数，默认 100）/ 每天一次。**不挂 push** —— 100 次 × 3 平台
 # 的代价不该由每次提交承担。
@@ -18,6 +18,13 @@ on:
         description: "每个平台跑多少次全套（默认 100）"
         required: false
         default: "100"
+  workflow_call:
+    inputs:
+      iterations:
+        description: "每个平台跑多少次全套（默认 100）"
+        required: false
+        default: "100"
+        type: string
   schedule:
     - cron: "0 18 * * *"
 
@@ -53,7 +60,7 @@ jobs:
       # 进 CMake 缓存，构建仍是默认的 Release（= 没有 PDB）。
       CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
       CMAKE_BUILD_PARALLEL_LEVEL: 2
-      ITERATIONS: ${{ github.event.inputs.iterations || '100' }}
+      ITERATIONS: ${{ inputs.iterations || github.event.inputs.iterations || '100' }}
     steps:
     - uses: actions/checkout@v6.0.2
 

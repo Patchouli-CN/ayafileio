@@ -8,7 +8,7 @@ on:
     workflows: ["Build and Test"]
     types: [completed]
     branches: [main]
-  # Tags always build and publish — that's the release flow.
+  # Tags build and publish only after the basic tests and 100-round soak pass.
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -64,12 +64,26 @@ jobs:
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
+  basic-tests:
+    name: Build and Test
+    # main 的 workflow_run 已经在触发前完成基础测试；tag/手动发版在这里补齐。
+    if: ${{ github.event_name != 'workflow_run' }}
+    uses: ./.github/workflows/test.yml
+
+  soak:
+    name: Soak 100 iterations before release
+    needs: [check-version, basic-tests]
+    # basic-tests 在 workflow_run 下刻意 skipped；其余情况必须成功，失败则不得发版。
+    if: ${{ always() && needs.check-version.outputs.should_build == 'true' && (needs.basic-tests.result == 'success' || needs.basic-tests.result == 'skipped') && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    uses: ./.github/workflows/soak.yml
+    with:
+      iterations: "100"
+
   build:
     name: Build wheels on ${{ matrix.os }}
-    # Only run when triggered by workflow_run with success, or always for tags/manual.
-    # 手动触发且 linux_targets=riscv64 时跳过（只补慢路径）。
-    needs: check-version
-    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'riscv64') }}
+    # 基础测试与 100 轮 soak 全部通过后才构建；手动 riscv64 补发跳过普通矩阵。
+    needs: [check-version, soak]
+    if: ${{ needs.check-version.outputs.should_build == 'true' && needs.soak.result == 'success' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'riscv64') }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -120,8 +134,8 @@ jobs:
     # 拆成独立 job：不拖快路径的反馈，flake 了可以单独重跑，
     # 手动补发 wheel 时（linux_targets=fast）可以整组跳过。
     name: Build wheels on ubuntu-24.04 (riscv64)
-    needs: check-version
-    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'fast') }}
+    needs: [check-version, soak]
+    if: ${{ needs.check-version.outputs.should_build == 'true' && needs.soak.result == 'success' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'fast') }}
     runs-on: ubuntu-24.04
     env:
       CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
@@ -158,7 +172,7 @@ jobs:
     name: Publish to PyPI
     # 任一构建组被输入/守护跳过都算正常（result == skipped），
     # 两组同时跳过只会发生在版本守护命中时，此时不该走到这里。
-    needs: [build, build-riscv64]
+    needs: [check-version, build, build-riscv64]
     if: ${{ needs.check-version.outputs.should_build == 'true' && !cancelled() && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-riscv64.result == 'success' || needs.build-riscv64.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:

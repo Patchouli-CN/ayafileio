@@ -9,6 +9,13 @@
 
 > **版本策略**：**PATCH**。无公开签名增减；两条内部读取路径变快，已文档化行为不变。
 
+### 修复
+- **Windows IOCP：完成 worker 不再解引用空的 batcher 快照。**
+  `BatcherRegistry::find_live_locked()` 会先把已退役事件循环的条目置空，再到下次加锁时删除；
+  `snapshot()` 此前也会复制这个中间态占位，导致 `next_timeout_ms()` 对空指针调用
+  `ResultBatcher::get_timeout_ms()` 并使进程崩溃。现在快照会跳过空条目，同时保护同一窗口内的
+  `refresh_config()` 与 `flush_idle()`。
+
 ### 变更
 - **`read_bytes()` / `read_bytes_many()` 改为原生单跳作业。** 读一个整文件原本是每文件三次
   往返——`aopen`、`read`、`close`——每次都是一轮「提交 → 完成包 → 回到事件循环」。现在是一个

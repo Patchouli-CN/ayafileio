@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master, develop ]
     paths:
-      - 'ayafileio/**'
+      - 'python/ayafileio/**'
       - 'src/**'
       - 'tests/**'
       - '!tests/bench_*.py'
@@ -18,7 +18,7 @@ on:
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'ayafileio/**'
+      - 'python/ayafileio/**'
       - 'src/**'
       - 'tests/**'
       - '!tests/bench_*.py'
@@ -30,6 +30,7 @@ on:
       - 'pyproject.toml'
       - '.github/workflows/test.yml'
   workflow_dispatch:
+  workflow_call:
 
 # stdout/stderr 在 CI 里是管道（不是控制台），Python 会按 locale 代码页编码：
 # windows-2022 是 cp1252、ubuntu 的 LANG 可能是 C —— 中文一 print 就

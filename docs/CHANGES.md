@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Versioning policy**: **PATCH**. No public signature is added or removed; two internal read
 > paths get faster without changing any documented behavior.
 
+### Fixed
+- **Windows IOCP: completion workers no longer dereference null batcher snapshots.**
+  `BatcherRegistry::find_live_locked()` temporarily represents a retired event loop with a null
+  entry before removing it on the next lock acquisition. `snapshot()` copied that placeholder,
+  allowing `next_timeout_ms()` to call `ResultBatcher::get_timeout_ms()` on a null pointer and
+  crash the process. Snapshots now skip null entries, which also protects `refresh_config()` and
+  `flush_idle()` during the same window.
+
 ### Changed
 - **`read_bytes()` / `read_bytes_many()` now use a native single-round-trip job.** Reading a
   whole file used to be three round trips per file — `aopen`, `read`, `close` — each one a submit,

@@ -57,7 +57,9 @@ std::vector<ResultBatcher*> BatcherRegistry::snapshot() {
     std::lock_guard lock(mutex_);
     std::vector<ResultBatcher*> result;
     result.reserve(active_.size());
-    for (const auto& entry : active_) result.push_back(entry.second);
+    for (const auto& entry : active_) {
+        if (entry.second) result.push_back(entry.second);
+    }
     return result;
 }
 
