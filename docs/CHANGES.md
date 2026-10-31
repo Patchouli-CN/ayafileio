@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Versioning policy**: **PATCH**. No public signature or documented behavior changes.
 
 ### Fixed
-- **Completion batching no longer strands results when workers finish concurrently.**
+- **macOS and other backends: concurrent whole reads no longer intermittently hang in completion batching.**
   `PyOperation::complete_locked()` used to mark the last outstanding operation complete before
   converting and pushing its result. A final flush could therefore drain only part of the batch,
   while later pushes had no flush left to schedule them and their Futures waited forever. The
