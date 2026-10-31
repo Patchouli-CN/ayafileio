@@ -139,8 +139,20 @@ jobs:
             "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python -m pytest -q \
               > "soak/run-$i.log" 2>&1
           else
-            # 单轮硬超时：阻塞必须变成失败并上传日志，不能一直占到整个 job 的时限。
-            python -c 'import subprocess, sys; subprocess.run([sys.executable, "-m", "pytest", "-vv", "--capture=no", "-o", "faulthandler_timeout=30"], timeout=120, check=True)' > "soak/run-$i.log" 2>&1
+            python -m pytest -vv --capture=no -o faulthandler_timeout=30 > "soak/run-$i.log" 2>&1 &
+            test_pid=$!
+            (
+              sleep 60
+              if kill -0 "$test_pid" 2>/dev/null; then
+                echo "pytest is still running after 60s; capturing native stacks" > "soak/native-$i.log"
+                sudo -n lldb -p "$test_pid" -o "thread backtrace all" -o "detach" -o "quit" >> "soak/native-$i.log" 2>&1
+                kill -TERM "$test_pid" 2>/dev/null || true
+              fi
+            ) &
+            watchdog_pid=$!
+            wait "$test_pid"
+            rc=$?
+            kill "$watchdog_pid" 2>/dev/null || true
           fi
           rc=$?
 
