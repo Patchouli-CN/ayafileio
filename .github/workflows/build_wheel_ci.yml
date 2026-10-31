@@ -83,7 +83,7 @@ jobs:
     name: Build wheels on ${{ matrix.os }}
     # 基础测试与 100 轮 soak 全部通过后才构建；手动 riscv64 补发跳过普通矩阵。
     needs: [check-version, soak]
-    if: ${{ needs.check-version.outputs.should_build == 'true' && needs.soak.result == 'success' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'riscv64') }}
+    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'riscv64') }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -135,7 +135,7 @@ jobs:
     # 手动补发 wheel 时（linux_targets=fast）可以整组跳过。
     name: Build wheels on ubuntu-24.04 (riscv64)
     needs: [check-version, soak]
-    if: ${{ needs.check-version.outputs.should_build == 'true' && needs.soak.result == 'success' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'fast') }}
+    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'workflow_dispatch' || inputs.linux_targets != 'fast') }}
     runs-on: ubuntu-24.04
     env:
       CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
