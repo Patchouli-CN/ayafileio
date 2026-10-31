@@ -9,6 +9,8 @@
 #include "../../platform/native_file.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
@@ -79,6 +81,10 @@ nb::object py_read_whole_async(const char* path) {
 
     auto operation = std::make_shared<PyOperation>(context, core::ReqType::Read);
     operation->submitted();
+    if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
+        std::fprintf(stderr, "[DEBUG-whole] submit operation=%p path=%s\n",
+                     static_cast<void*>(operation.get()), path_copy.c_str());
+    }
 
     auto& pool = core::GlobalThreadPool::instance();
     pool.ensure_started(core::effective_io_worker_count());
@@ -93,6 +99,11 @@ nb::object py_read_whole_async(const char* path) {
                 // 阻塞 I/O 期间放掉 GIL，否则池线程会互相堵住。
                 GilRelease release;
                 buffer = read_whole_blocking(path_copy, &size, &error, &stage);
+            }
+            if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
+                std::fprintf(stderr,
+                             "[DEBUG-whole] complete operation=%p size=%zu error=%d\n",
+                             static_cast<void*>(operation.get()), size, error);
             }
             if (error != 0) {
                 operation->complete(core::Completion::failure(

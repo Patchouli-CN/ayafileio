@@ -18,6 +18,16 @@ on:
         description: "每个平台跑多少次全套（默认 100）"
         required: false
         default: "100"
+      test_selection:
+        description: "可选：pytest 节点选择器，默认全套"
+        required: false
+        default: ""
+        type: string
+      debug_whole:
+        description: "记录原生整文件读取与 batcher 回投轨迹"
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       iterations:
@@ -25,6 +35,16 @@ on:
         required: false
         default: "100"
         type: string
+      test_selection:
+        description: "可选：pytest 节点选择器，默认全套"
+        required: false
+        default: ""
+        type: string
+      debug_whole:
+        description: "记录原生整文件读取与 batcher 回投轨迹"
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "0 18 * * *"
 
@@ -61,6 +81,8 @@ jobs:
       CMAKE_ARGS: "-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_DEBUG=OFF -DENABLE_VERBOSE_LOGGING=OFF"
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       ITERATIONS: ${{ inputs.iterations || github.event.inputs.iterations || '100' }}
+      TEST_SELECTION: ${{ inputs.test_selection || '' }}
+      AYAFILEIO_DEBUG_WHOLE: ${{ inputs.debug_whole && '1' || '' }}
     steps:
     - uses: actions/checkout@v6.0.2
 
@@ -141,7 +163,7 @@ jobs:
             "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python -m pytest -q \
               > "soak/run-$i.log" 2>&1
           else
-            python -m pytest -vv --capture=no -o faulthandler_timeout=30 > "soak/run-$i.log" 2>&1 &
+            python -m pytest $TEST_SELECTION -vv --capture=no -o faulthandler_timeout=30 > "soak/run-$i.log" 2>&1 &
             test_pid=$!
             (
               sleep 60
