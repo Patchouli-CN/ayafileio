@@ -10,6 +10,11 @@
 > **版本策略**：**PATCH**。无公开签名或已文档化行为变化。
 
 ### 修复
+- **Windows：Release 与 32 位构建不再编译数据断点实现。**
+  `mem_watch.cpp` 现在仅在 `ENABLE_YUYUKO` 且 Windows x64 时编译硬件数据断点实现；
+  Release 与不支持的 32 位构建使用 `mem_watch_supported() == false` 的空实现，不再因
+  `Rip` 和 `DWORDLONG` 编译失败。
+
 - **macOS 等平台：并发整文件读取不再因完成批处理遗留结果而偶发阻塞。**
   `PyOperation::complete_locked()` 此前先在计数里完成最后一个在飞操作，再转换并 push 结果。
   最后一次 flush 因此可能只交付部分批次；后续 push 再没有 flush 负责调度，对应 Future 永久等待。

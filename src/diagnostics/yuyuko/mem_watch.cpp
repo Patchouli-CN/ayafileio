@@ -6,7 +6,7 @@
 #include <cstring>
 #include <mutex>
 
-#ifdef _WIN32
+#if defined(ENABLE_YUYUKO) && defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
 #include <windows.h>
 #include <tlhelp32.h>
 #include <vector>
@@ -25,7 +25,7 @@ struct WatchSlot {
 WatchSlot g_slots[4];
 std::mutex g_watch_mtx;
 
-#ifdef _WIN32
+#if defined(ENABLE_YUYUKO) && defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
 
 PVOID g_veh{nullptr};
 bool g_installed{false};
@@ -184,7 +184,7 @@ void clear_all_threads() {
 } // namespace
 
 bool mem_watch_supported() {
-#ifdef _WIN32
+#if defined(ENABLE_YUYUKO) && defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
 #if defined(_M_X64) || defined(__x86_64__)
     return true;
 #else
@@ -196,7 +196,7 @@ bool mem_watch_supported() {
 }
 
 bool mem_watch(void* addr, std::size_t size, const char* tag) {
-#ifdef _WIN32
+#if defined(ENABLE_YUYUKO) && defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
     if (!mem_watch_supported() || !addr) return false;
     if (size != 1 && size != 2 && size != 4 && size != 8) return false;
     if (reinterpret_cast<std::uintptr_t>(addr) % size != 0) return false;
@@ -228,7 +228,7 @@ bool mem_watch(void* addr, std::size_t size, const char* tag) {
 }
 
 void mem_watch_clear() {
-#ifdef _WIN32
+#if defined(ENABLE_YUYUKO) && defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
     {
         std::lock_guard<std::mutex> lk(g_watch_mtx);
         for (auto& w : g_slots) w.used = false;
@@ -243,7 +243,7 @@ void mem_watch_clear() {
 }
 
 std::size_t mem_watch_rearm_current_thread() {
-#ifdef _WIN32
+#if defined(ENABLE_YUYUKO) && defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
     std::size_t count = 0;
     {
         std::lock_guard<std::mutex> lk(g_watch_mtx);

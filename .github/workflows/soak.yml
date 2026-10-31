@@ -123,76 +123,12 @@ jobs:
         mkdir -p "$RUNNER_TEMP/crash_dumps"
         ls -la ~/Library/Logs/DiagnosticReports 2>/dev/null | tail -5 || true
 
-    # ── 主循环：第一次红灯立刻停 ─────────────────────────────────────────
-    #
-    # 判定"红了"用三个信号，任一成立即失败（不依赖 procdump 的退出码语义）：
-    #   1) 退出码非零
-    #   2) 本轮新出现了 dump 文件  ← 原生崩溃
-    #   3) 日志里没有 "N passed"    ← 进程中途死掉（faulthandler 只留下一行 AV）
+    # Python 统一调度独立 pytest 进程：默认 2 路并行，超时抓原生栈并终止当轮。
     - name: Soak ${{ env.ITERATIONS }} iterations
       id: soak
       shell: bash
       timeout-minutes: 150
-      run: |
-        # GitHub 的 bash 步骤默认带 -e -o pipefail：任何"预期内会失败"的命令（比如
-        # 对空目录做 ls）都会直接中止整步。这里成败由下面的判定逻辑决定，关掉它们。
-        set +eo pipefail
-        DUMP_DIR="$RUNNER_TEMP/crash_dumps"
-        mkdir -p soak "$DUMP_DIR"
-
-        # 数 dump 个数：用 find 而不是 ls，空目录下也返回 0。
-        count_dumps() { find "$DUMP_DIR" -maxdepth 1 -name "*.dmp" 2>/dev/null | wc -l; }
-        for i in $(seq 1 "$ITERATIONS"); do
-          before=$(count_dumps)
-
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            # procdump 需要 Windows 形式的路径；它自己拉起 python 并在崩溃时落盘。
-            procdump_posix=$(cygpath -u "$PROCDUMP")
-            dumpdir_win=$(cygpath -w "$DUMP_DIR")
-            "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python -m pytest -q \
-              > "soak/run-$i.log" 2>&1
-          else
-            python -m pytest $TEST_SELECTION -vv --capture=no -o faulthandler_timeout=30 > "soak/run-$i.log" 2>&1 &
-            test_pid=$!
-            (
-              sleep 60
-              if kill -0 "$test_pid" 2>/dev/null; then
-                echo "pytest is still running after 60s; capturing native stacks" > "soak/native-$i.log"
-                if [ "$RUNNER_OS" = "Linux" ]; then
-                  sudo -n gdb -batch -ex "thread apply all bt full" -p "$test_pid" >> "soak/native-$i.log" 2>&1
-                else
-                  sudo -n lldb -p "$test_pid" -o "thread backtrace all" -o "detach" -o "quit" >> "soak/native-$i.log" 2>&1
-                fi
-                kill -TERM "$test_pid" 2>/dev/null || true
-              fi
-            ) &
-            watchdog_pid=$!
-            wait "$test_pid"
-            rc=$?
-            kill "$watchdog_pid" 2>/dev/null || true
-          fi
-          rc=$?
-
-          after=$(count_dumps)
-          new_dumps=$((after - before))
-
-          crashed=0
-          if [ "$rc" -ne 0 ]; then crashed=1; fi
-          if [ "$new_dumps" -gt 0 ]; then crashed=1; fi
-          if ! grep -qE "[0-9]+ passed" "soak/run-$i.log"; then crashed=1; fi
-
-          if [ "$crashed" -ne 0 ]; then
-            echo "failed_iteration=$i" >> "$GITHUB_OUTPUT"
-            echo "SOAK_FAILED=1" >> "$GITHUB_ENV"
-            echo "::error::iteration $i of $ITERATIONS failed (rc=$rc, new_dumps=$new_dumps) — stopping here"
-            echo "----- tail of soak/run-$i.log -----"
-            tail -n 200 "soak/run-$i.log"
-            exit 1
-          fi
-
-          echo "iteration $i ok: $(tail -n 1 "soak/run-$i.log")"
-        done
-        echo "all $ITERATIONS iterations passed"
+      run: python tools/soak.py
 
     # ── 失败时把现场全部传上来 ───────────────────────────────────────────
     # dump 里栈是"地址"，要有符号才能变成函数名。PDB 就在工作区（CI 刚构建完），

@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Versioning policy**: **PATCH**. No public signature or documented behavior changes.
 
 ### Fixed
+- **Windows: release and 32-bit builds no longer compile the watchpoint implementation.**
+  `mem_watch.cpp` now includes the hardware data-breakpoint implementation only when both
+  `ENABLE_YUYUKO` and Windows x64 are active. Release and unsupported 32-bit builds use the
+  `mem_watch_supported() == false` stub instead of failing on `Rip` and `DWORDLONG`.
+
 - **macOS and other backends: concurrent whole reads no longer intermittently hang in completion batching.**
   `PyOperation::complete_locked()` used to mark the last outstanding operation complete before
   converting and pushing its result. A final flush could therefore drain only part of the batch,
