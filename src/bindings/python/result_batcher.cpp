@@ -195,6 +195,10 @@ bool ResultBatcher::push(PyObject *set_fn, PyObject *val) {
             m_has_pending = true;
         }
         m_batch.push_back({set_fn, val});
+        if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
+            std::fprintf(stderr, "[DEBUG-whole] push this=%p entries=%zu\n",
+                         static_cast<void*>(this), m_batch.size());
+        }
 
         // ── Update adaptive threshold ─────────────────────────────────────
         // 中位数是慢变量：每 ADAPTIVE_UPDATE_INTERVAL 次完成重算一次即可，
