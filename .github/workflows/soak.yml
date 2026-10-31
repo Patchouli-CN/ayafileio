@@ -100,6 +100,8 @@ jobs:
     - name: Enable core dumps (Linux)
       if: runner.os == 'Linux'
       run: |
+        sudo apt-get update
+        sudo apt-get install -y gdb
         ulimit -c unlimited || true
         sudo sysctl -w kernel.core_pattern='core.%p' || true
         mkdir -p "$RUNNER_TEMP/crash_dumps"
@@ -145,7 +147,11 @@ jobs:
               sleep 60
               if kill -0 "$test_pid" 2>/dev/null; then
                 echo "pytest is still running after 60s; capturing native stacks" > "soak/native-$i.log"
-                sudo -n lldb -p "$test_pid" -o "thread backtrace all" -o "detach" -o "quit" >> "soak/native-$i.log" 2>&1
+                if [ "$RUNNER_OS" = "Linux" ]; then
+                  sudo -n gdb -batch -ex "thread apply all bt full" -p "$test_pid" >> "soak/native-$i.log" 2>&1
+                else
+                  sudo -n lldb -p "$test_pid" -o "thread backtrace all" -o "detach" -o "quit" >> "soak/native-$i.log" 2>&1
+                fi
                 kill -TERM "$test_pid" 2>/dev/null || true
               fi
             ) &
