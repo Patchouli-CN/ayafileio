@@ -66,14 +66,13 @@ jobs:
 
   basic-tests:
     name: Build and Test
-    # main 的 workflow_run 已经在触发前完成基础测试；tag/手动发版在这里补齐。
-    if: ${{ github.event_name != 'workflow_run' }}
+    # 所有发布都先跑基础测试，不能让条件跳过破坏后续依赖。
     uses: ./.github/workflows/test.yml
 
   soak:
     name: Soak 100 iterations before release
     needs: [check-version, basic-tests]
-    # basic-tests 在 workflow_run 下刻意 skipped；其余情况必须成功，失败则不得发版。
+    # 基础测试失败时不得发版。
     if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
     uses: ./.github/workflows/soak.yml
     with:
