@@ -14,7 +14,7 @@ Only the latest release receives security updates. Versions older than the lates
 **Please do not open a public issue.** Instead, report vulnerabilities privately via one of:
 
 - Email: [3072252442@qq.com](mailto:3072252442@qq.com)
-- GitHub: [Security Advisories](https://github.com/SatoriKomeij/ayafileio/security/advisories/new) (recommended)
+- GitHub: [Security Advisories](https://github.com/SaigyoujYuyuko/ayafileio/security/advisories/new) (recommended)
 
 You should receive a response within 7 days. We aim to triage all reports and release a fix within 30 days of confirmation.
 

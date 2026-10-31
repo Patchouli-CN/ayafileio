@@ -14,7 +14,7 @@
 **请勿公开提 Issue。** 请通过以下方式私下报告漏洞：
 
 - 邮箱：[3072252442@qq.com](mailto:3072252442@qq.com)
-- GitHub：[安全通告](https://github.com/SatoriKomeij/ayafileio/security/advisories/new)（推荐）
+- GitHub：[安全通告](https://github.com/SaigyoujYuyuko/ayafileio/security/advisories/new)（推荐）
 
 我们将在 7 天内回复，确认后 30 天内发布修复。
 

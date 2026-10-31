@@ -1,10 +1,10 @@
 # ayafileio 使用指南
 
-[English](https://github.com/SatoriKomeij/ayafileio/blob/main/docs/USAGE.md)
+[English](https://github.com/SaigyoujYuyuko/ayafileio/blob/main/docs/USAGE.md)
 
 本文档覆盖 ayafileio 的日常用法：打开文件、读写 API、定位 I/O、批量
 操作、配置与迁移说明。性能数据与后端架构见
-[README](https://github.com/SatoriKomeij/ayafileio/blob/main/README_CN.md)。
+[README](https://github.com/SaigyoujYuyuko/ayafileio/blob/main/README_CN.md)。
 
 ## 目录
 
