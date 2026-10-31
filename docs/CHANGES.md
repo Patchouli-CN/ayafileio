@@ -5,10 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.4] - 2026-10-31
 
-> **Versioning policy**: **PATCH**. No public signature is added or removed; two internal read
-> paths get faster without changing any documented behavior.
+> **Versioning policy**: **PATCH**. No public signature or documented behavior changes.
 
 ### Fixed
 - **Windows IOCP: completion workers no longer dereference null batcher snapshots.**

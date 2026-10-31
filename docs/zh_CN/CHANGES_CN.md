@@ -5,9 +5,9 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [未发布]
+## [2.0.4] - 2026-10-31
 
-> **版本策略**：**PATCH**。无公开签名增减；两条内部读取路径变快，已文档化行为不变。
+> **版本策略**：**PATCH**。无公开签名或已文档化行为变化。
 
 ### 修复
 - **Windows IOCP：完成 worker 不再解引用空的 batcher 快照。**
