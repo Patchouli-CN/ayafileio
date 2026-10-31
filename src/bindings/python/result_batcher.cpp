@@ -46,10 +46,6 @@ ResultBatcher::ResultBatcher(PyObject *loop, size_t threshold,
             m_dispatch_pending.store(false, std::memory_order_release);
             m_has_pending = false;
         }
-        if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
-            std::fprintf(stderr, "[DEBUG-whole] drain this=%p entries=%zu\n",
-                         static_cast<void*>(this), local.size());
-        }
         for (auto &e : local) {
             if (e.set_fn && e.val) {
                 PyObject *r = PyObject_CallFunctionObjArgs(e.set_fn, e.val, nullptr);
@@ -195,10 +191,6 @@ bool ResultBatcher::push(PyObject *set_fn, PyObject *val) {
             m_has_pending = true;
         }
         m_batch.push_back({set_fn, val});
-        if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
-            std::fprintf(stderr, "[DEBUG-whole] push this=%p entries=%zu\n",
-                         static_cast<void*>(this), m_batch.size());
-        }
 
         // ── Update adaptive threshold ─────────────────────────────────────
         // 中位数是慢变量：每 ADAPTIVE_UPDATE_INTERVAL 次完成重算一次即可，
@@ -281,12 +273,6 @@ void ResultBatcher::schedule_drain() {
         return;
     }
 
-    if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
-        std::fprintf(stderr,
-                     "[DEBUG-whole] schedule this=%p entries=%zu outstanding=%ld dispatch=%d\n",
-                     static_cast<void*>(this), m_batch.size(), m_outstanding.load(),
-                     static_cast<int>(m_dispatch_pending.load()));
-    }
     PyObject *r = PyObject_CallMethod(loop, "call_soon_threadsafe", "O", m_drain_cb);
     if (!r) {
         PyObject *type = nullptr;

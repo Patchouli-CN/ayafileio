@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Versioning policy**: **PATCH**. No public signature or documented behavior changes.
 
 ### Fixed
+- **Completion batching no longer strands results when workers finish concurrently.**
+  `PyOperation::complete_locked()` used to mark the last outstanding operation complete before
+  converting and pushing its result. A final flush could therefore drain only part of the batch,
+  while later pushes had no flush left to schedule them and their Futures waited forever. The
+  completion counter is now updated after the result is pushed, so the last flush includes every
+  completed result. The repeated concurrent whole-read regression now runs 100 rounds with a
+  timeout.
+
 - **Windows IOCP: completion workers no longer dereference null batcher snapshots.**
   `BatcherRegistry::find_live_locked()` temporarily represents a retired event loop with a null
   entry before removing it on the next lock acquisition. `snapshot()` copied that placeholder,

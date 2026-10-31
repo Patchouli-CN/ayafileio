@@ -96,15 +96,21 @@ async def test_many_propagates_first_failure(tmp_path):
 
 
 async def test_concurrent_reads_are_independent(tmp_path):
-    """并发跑一批，确认每一份内容都属于它自己的路径（不是错位/串数据）。"""
+    """连续 100 轮并发读取：内容独立，且任何一轮都不得因漏投递而卡住。"""
     paths = []
+    expected = []
     for index in range(120):
         path = tmp_path / f"c{index}.bin"
-        path.write_bytes(_payload(index))
+        payload = _payload(index)
+        path.write_bytes(payload)
         paths.append(path)
-    results = await ayafileio.read_bytes_many(paths, max_concurrency=32)
-    for index, data in enumerate(results):
-        assert data == _payload(index), f"第 {index} 份内容不符"
+        expected.append(payload)
+    for _ in range(100):
+        results = await asyncio.wait_for(
+            ayafileio.read_bytes_many(paths, max_concurrency=32),
+            timeout=5,
+        )
+        assert results == expected
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="句柄计数用 Windows API")

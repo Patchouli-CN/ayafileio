@@ -10,6 +10,12 @@
 > **版本策略**：**PATCH**。无公开签名或已文档化行为变化。
 
 ### 修复
+- **完成批处理不再在 worker 并发收尾时遗留结果。**
+  `PyOperation::complete_locked()` 此前先在计数里完成最后一个在飞操作，再转换并 push 结果。
+  最后一次 flush 因此可能只交付部分批次；后续 push 再没有 flush 负责调度，对应 Future 永久等待。
+  现在改为结果 push 后再更新完成计数，保证最后一次 flush 包含全部已完成结果。并发整文件回归
+  测试也加强为带超时的连续 100 轮。
+
 - **Windows IOCP：完成 worker 不再解引用空的 batcher 快照。**
   `BatcherRegistry::find_live_locked()` 会先把已退役事件循环的条目置空，再到下次加锁时删除；
   `snapshot()` 此前也会复制这个中间态占位，导致 `next_timeout_ms()` 对空指针调用

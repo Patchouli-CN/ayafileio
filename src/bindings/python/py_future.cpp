@@ -2,8 +2,6 @@
 
 #include "py_error.hpp"
 
-#include <cstdio>
-#include <cstdlib>
 #include <utility>
 
 namespace ayafileio::python {
@@ -144,18 +142,9 @@ PyObject* PyOperation::convert(core::Completion& result, bool& failed) {
 
 void PyOperation::complete_locked(core::Completion result, bool inline_completion) {
     bool last = false;
-    if (submitted_.exchange(false)) last = batcher_->op_completed();
-
     bool failed = result.failed();
     PyObject* value = convert(result, failed);
     PyObject* setter = failed ? set_exception_ : set_result_;
-    if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
-        std::fprintf(stderr,
-                     "[DEBUG-whole] convert this=%p value=%p setter=%p last=%d inline=%d\n",
-                     static_cast<void*>(this), static_cast<void*>(value),
-                     static_cast<void*>(setter), static_cast<int>(last),
-                     static_cast<int>(inline_completion));
-    }
 
     if (inline_completion) {
         if (setter && value) {
@@ -171,6 +160,7 @@ void PyOperation::complete_locked(core::Completion result, bool inline_completio
             }
         }
         Py_XDECREF(value);
+        if (submitted_.exchange(false)) last = batcher_->op_completed();
         if (last && batcher_->has_pending()) batcher_->flush();
         return;
     }
@@ -178,9 +168,13 @@ void PyOperation::complete_locked(core::Completion result, bool inline_completio
     if (setter && value) {
         Py_INCREF(setter);
         const bool threshold = batcher_->push(setter, value);
+        if (submitted_.exchange(false)) last = batcher_->op_completed();
         if (threshold || last) batcher_->flush();
     } else {
         Py_XDECREF(value);
+        if (submitted_.exchange(false) && batcher_->op_completed() && batcher_->has_pending()) {
+            batcher_->flush();
+        }
     }
 }
 

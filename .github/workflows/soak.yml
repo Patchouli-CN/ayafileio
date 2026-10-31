@@ -23,11 +23,6 @@ on:
         required: false
         default: ""
         type: string
-      debug_whole:
-        description: "记录原生整文件读取与 batcher 回投轨迹"
-        required: false
-        default: false
-        type: boolean
   workflow_call:
     inputs:
       iterations:
@@ -40,11 +35,6 @@ on:
         required: false
         default: ""
         type: string
-      debug_whole:
-        description: "记录原生整文件读取与 batcher 回投轨迹"
-        required: false
-        default: false
-        type: boolean
   schedule:
     - cron: "0 18 * * *"
 
@@ -82,7 +72,6 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       ITERATIONS: ${{ inputs.iterations || github.event.inputs.iterations || '100' }}
       TEST_SELECTION: ${{ inputs.test_selection || '' }}
-      AYAFILEIO_DEBUG_WHOLE: ${{ inputs.debug_whole && '1' || '' }}
     steps:
     - uses: actions/checkout@v6.0.2
 
