@@ -139,8 +139,8 @@ jobs:
             "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python -m pytest -q \
               > "soak/run-$i.log" 2>&1
           else
-            # 偶发阻塞必须留下具体测试名和超时 Python 栈，不能只有进度百分比。
-            python -m pytest -vv --capture=no -o faulthandler_timeout=30 > "soak/run-$i.log" 2>&1
+            # 单轮硬超时：阻塞必须变成失败并上传日志，不能一直占到整个 job 的时限。
+            python -c 'import subprocess, sys; subprocess.run([sys.executable, "-m", "pytest", "-vv", "--capture=no", "-o", "faulthandler_timeout=30"], timeout=120, check=True)' > "soak/run-$i.log" 2>&1
           fi
           rc=$?
 
