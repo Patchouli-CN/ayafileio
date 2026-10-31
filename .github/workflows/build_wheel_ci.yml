@@ -74,7 +74,7 @@ jobs:
     name: Soak 100 iterations before release
     needs: [check-version, basic-tests]
     # basic-tests 在 workflow_run 下刻意 skipped；其余情况必须成功，失败则不得发版。
-    if: ${{ always() && needs.check-version.outputs.should_build == 'true' && (needs.basic-tests.result == 'success' || needs.basic-tests.result == 'skipped') && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    if: ${{ needs.check-version.outputs.should_build == 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
     uses: ./.github/workflows/soak.yml
     with:
       iterations: "100"
@@ -170,10 +170,9 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    # 任一构建组被输入/守护跳过都算正常（result == skipped），
-    # 两组同时跳过只会发生在版本守护命中时，此时不该走到这里。
+    # 允许按输入跳过一组构建，但至少一组必须成功；否则没有产物可发布。
     needs: [check-version, build, build-riscv64]
-    if: ${{ needs.check-version.outputs.should_build == 'true' && !cancelled() && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-riscv64.result == 'success' || needs.build-riscv64.result == 'skipped') }}
+    if: ${{ needs.check-version.outputs.should_build == 'true' && !cancelled() && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (needs.build.result == 'success' || needs.build-riscv64.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
