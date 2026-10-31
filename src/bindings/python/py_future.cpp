@@ -2,6 +2,8 @@
 
 #include "py_error.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 namespace ayafileio::python {
@@ -147,6 +149,13 @@ void PyOperation::complete_locked(core::Completion result, bool inline_completio
     bool failed = result.failed();
     PyObject* value = convert(result, failed);
     PyObject* setter = failed ? set_exception_ : set_result_;
+    if (std::getenv("AYAFILEIO_DEBUG_WHOLE")) {
+        std::fprintf(stderr,
+                     "[DEBUG-whole] convert this=%p value=%p setter=%p last=%d inline=%d\n",
+                     static_cast<void*>(this), static_cast<void*>(value),
+                     static_cast<void*>(setter), static_cast<int>(last),
+                     static_cast<int>(inline_completion));
+    }
 
     if (inline_completion) {
         if (setter && value) {
