@@ -67,7 +67,26 @@ jobs:
   basic-tests:
     name: Build and Test
     # 所有发布都先跑基础测试，不能让条件跳过破坏后续依赖。
-    uses: ./.github/workflows/test.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CMAKE_BUILD_TYPE: Release
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.15"
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liburing-dev
+    - name: Build ayafileio
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+    - name: Run tests
+      run: python -m pytest -q
 
   soak:
     name: Soak 100 iterations before release
