@@ -139,7 +139,8 @@ jobs:
             "$procdump_posix" -accepteula -ma -e -x "$dumpdir_win" python -m pytest -q \
               > "soak/run-$i.log" 2>&1
           else
-            python -m pytest -q > "soak/run-$i.log" 2>&1
+            # 偶发阻塞必须留下具体测试名和超时 Python 栈，不能只有进度百分比。
+            python -m pytest -vv --capture=no -o faulthandler_timeout=30 > "soak/run-$i.log" 2>&1
           fi
           rc=$?
 
